@@ -44,7 +44,11 @@ export class ScriptStubDriver implements ExecutorDriver {
   private stopped = false;
   private startedCount = 0;
 
-  constructor(private readonly scripts: StubScript[]) {}
+  private readonly scripts: StubScript[];
+
+  constructor(scripts: StubScript | StubScript[]) {
+    this.scripts = Array.isArray(scripts) ? scripts : [scripts];
+  }
 
   start(task: DriverTask, host: DriverHost): void {
     void task;

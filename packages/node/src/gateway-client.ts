@@ -13,11 +13,11 @@ export interface GatewayClientOptions {
   nodeToken: string;
   params?: QlongParams;
   outbox?: OutboxStore;
-  /** A4 闸1:入站验签;false/抛错 → 静默丢弃 + 计数(不回调 onEnvelope) */
-  verifyInbound?: (env: EnvelopeV1) => Promise<boolean>;
   onEnvelope?: (env: EnvelopeV1) => void;
   onAck?: (ack: { ack_type: string; msg_id: string; reason?: string }) => void;
   onRoutingDenied?: (d: { rule: string; reason_code: string; msg_id: string }) => void;
+  /** A4 闸1:入站验签;false/抛错 → 静默丢弃 + 计数(不回调 onEnvelope) */
+  verifyInbound?: (env: EnvelopeV1) => Promise<boolean>;
   onClose?: (code: number) => void;
   /** 重连基础退避(指数,封顶 5s) */
   backoffMs?: number;
@@ -36,12 +36,34 @@ export class GatewayClient {
   private reconnectAttempts = 0;
   private closedByUser = false;
 
+  /** 回调为可覆写实例字段(会话层在构造后绑定 onEnvelope) */
+  onEnvelope: (env: EnvelopeV1) => void = () => {};
+  onAck: (ack: { ack_type: string; msg_id: string; reason?: string }) => void = () => {};
+  onRoutingDenied: (d: { rule: string; reason_code: string; msg_id: string }) => void = () => {};
+  onClose: (code: number) => void = () => {};
   constructor(private readonly opts: GatewayClientOptions) {
     this.outbox = opts.outbox ?? new MemoryOutbox();
+    this.onEnvelope = opts.onEnvelope ?? (() => {});
+    this.onAck = opts.onAck ?? (() => {});
+    this.onRoutingDenied = opts.onRoutingDenied ?? (() => {});
+    this.onClose = opts.onClose ?? (() => {});
   }
 
   /** 建连 + 首帧认证;auth_ok 才 resolve */
+  private openPromise?: Promise<void>;
+  private reconnectTimer?: NodeJS.Timeout;
+
+  /** 单飞:并发 open 共用同一建连(M2-03 客户端单飞) */
   open(): Promise<void> {
+    if (this.openPromise) return this.openPromise;
+    const p = this.doOpen().finally(() => {
+      this.openPromise = undefined;
+    });
+    this.openPromise = p;
+    return p;
+  }
+
+  private doOpen(): Promise<void> {
     this.closedByUser = false;
     this.state = 'connecting';
     return new Promise((resolve, reject) => {
@@ -70,7 +92,7 @@ export class GatewayClient {
       });
       ws.on('close', (code) => {
         this.state = this.closedByUser ? 'closed' : 'idle';
-        this.opts.onClose?.(code);
+        this.onClose(code);
         if (!settled) {
           settled = true;
           reject(new Error(`gateway closed during handshake (${code})`));
@@ -110,6 +132,10 @@ export class GatewayClient {
   close(): void {
     this.closedByUser = true;
     this.state = 'closed';
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.ws?.close(1000, 'client closing');
   }
 
@@ -130,7 +156,7 @@ export class GatewayClient {
     if (f.frame === 'ack') {
       const ack = f as unknown as { ack_type: string; msg_id: string; reason?: string };
       this.outbox.remove(ack.msg_id);
-      this.opts.onAck?.(ack);
+      this.onAck(ack);
       const waiter = this.ackWaiters.get(ack.msg_id);
       if (waiter) {
         this.ackWaiters.delete(ack.msg_id);
@@ -141,7 +167,7 @@ export class GatewayClient {
     if (f.frame === 'routing.denied') {
       const d = f as unknown as { rule: string; reason_code: string; msg_id: string };
       this.outbox.remove(d.msg_id); // routing.denied = 终局,不重发
-      this.opts.onRoutingDenied?.(d);
+      this.onRoutingDenied(d);
       const waiter = this.ackWaiters.get(d.msg_id);
       if (waiter) {
         this.ackWaiters.delete(d.msg_id);
@@ -159,12 +185,12 @@ export class GatewayClient {
       }
       const verify = this.opts.verifyInbound;
       if (!verify) {
-        this.opts.onEnvelope?.(env);
+        this.onEnvelope(env);
         return;
       }
       verify(env)
         .then((ok) => {
-          if (ok) this.opts.onEnvelope?.(env);
+          if (ok) this.onEnvelope(env);
           else this.rejectedInbound += 1;
         })
         .catch(() => {
@@ -174,13 +200,14 @@ export class GatewayClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.closedByUser) return;
+    if (this.closedByUser || this.reconnectTimer !== undefined || this.openPromise) return;
     this.reconnectAttempts += 1;
     const base = this.opts.backoffMs ?? 25;
     const delay = Math.min(base * 2 ** Math.min(this.reconnectAttempts, 6), 5_000);
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
       this.open().catch(() => {
-        /* 由 close 分支继续退避 */
+        /* 继续退避 */
       });
     }, delay);
   }
