@@ -3,7 +3,7 @@
   "compilerOptions": {
     "types": ["node"],
     "baseUrl": ".",
-    "paths": { "@qlong/core": ["../core/src/index.ts"] }
+    "paths": { "@qlong/core": ["../core/src/index.ts"], "@qlong/registry": ["../registry/src/index.ts"] }
   },
   "include": ["src", "test", "vitest.config.ts"]
 }
