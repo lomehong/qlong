@@ -60,26 +60,27 @@
 
 ## 子系统雅称(仅用于文档与注释,工程标识一律用英文)
 
-| 系统 | 雅称 | 典故 |
-|------|------|------|
-| 注册中心 | 谱牒 | 古代谱局掌名册户籍——管"你是谁、在不在" |
-| 通讯服务器 | 驿传 | 驿站递铺:在线即递,离线留存待领 |
-| 分发服务器 | 书坊 | 宋以来民间刻书卖书之所,即"应用商店" |
-| 团队 | 社 | 结社之社:同社互信,社外不通 |
-| 任务派发 | 流觞 | 曲水流觞:杯流至谁前,谁赋诗——消息随流而至,接者任之 |
-| 能力档案 | 山海经 | 众机异能之图谱 |
+| 系统 | 工程名 | 雅称 | 典故 |
+|------|--------|------|------|
+| 注册中心 | registry | 谱牒 | 古代谱局掌名册户籍——管"你是谁、在不在" |
+| 通讯网关 | gateway | 驿传 | 驿站递铺:在线即递,离线留存待领 |
+| 分发服务器 | distributor | 书坊 | 宋以来民间刻书卖书之所,即"应用商店" |
+| 团队 | team | 社 | 结社之社:同社互信,社外不通 |
+| 任务派发 | task | 流觞 | 曲水流觞:杯流至谁前,谁赋诗——消息随流而至,接者任之 |
+| 能力档案 | capability | 山海经 | 众机异能之图谱 |
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
 | [docs/QLONG_DESIGN_NOTES.md](./docs/QLONG_DESIGN_NOTES.md) | 设计纪要:愿景、架构、决策 D1–D5 |
-| [docs/QLONG_DESIGN_01_MSG_PROTOCOL.md](./docs/QLONG_DESIGN_01_MSG_PROTOCOL.md) | 消息信封与派单可靠性语义(D6–D12) |
-| [docs/QLONG_DESIGN_02_REGISTRY_TRUST.md](./docs/QLONG_DESIGN_02_REGISTRY_TRUST.md) | 注册中心数据模型与信任边界(D13–D17) |
-| [docs/QLONG_DESIGN_03_CAPABILITY.md](./docs/QLONG_DESIGN_03_CAPABILITY.md) | 能力声明与感知派单(D18–D21) |
+| [docs/QLONG_DESIGN_01_MSG_PROTOCOL.md](./docs/QLONG_DESIGN_01_MSG_PROTOCOL.md) | 消息信封与派单可靠性语义(D6–D26) |
+| [docs/QLONG_DESIGN_02_REGISTRY_TRUST.md](./docs/QLONG_DESIGN_02_REGISTRY_TRUST.md) | 注册中心数据模型与信任边界(D27–D30) |
+| [docs/QLONG_DESIGN_03_CAPABILITY.md](./docs/QLONG_DESIGN_03_CAPABILITY.md) | 能力声明、感知派单与远端任务执行档案(D31–D33) |
+| [docs/QUNLONG_DESIGN_REVIEW_REPORT.md](./docs/QUNLONG_DESIGN_REVIEW_REPORT.md) | 评审委员会报告(60 条意见,全部处置) |
 
 ## 状态
 
-架构方向已确定,详细设计中:01–03 篇初稿已成并经一轮评审修订(ACL from 钉扎、rpc 全量签名、远端任务执行档案)。**下一设计单元:§8.4 文件协同与产物回传 + 双机纸面端到端走查**(同场定义单机执行模型:offer 如何实例化为会话、产物如何映射回会话文件);其后:§8.6 离线弱网(含收件箱配额/背压)、§8.5 分发安装器。
+架构方向已确定。01–03 篇详细设计已成,并经**两轮评审修订**(第一轮:from 钉扎、rpc 签名、执行档案;第二轮:评审委员会 60 条意见全部处置——R1 心跳去重修复、JCS 规范序列化、信封 exp 新鲜性、R0 attempt 闸门、发送侧 outbox、A1 目录锚定、回声分级、纪元现势性等,详见评审报告)。**下一设计单元:§8.4 文件协同与产物回传 + 双机纸面端到端走查**(§8.5 分发安装器的纸面最小件并行;同场定义单机执行模型——基座为原版 deepseek-harness,TypeScript)。
 
 > 商用前请自查商标与域名占用。
