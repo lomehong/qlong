@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "type": "task.offer",
+  "msg_id": "4447ae26-6e9c-4885-bf4d-3b14624c269e",
+  "ts": "2026-09-06T12:00:00+08:00",
+  "exp": "2026-09-07T12:00:00+08:00",
+  "from": {
+    "node_id": "3853e8c3-1631-46b8-b9c7-ceb21f9bc009",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256",
+    "key_epoch": 1
+  },
+  "to": {
+    "node_id": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256"
+  },
+  "trace": {
+    "trace_id": "7b8aa79f-d153-458d-ac9d-70e095fb625b",
+    "parent_span": null,
+    "origin_node": "3853e8c3-1631-46b8-b9c7-ceb21f9bc009"
+  },
+  "hops": 0,
+  "task_id": "a33378b5-7e9c-4d74-abe4-dc37069d966b",
+  "attempt": 1,
+  "body": {
+    "kind": "aid",
+    "summary": "口头确认 5432 端口是否可达",
+    "offer_ttl_ms": 10000,
+    "lease_ms": 120000
+  }
+}

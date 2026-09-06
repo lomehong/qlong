@@ -1,0 +1,33 @@
+{
+  "spec": "RFC 8785 JCS golden vectors — cross-language signature interop (QLONG_DESIGN_01 §3.3.2 / D23)",
+  "cases": [
+    {
+      "name": "rfc8785-numbers-string-literals",
+      "input": {
+        "numbers": [
+          333333333.3333333,
+          1e+30,
+          4.5,
+          0.002,
+          1e-27
+        ],
+        "string": "€$\u000f\nA'B\"\\\\\"/",
+        "literals": [
+          null,
+          true,
+          false
+        ]
+      },
+      "expected": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}"
+    },
+    {
+      "name": "utf16-key-order",
+      "input": {
+        "€uro": 1,
+        "alpha": 3,
+        "Beta": 2
+      },
+      "expected": "{\"Beta\":2,\"alpha\":3,\"€uro\":1}"
+    }
+  ]
+}

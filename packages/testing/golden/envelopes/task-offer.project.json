@@ -1,0 +1,51 @@
+{
+  "v": 1,
+  "type": "task.offer",
+  "msg_id": "620c354a-cc29-4e43-8946-74351bf2c3bf",
+  "ts": "2026-09-06T12:00:00+08:00",
+  "exp": "2026-09-07T12:00:00+08:00",
+  "from": {
+    "node_id": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256",
+    "key_epoch": 1
+  },
+  "to": {
+    "node_id": "3853e8c3-1631-46b8-b9c7-ceb21f9bc009",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256"
+  },
+  "trace": {
+    "trace_id": "705537d9-46b6-476b-ade2-72cc8deddc7c",
+    "parent_span": null,
+    "origin_node": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a"
+  },
+  "hops": 0,
+  "task_id": "5b4592c3-41fc-4eed-a222-76de0bab15b2",
+  "attempt": 1,
+  "body": {
+    "kind": "project",
+    "summary": "为示例仓库补齐 README 的安装一节",
+    "contract": {
+      "deliverables": [
+        {
+          "path": "README.md",
+          "desc": "新增 ## 安装 小节"
+        }
+      ],
+      "acceptance": [
+        {
+          "check": "README.md 含 ## 安装 小节",
+          "machine_checkable": true
+        }
+      ]
+    },
+    "offer_ttl_ms": 60000,
+    "lease_ms": 300000,
+    "project": {
+      "project_id": "189f6d1e-d9f8-4bae-9873-3e486a47046c",
+      "lead_node": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a"
+    },
+    "required_caps": [
+      "tool:node@20"
+    ]
+  }
+}

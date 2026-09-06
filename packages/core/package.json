@@ -1,0 +1,19 @@
+{
+  "name": "@qlong/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.0.0",
+    "@noble/hashes": "^2.4.0",
+    "canonicalize": "^4.0.0"
+  },
+  "devDependencies": {
+    "fast-check": "^4.9.0"
+  }
+}
