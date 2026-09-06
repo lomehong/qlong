@@ -1,0 +1,12 @@
+{
+  "name": "@qlong/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "qlong": "./dist/cli.mjs" },
+  "scripts": {
+    "build": "node build.mjs",
+    "demo": "node dist/cli.mjs demo",
+    "takeover": "node dist/cli.mjs takeover"
+  }
+}
