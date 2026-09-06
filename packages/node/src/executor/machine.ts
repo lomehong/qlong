@@ -231,7 +231,10 @@ export class ExecutorMachine {
   onHeartbeatAcked(now: number): ExecAction[] {
     if (this.rec.state !== 'running') return [];
     this.rec.leaseSelfDeadline = now + (this.rec.leaseConfirmedMs ?? this.params.leaseMsProject);
-    return [{ kind: 'schedule', timer: 'lease_self', atMs: this.rec.leaseSelfDeadline }];
+    return [
+      { kind: 'cancelTimers', timers: ['lease_self'] },
+      { kind: 'schedule', timer: 'lease_self', atMs: this.rec.leaseSelfDeadline },
+    ];
   }
 
   /** 自身租约超时:暂停产生新副作用(R3),不强求杀进程 */
