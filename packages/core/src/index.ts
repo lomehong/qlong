@@ -9,4 +9,4 @@ export * from './freshness.js';
 export * from './attempt-gate.js';
 export * from './dedup.js';
 export * from './audit.js';
-export * from './frames.js';
+export * from './frames.js';export * from './caps.js';
