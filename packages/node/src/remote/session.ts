@@ -38,6 +38,8 @@ export interface RemoteSessionOptions {
   validateAcceptance?: (b: Record<string, unknown>) => boolean;
   /** A4 闸1:入站验签(公钥按纪元查目录)。P12:未配置 = 入站全拒 */
   verifyInbound?: (env: EnvelopeV1) => Promise<boolean>;
+  /** 闸5:confirm 级 requires 的本地人确认通道(缺省 = 无通道 → 一律拒绝) */
+  confirmHandler?: (req: { cls: string; value: string; reason: string }, offer: Record<string, unknown>) => boolean;
   pickTarget?: (taskId: string, nextAttempt: number, excluded: Record<string, 'permanent' | 'once'>) => string | undefined;
   onTerminal?: (taskId: string, state: string, resultBody?: Record<string, unknown>) => void;
   onEscalate?: (summary: { task_id: string; attempts: unknown[]; final_reason: string }) => void;
@@ -92,6 +94,7 @@ export class RemoteNodeSession {
         capabilities: opts.capabilities,
         policy: opts.policy,
         load: opts.load,
+        confirmHandler: opts.confirmHandler,
       });
     // A4(评审 M3-SEC-1):入站验签缺省拒绝 —— 未配置 verifyInbound 不接收任何任务
     opts.client.verifyInbound = async (env) => {

@@ -46,11 +46,19 @@ export type ExecAction =
   | { kind: 'schedule'; timer: 'ttl' | 'lease_self' | 'heartbeat'; atMs: number }
   | { kind: 'cancelTimers'; timers: Array<'ttl' | 'lease_self' | 'heartbeat'> };
 
+export interface ConfirmRequest {
+  cls: string;
+  value: string;
+  reason: string;
+}
+
 export interface ExecutorOptions {
   params?: QlongParams;
   capabilities?: () => string[];
   policy?: LocalPolicy;
   load?: () => LoadSnapshot | undefined;
+  /** 闸5(03 §6.2):confirm 级 requires 的本地人确认通道;缺省 = 无通道 → 一律拒绝(P12) */
+  confirmHandler?: (req: ConfirmRequest, offer: Record<string, unknown>) => boolean;
 }
 
 const ALL_TIMERS: Array<'ttl' | 'lease_self' | 'heartbeat'> = ['ttl', 'lease_self', 'heartbeat'];
@@ -185,6 +193,57 @@ export class ExecutorMachine {
       this.rec = { state: 'rejected', lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
       return [this.outFor(o, 'task.reject', { reason_code: 'busy', ...(load.detail ?? {}) })];
     }
+    // 闸5:执行档案(03 §6.1/§6.2,D22/D33)—— requires 中 confirm 级需本地人确认;
+    // 无确认通道(v1 无 UI)或确认拒绝 → policy_denied(档案收窄权永远在执行方,P13)
+    const requiresList = Array.isArray(o.body.requires) ? (o.body.requires as Array<Record<string, unknown>>) : [];
+    const confirmReq = requiresList.find((r) => r && r.cls === 'confirm') as ConfirmRequest | undefined;
+    if (confirmReq) {
+      if (!this.opts.confirmHandler) {
+        return [
+          (() => {
+            this.rec = {
+              state: 'rejected',
+              task_id: o.task_id,
+              attempt: o.attempt,
+              from: o.from,
+              msg_id: o.msg_id,
+              offerBody: o.body,
+              receivedAt: o.now,
+              lastSeq: 0,
+              driverCompleted: false,
+              cancelReceived: false,
+              paused: false,
+            };
+            return this.outFor(o, 'task.reject', { reason_code: 'policy_denied', detail: { reason: 'confirm_required_no_channel' } });
+          })(),
+        ];
+      }
+      const approved = this.opts.confirmHandler(
+        { cls: String(confirmReq.cls), value: String(confirmReq.value ?? ''), reason: String(confirmReq.reason ?? '') },
+        o.body,
+      );
+      if (!approved) {
+        return [
+          (() => {
+            this.rec = {
+              state: 'rejected',
+              task_id: o.task_id,
+              attempt: o.attempt,
+              from: o.from,
+              msg_id: o.msg_id,
+              offerBody: o.body,
+              receivedAt: o.now,
+              lastSeq: 0,
+              driverCompleted: false,
+              cancelReceived: false,
+              paused: false,
+            };
+            return this.outFor(o, 'task.reject', { reason_code: 'policy_denied', detail: { reason: 'confirmed_denied' } });
+          })(),
+        ];
+      }
+    }
+
     // 接单:确认租约(v1 原值确认;下调为执行方策略位)
     const offeredLease = typeof o.body.lease_ms === 'number' ? o.body.lease_ms : this.params.leaseMsProject;
     this.rec = {
