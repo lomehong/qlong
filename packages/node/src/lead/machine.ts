@@ -5,7 +5,7 @@
  * 依据:R0/R2/R3/R4/R5/R6/R7/R8/D25;终态优先级 done > closed > failed > escalated。
  */
 import type { AuditEvent, FailCode, QlongParams } from '@qlong/core';
-import { DEFAULT_PARAMS, defaultOfferTtlMs, lostAfterMs } from '@qlong/core';
+import { DEFAULT_PARAMS, defaultOfferTtlMs, lostAfterMs, normalizeFailCode, normalizeRejectCode } from '@qlong/core';
 import type { Outbound } from '../wire.js';
 
 export type LeadState =
@@ -204,7 +204,8 @@ export class LeadTaskMachine {
       ];
     }
     if (type === 'task.reject' && fromNode === this.rec.target) {
-      const { code } = normalizeFailCodeOrReject(body.reason_code);
+      // reject 码走 reject 登记表(评审 M1-ARCH:busy 归一为 other 会被误排除)
+      const { code } = normalizeRejectCode(typeof body.reason_code === 'string' ? body.reason_code : 'other');
       this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: 'rejected', reason_code: code });
       this.applyExclusion(code, body);
       // reject 不在 R4 先撤销清单内(节点明确拒绝,无在途执行)→ 直接预算判定
@@ -216,9 +217,13 @@ export class LeadTaskMachine {
   private onRunningMessage(type: string, fromNode: string, body: Record<string, unknown>, now: number): LeadAction[] {
     if (fromNode !== this.rec.target) return [];
     if (type === 'task.progress') {
-      // 心跳即续租(R3);progress 不驱动状态机,seq/乱序由去重层与展示层处理
+      // 心跳即续租(R3);progress 不驱动状态机,seq/乱序由去重层与展示层处理。
+      // 评审 M1-DIST-1:必须先取消旧 lease 定时器,否则存活超首个死线的健康长任务被误判 lost
       this.rec.leaseDeadline = now + lostAfterMs(this.rec.leaseMs, this.params);
-      return [{ kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline }];
+      return [
+        { kind: 'cancelTimers', timers: ['lease'] },
+        { kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline },
+      ];
     }
     if (type === 'task.result') {
       this.rec.resultBody = body;
@@ -257,8 +262,16 @@ export class LeadTaskMachine {
   private onReclaimingMessage(type: string, body: Record<string, unknown>, now: number): LeadAction[] {
     if (this.rec.drainClosed) return [];
     if (type === 'task.result') {
-      // R4 赛跑窗口:reclaiming 收 result → done(I-06)
+      // R4 赛跑窗口:reclaiming 收 result → done(I-06);但验收防线不可绕过(评审 M1-QA)
       this.rec.resultBody = body;
+      if (!this.validateAcceptance(body)) {
+        this.rec.history.push({
+          node: this.rec.target ?? '?',
+          attempt: this.rec.attempt,
+          outcome: 'acceptance_failed',
+        });
+        return [];
+      }
       this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'result_delivered' });
       return this.finish('done');
     }
@@ -303,6 +316,10 @@ export class LeadTaskMachine {
       return this.beginReclaim('reclaim', now);
     }
     if (timer === 'lease' && this.rec.state === 'running') {
+      // 评审 M1-DIST-1:早于当前死线的触发(泄漏/重放)不判 lost,按死线重排
+      if (this.rec.leaseDeadline !== undefined && now < this.rec.leaseDeadline) {
+        return [{ kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline }];
+      }
       // R3 判 lost → reclaim(R4)
       this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'lost' });
       const actions = this.beginReclaim('reclaim', now);
@@ -399,7 +416,7 @@ export class LeadTaskMachine {
   }
 }
 
-/** reject/fail 码均走各自登记表归一(未知码按 other,不报错) */
+/** reject/fail 码统一走 core 登记表归一(未知码按 other,不报错;评审 M1-ARCH:避免语义分叉) */
 function normalizeFailCodeOrReject(raw: unknown): { code: string } {
-  return { code: typeof raw === 'string' ? raw : 'other' };
+  return { code: normalizeFailCode(typeof raw === 'string' ? raw : 'other').code };
 }

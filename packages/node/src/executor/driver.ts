@@ -23,6 +23,8 @@ export interface ExecutorDriver {
   start(task: DriverTask, host: DriverHost): void;
   stop(): void;
   pause(): void;
+  /** 链路恢复后解除暂停(R3 执行方对称计时器的恢复路径,评审 M1-QA) */
+  resume(): void;
 }
 
 export interface StubScript {
@@ -76,5 +78,9 @@ export class ScriptStubDriver implements ExecutorDriver {
 
   pause(): void {
     // 桩无副作用可暂停;真实驱动在此暂停产生新副作用(R3)
+  }
+
+  resume(): void {
+    // 桩同上
   }
 }

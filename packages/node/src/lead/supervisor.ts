@@ -5,13 +5,17 @@
 import type { QlongParams } from '@qlong/core';
 import type { LeadAction, LeadHistoryEntry } from './machine.js';
 import { LeadTaskMachine } from './machine.js';
-import { checkpointLeadMachine, restoreLeadMachine } from './checkpoint.js';
+import { checkpointLeadMachine, pendingTimers, restoreLeadMachine } from './checkpoint.js';
 import type { CheckpointStore } from './store.js';
 
 export interface SupervisorDeps {
   store: CheckpointStore;
   params?: QlongParams;
   validateAcceptance?: (b: Record<string, unknown>) => boolean;
+  /** 恢复后重挂定时器的回调(宿主调度器接入点);评审 M1-ARCH-1 */
+  rearm?: (taskId: string, timers: Array<{ timer: string; atMs: number }>) => void;
+  /** 恢复后处于 drafting(改派意图待续)的任务,由宿主重新派发;评审 M1-QA-5 */
+  onNeedDispatch?: (taskId: string, nextAttempt: number) => void;
 }
 
 export class LeadSupervisor {
@@ -31,15 +35,24 @@ export class LeadSupervisor {
     return m;
   }
 
-  /** 进程重启后调用:从存储恢复全部任务(含终态,供查询/审计) */
-  restoreAll(): string[] {
+  /** 进程重启后调用:从存储恢复全部任务(含终态),重挂定时器并上报改派意图 */
+  restoreAll(): { restored: string[]; needDispatch: string[] } {
+    const restored: string[] = [];
+    const needDispatch: string[] = [];
     for (const taskId of this.deps.store.list()) {
       const blob = this.deps.store.load(taskId);
       if (!blob) continue;
       const m = restoreLeadMachine(blob, this.deps);
       this.machines.set(taskId, m);
+      restored.push(taskId);
+      if (m.terminal) continue;
+      this.deps.rearm?.(taskId, pendingTimers(m));
+      if (m.rec.state === 'drafting') {
+        needDispatch.push(taskId);
+        this.deps.onNeedDispatch?.(taskId, m.rec.attempt + 1);
+      }
     }
-    return [...this.machines.keys()];
+    return { restored, needDispatch };
   }
 
   get(taskId: string): LeadTaskMachine | undefined {

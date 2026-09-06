@@ -6,7 +6,8 @@
  */
 import type { AuditRecord, QlongParams } from '@qlong/core';
 import { DEFAULT_PARAMS, defaultLeaseMs, defaultOfferTtlMs, makeAudit, newId } from '@qlong/core';
-import { LeadTaskMachine, type LeadAction, type LeadTerminal } from '../lead/machine.js';
+import { LeadTaskMachine, type LeadAction, type LeadTerminal, type TimerName } from '../lead/machine.js';
+import { pendingTimers, restoreLeadMachine } from '../lead/checkpoint.js';
 import { ExecutorMachine, type ExecAction } from '../executor/machine.js';
 import { ScriptStubDriver, type DriverHost, type StubScript } from '../executor/driver.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
@@ -37,7 +38,8 @@ export class SingleNodeHarness {
   readonly nodeAId: string;
   readonly nodeBId: string;
   readonly params: QlongParams;
-  readonly lead: LeadTaskMachine;
+  private readonly opts: HarnessOptions;
+  lead: LeadTaskMachine;
   readonly exec: ExecutorMachine;
   readonly driver: ScriptStubDriver;
   audits: AuditRecord[] = [];
@@ -50,6 +52,7 @@ export class SingleNodeHarness {
   private lastOfferBody: Record<string, unknown>;
 
   constructor(opts: HarnessOptions = {}) {
+    this.opts = opts;
     this.params = opts.params ?? DEFAULT_PARAMS;
     this.kind = opts.kind ?? 'project';
     this.taskId = opts.taskId ?? newId();
@@ -87,6 +90,26 @@ export class SingleNodeHarness {
 
   cancelTask(): void {
     this.processLead(this.lead.cancelByUser(this.clock), this.clock);
+  }
+
+  /**
+   * 同机进程重启接管:从检查点恢复牵头方,并按 pendingTimers 重挂定时器
+   * (评审 M1-ARCH-1/M1-QA-5:恢复不重挂 = 接管特性不可用)。
+   * 执行方/驱动不恢复 —— 重启后其工作即丢失,由牵头方租约超时 → 改派闭环兜底。
+   */
+  adoptRestoredLead(blob: string): void {
+    this.lead = restoreLeadMachine(blob, {
+      params: this.params,
+      validateAcceptance: this.opts.validateAcceptance,
+    });
+    for (const t of pendingTimers(this.lead)) {
+      const timer = t.timer as TimerName;
+      this.schedule('lead', timer, t.atMs, () => this.processLead(this.lead.onTimer(timer, t.atMs), t.atMs));
+    }
+    if (this.lead.rec.state === 'drafting') {
+      // 改派意图在崩溃中丢失 → 恢复后重新请求派发(评审 M1-QA-5)
+      this.processLead(this.lead.redispatchTo(this.nodeBId, this.lastOfferBody, this.clock), this.clock);
+    }
   }
 
   /** 推演时钟:按时间序触发全部到期定时器(含过程中新排程的) */
@@ -151,6 +174,7 @@ export class SingleNodeHarness {
           msg_id: newId(),
           body: msg.body,
           now,
+          exp: new Date(now + this.params.expHorizonMs).toISOString(),
         }),
         now,
       );
@@ -190,6 +214,9 @@ export class SingleNodeHarness {
           break;
         case 'pauseDriver':
           this.driver.pause();
+          break;
+        case 'resumeDriver':
+          this.driver.resume();
           break;
         case 'schedule':
           this.schedule('exec', a.timer, a.atMs, () => this.fireExecTimer(a.timer, a.atMs));

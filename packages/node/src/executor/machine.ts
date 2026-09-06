@@ -3,7 +3,7 @@
  * 闸1 验签在传输层,闸5 执行档案 M4)。R0 特别则/R5 僵尸防护/R6 NACK 优先。
  */
 import type { AuditEvent, QlongParams } from '@qlong/core';
-import { DEFAULT_PARAMS } from '@qlong/core';
+import { DEFAULT_PARAMS, isExpiredByExp } from '@qlong/core';
 import { gateCaps, gateLoad, gatePolicy, type LoadSnapshot, type LocalPolicy } from './gates.js';
 import { matchCaps } from './caps.js';
 import type { Outbound } from '../wire.js';
@@ -42,6 +42,7 @@ export type ExecAction =
   | { kind: 'startDriver'; task_id: string; attempt: number; offer: Record<string, unknown> }
   | { kind: 'stopDriver' }
   | { kind: 'pauseDriver' }
+  | { kind: 'resumeDriver' }
   | { kind: 'schedule'; timer: 'ttl' | 'lease_self' | 'heartbeat'; atMs: number }
   | { kind: 'cancelTimers'; timers: Array<'ttl' | 'lease_self' | 'heartbeat'> };
 
@@ -94,6 +95,8 @@ export class ExecutorMachine {
     msg_id: string;
     body: Record<string, unknown>;
     now: number;
+    /** 信封级新鲜性(D24):过期补投必须拒收 —— 评审 M1-API-1 */
+    exp?: string;
     localTeamId?: string;
     fromTeamId?: string;
   }): ExecAction[] {
@@ -130,8 +133,18 @@ export class ExecutorMachine {
       ];
     }
 
-    const r = this.evaluateOffer(o);
-    return r;
+    // R2/D24:信封 exp 过期(含离线补投的死单)→ reject(expired),不得照单开跑
+    if (o.exp !== undefined && isExpiredByExp(o.exp, o.now)) {
+      this.rec = { state: 'rejected', lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      return [this.outFor(o, 'task.reject', { reason_code: 'expired' })];
+    }
+    // 评审 M1-ARCH-2:v1 单执行位 —— 异任务 offer 在已有在途任务时拒绝(busy),防覆盖致旧任务不可撤销
+    if (this.rec.state === 'running' || this.rec.state === 'offered') {
+      return [
+        this.outFor(o, 'task.reject', { reason_code: 'busy', detail: { reason: 'v1 单执行位,已有在途任务' } }),
+      ];
+    }
+    return this.evaluateOffer(o);
   }
 
   private evaluateOffer(o: {
@@ -230,6 +243,15 @@ export class ExecutorMachine {
   /** 心跳获网关回执 → 自身租约续期(R3 执行方对称计时器) */
   onHeartbeatAcked(now: number): ExecAction[] {
     if (this.rec.state !== 'running') return [];
+    // 评审 M1-QA:paused 的恢复路径 —— 链路恢复(回执到达)即解除暂停并复活驱动
+    if (this.rec.paused) {
+      this.rec.paused = false;
+      this.rec.leaseSelfDeadline = now + (this.rec.leaseConfirmedMs ?? this.params.leaseMsProject);
+      return [
+        { kind: 'resumeDriver' },
+        { kind: 'schedule', timer: 'lease_self', atMs: this.rec.leaseSelfDeadline },
+      ];
+    }
     this.rec.leaseSelfDeadline = now + (this.rec.leaseConfirmedMs ?? this.params.leaseMsProject);
     return [
       { kind: 'cancelTimers', timers: ['lease_self'] },
@@ -247,11 +269,17 @@ export class ExecutorMachine {
     return [{ kind: 'pauseDriver' }];
   }
 
-  /** 驱动完成:R5 自检 —— 已收到 cancel(执行中)→ 不发 result 回 ack;否则发 result(赌赛跑窗口) */
+  /** 驱动完成:R5 自检 —— 已收到 cancel(执行中)→ 不发 result 回 ack;本地租约已超时(paused)同此;否则发 result */
   onDriverCompleted(resultBody: Record<string, unknown>): ExecAction[] {
     if (this.rec.state !== 'running') return [];
     this.rec.driverCompleted = true;
     this.rec.resultBody = resultBody;
+    if (this.rec.paused) {
+      // 评审 M1-DIST:租约超时自检缺失补齐 —— 超时后完成的结果不发,回 ack(结果保留本地)
+      this.rec.state = 'stopped';
+      const from0 = this.rec.from ?? '';
+      return [this.stopAllTimers(), this.out('task.cancel.ack', from0, {})];
+    }
     if (this.rec.cancelReceived) {
       this.rec.state = 'stopped';
       const from = this.rec.from ?? '';
