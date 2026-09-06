@@ -148,10 +148,6 @@ describe('M2 三方联调:registry + gateway + node 客户端', () => {
     expect((received.get(credsB.node_id) ?? []).some((e) => e.body.summary === '假签名')).toBe(false);
   });
 
-  it('A6:suspend → 语义 close 4001 推送到位', async () => {
-    registry.suspend(credsB.node_id);
-    expect(await waitFor(() => closeCodes.get(credsB.node_id) === 4001)).toBe(true);
-  });
 
   it('R11:outbox 未获回执保留;重连后重发并清理', async () => {
     clientD = mkClient(credsD);
@@ -160,5 +156,39 @@ describe('M2 三方联调:registry + gateway + node 客户端', () => {
     expect(clientD.outbox.all()).toHaveLength(1);
     await clientD.open();
     expect(await waitFor(() => clientD.outbox.all().length === 0)).toBe(true);
+  });
+
+  it('M2-02:离线排队 → 重连补投同一 msg_id(端到端)', async () => {
+    const before = (received.get(credsB.node_id) ?? []).length;
+    clientB.close(); // 用户主动断开 → 网关侧离线
+    await new Promise((r) => setTimeout(r, 50));
+    const env = offerFrom(credsA, credsB.node_id, credsA.team_id, '补投演练');
+    expect(await clientA.send(env, { ackTimeoutMs: 2_000 })).toBe('queued');
+    const clientB2 = mkClient(credsB); // 同凭证重连(重装恢复形态,新连接)
+    await clientB2.open();
+    expect(await waitFor(() => (received.get(credsB.node_id)?.length ?? 0) > before)).toBe(true);
+    const redelivered = received.get(credsB.node_id)?.at(-1);
+    expect(redelivered?.msg_id).toBe(env.msg_id);
+    clientB2.close();
+  });
+
+  it('M2-03:同节点新连接踢旧;旧 close 不误删新会话(重连竞态)', async () => {
+    const clientB2 = mkClient(credsB);
+    await clientB2.open(); // B 重新上线
+    const clientA2 = mkClient(credsA); // 同 creds 第二连接 → 接管
+    await clientA2.open();
+    const receipt = await clientA2.send(offerFrom(credsA, credsB.node_id, credsA.team_id, '新连接投递'), { ackTimeoutMs: 2_000 });
+    expect(receipt).toBe('delivered'); // 新会话路由正常(未被旧 close 黑洞)
+    clientA2.close();
+    clientB2.close();
+  });
+
+  it('A6:suspend → 语义 close 4001 推送到位(专用节点)', async () => {
+    const credsE = await enrollAndKey(registry.issueEnrollToken(credsA.team_id));
+    const clientE = mkClient(credsE);
+    await clientE.open();
+    registry.suspend(credsE.node_id);
+    expect(await waitFor(() => closeCodes.get(credsE.node_id) === 4001)).toBe(true);
+    clientE.close();
   });
 });

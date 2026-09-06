@@ -108,12 +108,32 @@ describe('注册中心 HTTP 面(02 §9)', () => {
     void r2;
   });
 
-  it('P12:owner 鉴权未配置 → 503 owner_auth_unconfigured(失败关闭)', () => {
+  it('P12 失败关闭(真实断言):未配置 ownerAuth → 503;拒绝 → 403;节点凭证无法行使 owner 权', async () => {
     const s2 = createRegistryServer({ registry });
-    void s2;
-    const noAuth = createRegistryServer({ registry });
-    noAuth.close();
-    void noAuth;
-    expect(createRegistryServer.length).toBeGreaterThanOrEqual(1);
+    await new Promise<void>((r) => s2.listen(0, '127.0.0.1', () => r()));
+    const port2 = (s2.address() as AddressInfo).port;
+    try {
+      const unconfigured = await fetch(`http://127.0.0.1:${port2}/v1/teams/${teamId}/enroll-tokens`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+      expect(unconfigured.status).toBe(503);
+      expect(((await unconfigured.json()) as { error: { code: string } }).error.code).toBe('owner_auth_unconfigured');
+    } finally {
+      s2.close();
+    }
+    const deny = createRegistryServer({ registry, ownerAuth: () => false });
+    await new Promise<void>((r) => deny.listen(0, '127.0.0.1', () => r()));
+    const port3 = (deny.address() as AddressInfo).port;
+    try {
+      const denied = await fetch(`http://127.0.0.1:${port3}/v1/teams/${teamId}/enroll-tokens`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${bearer}` },
+      });
+      expect(denied.status).toBe(403);
+      expect(((await denied.json()) as { error: { code: string } }).error.code).toBe('not_team_member');
+    } finally {
+      deny.close();
+    }
   });
 });
