@@ -124,7 +124,7 @@ join 前置检查:存在在途远端租约或未消费 offer 时要求显式确�
 
 | 场景 | 动作 |
 |------|------|
-| 常规轮换 | `POST /v1/nodes/me/keys`(token 认证 + 当前私钥对请求签名,规范化同 JCS,评审 I-03)→ 注册中心存新公钥(历史保留),`key_epoch` +1。双因子取舍的代价如实声明:**任一因子单独失效即无法自助轮换**,坠落为下行路径(评审 I-46) |
+| 常规轮换 | `POST /v1/nodes/me/keys`(token 认证 + 当前私钥对请求签名)→ 注册中心存新公钥(历史保留),`key_epoch` +1。**请求签名要素**(评审 I-03③):`signature_input = JCS({method, path, sha256(body), ts, nonce})`,规范化与信封同一套 JCS 规则。双因子取舍的代价如实声明:**任一因子单独失效即无法自助轮换**,坠落为下行路径(评审 I-46) |
 | 设备丢失/密钥疑似泄露 | owner `suspended` → 重装后 join(重装恢复,新 node_id)→ 旧节点 `revoked`。运维代价如实声明:**换身份 = trace 连续性断裂**,需 owner 清理旧节点并知会牵头方(评审 I-46) |
 | owner 主动移除 | `revoke`:node token 吊销 + 状态 revoked + 网关停路由 + 网关**主动断开现有连接(close code 4002)**(评审 I-14) |
 | **凭证全失 / 仅 token 失效** | 同"设备丢失"路径:重装 + 新 node_id(评审 I-46) |

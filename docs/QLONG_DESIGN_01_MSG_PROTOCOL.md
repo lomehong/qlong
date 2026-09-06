@@ -35,7 +35,7 @@
 | `type` | string | ✅ | 消息类型,点分命名 `族.动作`(§4) |
 | `msg_id` | uuid | ✅ | 本条消息唯一 ID。传输层去重与审计用;发送侧重发**沿用同一 `msg_id`**(R11) |
 | `ts` | RFC3339 | ✅ | 发送时刻,**仅诊断**,见 P5 |
-| `exp` | RFC3339 | task.* 必填 | **新鲜性**:发送方按本地时钟换算的绝对过期时刻。接收方按「接收时刻 ≤ `exp` + 漂移预算(§10)」判废弃,过期静默丢弃 + 审计(P5 的唯一豁免,评审 I-02/D24) |
+| `exp` | RFC3339 | task.* 必填(rpc.* 建议) | **新鲜性**:接收方按「接收时刻 ≤ `exp` + 漂移预算(§10)」判废弃,过期静默丢弃 + 审计。发送方取 `exp = ts + exp_horizon`(§10)——它只是防重放的地平线,**有效期判定仍由 body 内相对时长承担**(R2 等);P5 的唯一豁免(评审 I-02/D24) |
 | `from` | obj | ✅ | `{node_id, team_id?, agent_id?, key_epoch}`。发送方节点;`agent_id` 标识本地哪个子代理发起;`key_epoch` 为签名密钥纪元。**网关按连接身份钉扎 `from`(02 §7 A0),自报值仅作一致性核对** |
 | `to` | obj | ✅ | `{node_id, team_id?}`。任务面禁止广播,一对一必填。`to.team_id` 的真伪由网关按目录锚定(02 §7 A1),自报值仅作一致性核对 |
 | `reply_to` | uuid | — | 消息级关联,逐类型规则见 §4.4;缺失不构成协议错误 |
@@ -142,7 +142,7 @@
 | `unsupported_type` | 未知消息类型(§8) | 双向 | ❌ |
 | `expired` | offer 已过期 | 执行→牵头 | ✅(换目标) |
 | `refused_loop` | hops 超限 | 执行→牵头 | ❌(持久) |
-| `stale_attempt` | 非当前执行权 | 牵头→执行 | — |
+| `stale_attempt` | 非当前执行权 | **双向**(牵头→执行:拒收迟到旧 attempt 消息;执行→牵头:旧 attempt 隐式取消回执,R0 特别则) | — |
 | `other` | 兜底 | 双向 | 实现自定 |
 
 **fail 码**(执行→牵头):
@@ -206,8 +206,8 @@
      └ 本地 offer_ttl 过期 ──▶ reject(expired)
   running ── fail ──▶ fail_sent
   running ── 收到 cancel ──▶ 停止 ──▶ cancel.ack(或 R5 赛跑)
-  offered(旧 attempt)── 收到更高 attempt 的同 task offer ──▶ 回 reject(stale_attempt)
-                              + 旧 attempt 状态摘要,本地旧态终止(I-04③;改派回原节点的取消信号)
+  offered/running(旧 attempt)── 收到更高 attempt 的同 task offer ──▶ 隐式取消旧态,回 reject(stale_attempt)
+                              + 旧 attempt 状态摘要,再按新 offer 评估(I-04③;R0 特别则)
   任一态 ── 收到 reject(stale_attempt)──▶ 本地记账/清理 ──▶ 终态
   running ── 收到 cancel.ack ──▶ 忽略 + 审计(cancel.ack 仅在牵头方 cancelling/reclaiming 有语义,I-07)
   任一已决状态 ── 任何重复消息 ──▶ 忽略 + 审计(R0)
@@ -229,7 +229,7 @@
 
 > 状态机的语义细则,实现时每条都应可追溯到测试用例。完整 (状态 × 消息 × 定时器) 全矩阵随 §8.4 双机纸面走查定稿(评审 I-04 的建议),本节已覆盖全部已知转移。
 
-- **R0 attempt 统一闸门**(评审 I-04/D25):所有入站 task.* 消息,**先于一切其他检查**判 attempt:`<` 本地当前 → 拒收 `reject(stale_attempt)`(已验签同 team 时)+ 审计;`=` 当前 → 交状态机;`>` 当前 → 丢弃 + 审计。任何已决状态(已 accept/reject/终态)下的重复消息一律忽略 + 审计。
+- **R0 attempt 统一闸门**(评审 I-04/D25):所有入站 task.* 消息,**先于一切其他检查**判 attempt:`<` 本地当前 → 拒收 `reject(stale_attempt)`(已验签同 team 时)+ 审计;`=` 当前 → 交状态机;`>` 当前 → **分两种**:同 task_id 的 `task.offer` = **对本地旧 attempt 的隐式取消**(终止旧态、回 `reject(stale_attempt)` + 旧状态摘要,再按新 offer 进入接单评估——改派回原节点的取消信号,评审 I-04③);其余类型 → 丢弃 + 审计。任何已决状态(已 accept/reject/终态)下的重复消息一律忽略 + 审计。
 - **R1 投递假设与幂等**(修订,I-01/I-02):底层通道至少一次、不保序。**除 `task.progress` 外**的 task.* 以 `(task_id, attempt, type)` 去重;progress 每条均处理(续租动作本身幂等),可选 `seq` 用于乱序丢弃与展示去重。**去重状态保留期 ≥ `max(offer_ttl, lease) × max_attempts + drain_ms`**;同键不同 body → 丢弃 + 审计事件 `dedup_mismatch`。
 - **R2 offer 有效期**(修订):offer_ttl_ms 在 body;执行方以「**晚于**」TTL 判过期(评审 I-38);过期 → 回 `reject(expired)`;牵头方本地计时同步判定。**expired 改派同样走 R4:先撤销、后改派**(评审 I-08——僵尸入口对一切改派路径关闭)。长期离线节点上线后收件箱批量过期 offer → 整批 `reject(expired)`(必测场景)。
 - **R3 租约与心跳**(修订,I-07/I-09/I-38):**lost 判定公式**:自最后一个应收心跳的预计时刻起,经 `2×(lease_ms/3) + grace_ms` 仍无心跳 → 判 lost。**停跳可能来自两端中的任何一端**,计时器以各自连接态为准:**ws 断线期间,本节点全部入站任务的 lost 计时暂停,重连后从最后一条(含补投的)心跳重新起算;drain 窗口随重连重新打开**(改派决策延迟语义,评审 I-09)。执行方侧对称计时器:自**最后一条成功送达(获网关 ACK,R11)的心跳**起算 `lease_ms`,超时立即暂停产生新副作用(不强求杀进程);无法发出心跳持续超过 `grace_ms` 亦暂停。**不变式:`grace_ms ≤ lease_ms − 2×(lease_ms/3)`**(默认参数下 230s ≤ 300s),保证执行方本地租约到期不早于牵头方判 lost。
@@ -262,7 +262,7 @@
 - **连接**:节点 ⇄ 网关 ws 长连接;握手以 node token 认证(02 §3.2)。
 - **在线投递**:网关按信封头 `to.node_id` 直接推送。
 - **离线暂存**:目标不在线时,信封进入其**收件箱**(网关侧队列),重连即补投;正确性不依赖暂存——`exp` 与 body 内相对有效期由端上独立判过期(R2),网关过期清理仅回收存储。
-- **网关回执帧**(评审 I-11/D26):网关对每条上行信封回 `{ack_type: delivered|queued|rejected, msg_id, reason?}`(`rejected.reason ∈ {offline_not_stored, acl_rejected, expired, …}`)。**回执仅用于诊断与改派触发判定,不参与可靠性**——可靠性仍由 P4/R1 端上兜底,回执不构成第二套真相。
+- **网关回执帧**(评审 I-11/D26):网关对每条上行信封回 `{ack_type: delivered|queued|rejected, msg_id, reason?}`(`rejected.reason ∈ {offline_not_stored, acl_rejected, expired, …}`);同族另有 `routing.denied {rule, reason_code, msg_id}`(02 §7 A6,向已认证发送方本人回送消息级路由拒绝)。**回执仅用于诊断与改派触发判定,不参与可靠性**——可靠性仍由 P4/R1 端上兜底,回执不构成第二套真相。
 - **aid 类不暂存**:10s TTL 走暂存必是死信;目标离线时网关直接回 `rejected(offline_not_stored)`,牵头方**据此立即改派**(机制支撑评审 I-11;不再依赖 offer_ttl 到期)。
 - **已知限制**(评审 I-42):v1 的 presence/「不可达」判定一律以网关连接态为准——直连可达但网关离线的节点按离线处理;v1.5 直连落地时需重定义,列入回归范围。
 - **投递语义**:至少一次、不保序(P4);网关不解析 body(P3),只看头做 **from 钉扎**(02 §7 A0)、路由、ACL 与审计。
@@ -279,6 +279,7 @@
 | `drain_ms` | 30 000 | 回收后的赛跑窗口;重连后重新打开(R3/R4) |
 | `cancel_wait_ms` | 30 000 | cancelling 出口超时,到期强制 closed + 审计(评审 I-06) |
 | `exp` 漂移预算 | 10 分钟 | 接收时刻 ≤ exp + 预算判有效(评审 I-02) |
+| `exp_horizon` | 24 小时 | 发送方计算 `exp = ts + exp_horizon`;防重放地平线,非调度参数 |
 | 去重保留期 | ≥ `max(offer_ttl, lease) × max_attempts + drain_ms` | R1 下限 |
 | `max_attempts` / `max_dispatch_rounds` | 3 / 3 | 已接受后失败 / 未接受过的改派,各自独立计数(评审 I-40) |
 | `MAX_HOPS` | 8 | 委托深度上限 |

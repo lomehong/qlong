@@ -43,7 +43,7 @@
 | 规则 | 定义 |
 |------|------|
 | 无 `@` | offer 的类与值段须与节点标签**完全相等**(节点侧 `@版本` 段忽略)。**不是字符串前缀匹配**——`tool:node` 不命中 `tool:nodejs`、`tool:node-lts` |
-| 带 `@` | 按 offer 所写段数**逐段比较,数字段按数值比较**:`tool:node@20` vs `tool:node@20.1` ✅(1 段 vs 前 1 段,20=20);`env:python@3` vs `env:python@3.12` ✅;`tool:node@20` vs `tool:node@18` ❌ |
+| 带 `@` | 按 offer 所写段数**逐段比较,数字段按数值比较**:`tool:node@20` vs `tool:node@20.1` ✅(1 段 vs 前 1 段,20=20);`env:python@3` vs `env:python@3.12` ✅;`tool:node@20` vs `tool:node@18` ❌。**节点值段数少于 offer 所写段数 → 不匹配**(无法比较即不相等) |
 
 正反例速查:
 
