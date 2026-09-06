@@ -95,6 +95,16 @@ export interface DirectoryNodeSnapshot {
   currentEpoch: number;
 }
 
+export interface GrantRecord {
+  grant_id: string;
+  from_team: string;
+  to_team: string;
+  caps_visible: string[];
+  expires_at?: number;
+  created_by?: string;
+  created_at: string;
+}
+
 export interface DirectorySnapshot {
   epoch: number;
   nodes: DirectoryNodeSnapshot[];
@@ -343,6 +353,43 @@ export class Registry {
   }
 
   /** 网关目录快照(§7.1):带 epoch,A0/A1/A2 执法与缓存失效依据 */
+  // ---------- 跨队 grant(02 §12.1,v0.2 新增) ----------
+  readonly grants = new Map<string, GrantRecord>();
+
+  createGrant(opts: { from_team: string; to_team: string; caps_visible?: string[]; ttlMs?: number; created_by?: string }): GrantRecord {
+    if (!this.teams.has(opts.from_team) || !this.teams.has(opts.to_team)) throw new ApiError('bad_request', 'team 不存在', 404);
+    if (opts.from_team === opts.to_team) throw new ApiError('bad_request', '不能对自己团队创建 grant', 400);
+    const gid = randomUUID();
+    const rec: GrantRecord = {
+      grant_id: gid, from_team: opts.from_team, to_team: opts.to_team,
+      caps_visible: opts.caps_visible ?? [],
+      expires_at: opts.ttlMs ? this.now + opts.ttlMs : undefined,
+      created_by: opts.created_by, created_at: this.iso(),
+    };
+    this.grants.set(gid, rec);
+    this.bumpEpoch();
+    return rec;
+  }
+
+  revokeGrant(gid: string): void {
+    if (!this.grants.has(gid)) throw new ApiError('bad_request', 'grant 不存在', 404);
+    this.grants.delete(gid);
+    this.bumpEpoch();
+  }
+
+  listGrants(teamId: string): GrantRecord[] {
+    return [...this.grants.values()].filter((g) => g.from_team === teamId || g.to_team === teamId);
+  }
+
+  /** A1 扩展:检查 from_team 是否有权向 to_team 发消息(grant 或同队) */
+  hasGrant(fromTeam: string, toTeam: string): boolean {
+    for (const g of this.grants.values()) {
+      if (g.expires_at !== undefined && this.now > g.expires_at) continue;
+      if ((g.from_team === fromTeam && g.to_team === toTeam) || (g.from_team === toTeam && g.to_team === fromTeam)) return true;
+    }
+    return false;
+  }
+
   snapshot(): DirectorySnapshot {
     return {
       epoch: this.directoryEpoch,
