@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { newKeyPair, type QlongParams } from '@qlong/core';
+import { newKeyPair, verifyEnvelopeSig, type QlongParams } from '@qlong/core';
+import type { GatewayClient } from '../../node/src/gateway-client.js';
 import { Registry } from '@qlong/registry';
 import { GatewayCore } from '../src/core.js';
 import { WsGateway } from '../src/ws.js';
@@ -84,6 +85,11 @@ async function enroll(token: string, driver?: ScriptStubDriver): Promise<{ creds
     url: `ws://127.0.0.1:${wsPort}`,
     nodeToken: creds.node_token,
     params: FAST_PARAMS,
+    verifyInbound: async (env) => {
+      const look = registry.lookupPubkey(env.from.node_id, env.from.key_epoch);
+      if (look.status !== 'current' && look.status !== 'historical') return false;
+      return (await verifyEnvelopeSig(env, () => Buffer.from(look.pubkey, 'base64'))).ok;
+    },
   });
   const session = new RemoteNodeSession({
     nodeId: creds.node_id,
@@ -115,6 +121,11 @@ describe('M3:跨机 lost/改派演练(真实时序,R3/R4/R7/R8)', () => {
       url: `ws://127.0.0.1:${wsPort}`,
       nodeToken: resA.node_token,
       params: FAST_PARAMS,
+      verifyInbound: async (env) => {
+        const look = registry.lookupPubkey(env.from.node_id, env.from.key_epoch);
+        if (look.status !== 'current' && look.status !== 'historical') return false;
+        return (await verifyEnvelopeSig(env, () => Buffer.from(look.pubkey, 'base64'))).ok;
+      },
     });
     const sessionA = new RemoteNodeSession({
       nodeId: resA.node_id,
@@ -152,8 +163,8 @@ describe('M3:跨机 lost/改派演练(真实时序,R3/R4/R7/R8)', () => {
     expect(await waitFor(() => sessionA.lead?.rec.state === 'running', 2_000)).toBe(true);
 
     // B 的客户端关闭 → 心跳停止 → A 判 lost(R3)
-    const bClient = clients[clients.length - 2]; // B 是倒数第二个入网的执行方
-    bClient.close();
+    const bClient = (clients[clients.length - 2]!); // B 是倒数第二个入网的执行方
+    bClient!.close();
 
     const doneOk = await waitFor(() => sessionA.lead?.rec.state === 'done', 3_000);
     if (!doneOk) console.log('DIAG state:', sessionA.lead?.rec.state, 'history:', JSON.stringify(sessionA.lead?.rec.history));

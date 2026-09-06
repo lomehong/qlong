@@ -1,11 +1,11 @@
 /**
- * 远端会话(M3):把牵头方/执行方状态机接到真实网关传输(P2 的另一侧兑现)。
- * 职责:Outbound 规格 → 完整信封(JCS 签名/trace 透传/exp)→ GatewayClient;
- *      入站信封 → A5 复核(防御)→ 分发到对应状态机;定时器动作 → 真实 setTimeout。
- * 单机总线(SingleNodeHarness)保留用于确定性测试;本会话是 M3 双机链路的运行形态。
+ * 远端会话(M3,P0 修订版):状态机 × 真实网关传输。
+ * 评审 M3 修订:①心跳回执续租接线(R3,blocker);②A4 入站验签缺省拒绝(P12/SEC-1);
+ * ③R1 去重管线 + 执行方已决防重跑(ARCH-2);④未知 type 结构化兜底(§8)。
  */
 import {
   DEFAULT_PARAMS,
+  DedupStore,
   makeAudit,
   newId,
   newTraceContext,
@@ -17,7 +17,7 @@ import {
   type TraceContext,
 } from '@qlong/core';
 import { ExecutorMachine, type ExecAction } from '../executor/machine.js';
-import type { ExecutorDriver, DriverHost } from '../executor/driver.js';
+import type { DriverHost, ExecutorDriver } from '../executor/driver.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { LeadTaskMachine, type LeadAction } from '../lead/machine.js';
 import type { GatewayClient } from '../gateway-client.js';
@@ -29,16 +29,15 @@ export interface RemoteSessionOptions {
   priv: Uint8Array;
   client: GatewayClient;
   params?: QlongParams;
-  /** 牵头方(可选;startLeadTask 未给时自动创建) */
   lead?: LeadTaskMachine;
   executor?: ExecutorMachine;
-  /** 执行驱动(可选;无驱动 = 仅协议层联调) */
   driver?: ExecutorDriver;
   policy?: LocalPolicy;
   capabilities?: () => string[];
   load?: () => LoadSnapshot | undefined;
   validateAcceptance?: (b: Record<string, unknown>) => boolean;
-  /** R7/R8:改派目标选择;返回 undefined = 暂无候选(维持 drafting) */
+  /** A4 闸1:入站验签(公钥按纪元查目录)。P12:未配置 = 入站全拒 */
+  verifyInbound?: (env: EnvelopeV1) => Promise<boolean>;
   pickTarget?: (taskId: string, nextAttempt: number, excluded: Record<string, 'permanent' | 'once'>) => string | undefined;
   onTerminal?: (taskId: string, state: string, resultBody?: Record<string, unknown>) => void;
   onEscalate?: (summary: { task_id: string; attempts: unknown[]; final_reason: string }) => void;
@@ -54,21 +53,31 @@ interface OutboundSpec {
   body: Record<string, unknown>;
 }
 
+interface ExecContext {
+  taskId: string;
+  attempt: number;
+  trace: TraceContext;
+  offer: Record<string, unknown>;
+}
+
 export class RemoteNodeSession {
   readonly nodeId: string;
   readonly teamId: string;
+  readonly opts: RemoteSessionOptions;
   lead?: LeadTaskMachine;
   exec: ExecutorMachine;
-  /** A5 静默丢弃计数(防御性;网关 A1 已拦,正常应为 0) */
+  /** A5 静默丢弃/去重丢弃 计数 */
   rejectedInbound = 0;
 
   private readonly params: QlongParams;
-  readonly opts: RemoteSessionOptions;
+  private readonly dedup = new DedupStore(3_600_000);
   private readonly traces = new Map<string, TraceContext>();
   private readonly lastOfferBody = new Map<string, Record<string, unknown>>();
   private readonly leadTimers = new Map<string, NodeJS.Timeout>();
   private readonly execTimers = new Map<string, NodeJS.Timeout>();
   private readonly driverTimers = new Map<string, NodeJS.Timeout>();
+  private lastProgressMsgId = '';
+  private execCtx: ExecContext | null = null;
 
   constructor(opts: RemoteSessionOptions) {
     this.opts = opts;
@@ -84,22 +93,45 @@ export class RemoteNodeSession {
         policy: opts.policy,
         load: opts.load,
       });
-    opts.client.onEnvelope = (env) => this.onEnvelope(env);
-    const prevDenied = opts.client.onRoutingDenied?.bind(opts.client);
+    // A4(评审 M3-SEC-1):入站验签缺省拒绝 —— 未配置 verifyInbound 不接收任何任务
+    opts.client.verifyInbound = async (env) => {
+      if (!opts.verifyInbound) return false;
+      return opts.verifyInbound(env);
+    };
+    // R3(blocker 评审 M3-DIST-1):progress 的回执 → 执行方续租
+    const prevAck = opts.client.onAck;
+    // A6:routing.denied 转发(会话层可观测,评审 M3-DIST)
+    const prevDenied = opts.client.onRoutingDenied;
     opts.client.onRoutingDenied = (d) => {
       this.opts.onRoutingDenied?.(d);
       prevDenied?.(d);
     };
+    opts.client.onAck = (ack) => {
+      this.onGatewayAck(ack);
+      prevAck(ack);
+    };
+    opts.client.onEnvelope = (env) => this.onEnvelope(env);
   }
 
   private now(): number {
     return Date.now();
   }
 
+  /** 网关回执:progress 的送达回执 → 执行方续租;其余回执交上层 */
+  private onGatewayAck(ack: { msg_id: string }): void {
+    if (this.lastProgressMsgId !== '' && ack.msg_id === this.lastProgressMsgId && this.execCtx) {
+      this.lastProgressMsgId = '';
+      const ctx = this.execCtx;
+      const acts = this.exec.onHeartbeatAcked(this.now());
+      this.processExec(acts, ctx);
+    }
+  }
+
   // ---------- 牵头方 ----------
 
   startLeadTask(taskId: string, kind: 'aid' | 'project', target: string, offerBody: Record<string, unknown>): void {
-    if (!this.lead) {
+    if (this.lead && this.lead.task_id === taskId) throw new Error('session: 任务已存在 ' + taskId);
+    if (!this.lead || this.lead.terminal) {
       this.lead = new LeadTaskMachine({
         task_id: taskId,
         kind,
@@ -128,21 +160,20 @@ export class RemoteNodeSession {
         case 'send': {
           const trace = this.traces.get(a.msg.task_id ?? '') ?? newTraceContext(this.nodeId);
           this.traces.set(a.msg.task_id ?? '', trace);
-          console.log('[exec send]', a.msg.type, '→', a.msg.to_node, 'task', a.msg.task_id);
-          void this.deliver(this.seal(a.msg, trace)).catch((e) => console.log('[exec send error]', String(e)));
+          void this.deliver(this.seal(a.msg, trace));
           break;
         }
         case 'audit':
           this.opts.onAudit?.(makeAudit(a.event, { node_id: this.nodeId, reason: a.reason }, () => new Date(this.now()).toISOString()));
           break;
         case 'schedule':
-          this.arm(this.leadTimers, `lead:${a.timer}`, a.atMs, () => {
+          this.arm(this.leadTimers, 'lead:' + a.timer, a.atMs, () => {
             const m = this.lead;
             if (m) this.processLead(m.onTimer(a.timer, Date.now()));
           });
           break;
         case 'cancelTimers':
-          for (const t of a.timers) this.disarm(this.leadTimers, `lead:${t}`);
+          for (const t of a.timers) this.disarm(this.leadTimers, 'lead:' + t);
           break;
         case 'requestDispatch': {
           const m = this.lead;
@@ -163,11 +194,12 @@ export class RemoteNodeSession {
 
   // ---------- 执行方 ----------
 
-  private processExec(actions: ExecAction[], trace: TraceContext, offer: Record<string, unknown>, taskId: string, attempt: number): void {
+  private processExec(actions: ExecAction[], ctx: ExecContext): void {
     for (const a of actions) {
       switch (a.kind) {
         case 'send': {
-          const env = this.seal({ type: a.msg.type, to_node: a.msg.to_node, task_id: a.msg.task_id, attempt: a.msg.attempt, body: a.msg.body }, trace);
+          const env = this.seal(a.msg, ctx.trace);
+          if (a.msg.type === 'task.progress') this.lastProgressMsgId = env.msg_id;
           void this.deliver(env);
           break;
         }
@@ -175,7 +207,8 @@ export class RemoteNodeSession {
           this.opts.onAudit?.(makeAudit(a.event, { node_id: this.nodeId, reason: a.reason }, () => new Date(this.now()).toISOString()));
           break;
         case 'startDriver':
-          this.opts.driver?.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost(taskId, attempt, trace, offer));
+          this.execCtx = { taskId: ctx.taskId, attempt: ctx.attempt, trace: ctx.trace, offer: ctx.offer };
+          this.opts.driver?.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost(a.task_id, a.attempt, ctx));
           break;
         case 'stopDriver':
           this.opts.driver?.stop();
@@ -187,38 +220,31 @@ export class RemoteNodeSession {
           this.opts.driver?.resume();
           break;
         case 'schedule':
-          this.arm(this.execTimers, `exec:${taskId}:${a.timer}`, a.atMs, () => {
-            const acts = (() => {
-              if (a.timer === 'heartbeat') return this.exec.onHeartbeatDue(Date.now());
-              if (a.timer === 'lease_self') return this.exec.onLeaseSelfTimeout(Date.now());
-              return this.exec.onTtlCheck(Date.now());
-            })();
-            this.processExec(acts, trace, offer, taskId, attempt);
+          this.arm(this.execTimers, 'exec:' + ctx.taskId + ':' + a.timer, a.atMs, () => {
+            let acts: ExecAction[] = [];
+            if (a.timer === 'heartbeat') acts = this.exec.onHeartbeatDue(Date.now());
+            else if (a.timer === 'lease_self') acts = this.exec.onLeaseSelfTimeout(Date.now());
+            else acts = this.exec.onTtlCheck(Date.now());
+            this.processExec(acts, ctx);
           });
           break;
         case 'cancelTimers':
-          for (const t of a.timers) this.disarm(this.execTimers, `exec:${taskId}:${t}`);
+          for (const t of a.timers) this.disarm(this.execTimers, 'exec:' + ctx.taskId + ':' + t);
           break;
       }
     }
   }
 
-  private driverHost(taskId: string, attempt: number, trace: TraceContext, offer: Record<string, unknown>): DriverHost {
+  private driverHost(taskId: string, attempt: number, ctx: ExecContext): DriverHost {
     return {
       now: () => this.now(),
       schedule: (atMs, cb) => {
-        const key = `driver:${taskId}:${atMs}:${newId()}`;
+        const key = 'driver:' + taskId + ':' + atMs + ':' + newId();
         this.arm(this.driverTimers, key, atMs, cb);
         return () => this.disarm(this.driverTimers, key);
       },
-      complete: (resultBody) => {
-        const acts = this.exec.onDriverCompleted(resultBody);
-        this.processExec(acts, trace, offer, taskId, attempt);
-      },
-      fail: (failBody) => {
-        const acts = this.exec.onDriverFailed(failBody);
-        this.processExec(acts, trace, offer, taskId, attempt);
-      },
+      complete: (resultBody) => this.processExec(this.exec.onDriverCompleted(resultBody), ctx),
+      fail: (failBody) => this.processExec(this.exec.onDriverFailed(failBody), ctx),
     };
   }
 
@@ -234,10 +260,28 @@ export class RemoteNodeSession {
       this.rejectedInbound += 1;
       return;
     }
+    // R1 去重管线(评审 M3-ARCH-2):补投/重放同键信封止步;progress 豁免
+    if (env.type.split('.')[0] === 'task' && env.type !== 'task.progress') {
+      const d = this.dedup.checkAndRecord(env.task_id ?? '', env.attempt ?? 0, env.type, env.body);
+      if (d.verdict !== 'first') {
+        this.rejectedInbound += 1;
+        return;
+      }
+    }
+    const fam = env.type.split('.')[0];
+    if (fam !== 'task' && fam !== 'rpc') {
+      // §8:未知 type → 结构化 reject(上游已完成验签与 team 复核)
+      const rej = this.seal(
+        { type: 'task.reject', to_node: env.from.node_id, task_id: env.task_id, attempt: env.attempt, body: { reason_code: 'unsupported_type' } },
+        env.trace,
+      );
+      void this.deliver(rej);
+      return;
+    }
     const now = this.now();
     if (env.type === 'task.offer') {
       const taskId = env.task_id ?? '';
-      this.traces.set(`exec:${taskId}`, env.trace);
+      this.traces.set('exec:' + taskId, env.trace);
       const acts = this.exec.onOffer({
         from: env.from.node_id,
         task_id: taskId,
@@ -247,13 +291,18 @@ export class RemoteNodeSession {
         now,
         exp: env.exp,
       });
-      this.processExec(acts, env.trace, env.body, taskId, env.attempt ?? 0);
+      this.processExec(acts, { taskId, attempt: env.attempt ?? 0, trace: env.trace, offer: env.body });
       return;
     }
     if (env.type === 'task.cancel') {
       const taskId = env.task_id ?? '';
-      const trace = this.traces.get(`exec:${taskId}`) ?? env.trace;
-      this.processExec(this.exec.onCancel(env.from.node_id, env.attempt ?? 0), trace, env.body, taskId, env.attempt ?? 0);
+      const ctx: ExecContext = {
+        taskId,
+        attempt: env.attempt ?? 0,
+        trace: this.traces.get('exec:' + taskId) ?? env.trace,
+        offer: {},
+      };
+      this.processExec(this.exec.onCancel(env.from.node_id, env.attempt ?? 0), ctx);
       return;
     }
     if (this.lead) {
@@ -263,7 +312,6 @@ export class RemoteNodeSession {
 
   // ---------- 公共 ----------
 
-  /** 信封封装 + 签名(签名域之外全字段校验;签名必在) */
   private seal(out: OutboundSpec, trace: TraceContext): EnvelopeV1 {
     const base = {
       v: 1,
@@ -274,9 +322,7 @@ export class RemoteNodeSession {
       from: { node_id: this.nodeId, team_id: this.teamId, key_epoch: this.opts.keyEpoch },
       to: { node_id: out.to_node, team_id: this.teamId },
       trace,
-      ...(out.task_id !== undefined
-        ? { hops: 0, task_id: out.task_id, attempt: out.attempt ?? 1 }
-        : {}),
+      ...(out.task_id !== undefined ? { hops: 0, task_id: out.task_id, attempt: out.attempt ?? 1 } : {}),
       body: out.body,
     };
     const chk = validateEnvelope(base as EnvelopeV1, this.params, { allowMissingSig: true });
@@ -310,7 +356,6 @@ export class RemoteNodeSession {
     }
   }
 
-  /** 优雅停机:清全部定时器(连接由 client.close 负责) */
   dispose(): void {
     for (const pool of [this.leadTimers, this.execTimers, this.driverTimers]) {
       for (const t of pool.values()) clearTimeout(t);

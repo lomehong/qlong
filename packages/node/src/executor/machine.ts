@@ -100,6 +100,14 @@ export class ExecutorMachine {
     localTeamId?: string;
     fromTeamId?: string;
   }): ExecAction[] {
+    // 已决防重跑(评审 M3-ARCH-2):同任务已交付/已终局,attempt 未升 → 忽略重投(R1/已决语义)
+    if (
+      this.rec.task_id === o.task_id &&
+      (this.rec.state === 'result_sent' || this.rec.state === 'fail_sent' || this.rec.state === 'stopped' || this.rec.state === 'cleaned') &&
+      (o.attempt ?? 0) <= (this.rec.attempt ?? 0)
+    ) {
+      return [];
+    }
     // 已有同任务在途:R0 特别则
     if (
       (this.rec.state === 'offered' || this.rec.state === 'running') &&

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EnvelopeV1 } from '@qlong/core';
-import { newId, newKeyPair, type QlongParams } from '@qlong/core';
+import { newId, newKeyPair, verifyEnvelopeSig, type QlongParams } from '@qlong/core';
 import { Registry } from '@qlong/registry';
 import { GatewayCore } from '../src/core.js';
 import { WsGateway } from '../src/ws.js';
@@ -99,6 +99,12 @@ async function enrollSession(token: string, opts: { driver?: ScriptStubDriver } 
     url: `ws://127.0.0.1:${wsPort}`,
     nodeToken: creds.node_token,
     params: FAST_PARAMS,
+    verifyInbound: async (env) => {
+      // A4 闸1:公钥按 (node_id, key_epoch) 查目录验签(评审 M3-SEC-1)
+      const look = registry.lookupPubkey(env.from.node_id, env.from.key_epoch);
+      if (look.status !== 'current' && look.status !== 'historical') return false;
+      return (await verifyEnvelopeSig(env, () => Buffer.from(look.pubkey, 'base64'))).ok;
+    },
   });
   const session = new RemoteNodeSession({
     nodeId: creds.node_id,
@@ -202,5 +208,34 @@ describe('M3 跨机会话:状态机 x 真实网关传输', () => {
     };
     sessionC.onEnvelope(forged);
     expect(sessionC.rejectedInbound).toBe(before + 1);
+  });
+
+  it('M3-P0 回归:长任务心跳回执续租(存活超 1 lease,DIST-1/API-1)', async () => {
+    const leadS = await enrollSession(registry.issueEnrollToken(teamX));
+    const execS = await enrollSession(registry.issueEnrollToken(teamX), { driver: new ScriptStubDriver({ completeAfterMs: 900, resultBody: { summary: '长任务完成' } }) });
+    const t2 = newId();
+    leadS.session.startLeadTask(t2, 'project', execS.creds.node_id, {
+      kind: 'project',
+      summary: '长任务',
+      lease_ms: FAST_PARAMS.leaseMsProject,
+      offer_ttl_ms: 300,
+    });
+    // lease=400ms:若无回执续租,E 将假暂停、A 在 ~366ms 判 lost;有续租则存活到 900ms 完成
+    const okNow = await waitFor(() => leadS.session.lead?.rec.state === 'done', 4_000);
+    expect(okNow).toBe(true);
+    expect(leadS.session.lead?.rec.history.some((h) => h.outcome === 'lost')).toBe(false);
+    expect(execS.session.exec.rec.paused).toBe(false);
+    expect(execS.session.exec.rec.state).toBe('result_sent');
+    leadS.client.close();
+    execS.client.close();
+  });
+
+  it('M3-P0 回归:已交付任务重投不重跑(R1/已决,ARCH-2)', () => {
+    const first = received.get(credsB.node_id)?.[0];
+    expect(first).toBeDefined();
+    const before = sessionB.rejectedInbound;
+    sessionB.onEnvelope(first as EnvelopeV1);
+    expect(sessionB.exec.rec.state).toBe('result_sent');
+    expect(sessionB.rejectedInbound).toBe(before + 1);
   });
 });

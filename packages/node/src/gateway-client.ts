@@ -37,12 +37,14 @@ export class GatewayClient {
   private closedByUser = false;
 
   /** 回调为可覆写实例字段(会话层在构造后绑定 onEnvelope) */
+  verifyInbound: (env: EnvelopeV1) => Promise<boolean> = async () => false;
   onEnvelope: (env: EnvelopeV1) => void = () => {};
   onAck: (ack: { ack_type: string; msg_id: string; reason?: string }) => void = () => {};
   onRoutingDenied: (d: { rule: string; reason_code: string; msg_id: string }) => void = () => {};
   onClose: (code: number) => void = () => {};
   constructor(private readonly opts: GatewayClientOptions) {
     this.outbox = opts.outbox ?? new MemoryOutbox();
+    this.verifyInbound = opts.verifyInbound ?? (async () => false);
     this.onEnvelope = opts.onEnvelope ?? (() => {});
     this.onAck = opts.onAck ?? (() => {});
     this.onRoutingDenied = opts.onRoutingDenied ?? (() => {});
