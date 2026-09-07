@@ -78,6 +78,12 @@ export interface RegistryOptions {
   enrollTtlMs?: number;
   /** 每节点保留历史公钥数(设计下限 3) */
   maxKeysPerNode?: number;
+  /** 每 owner 节点数配额(评审 I-16;默认 100) */
+  maxNodesPerOwner?: number;
+  /** orphan team 存活时长(零成员单机 team,默认 30 天,I-48) */
+  orphanTeamTtlMs?: number;
+  /** 节点离线多久后 GC 吊销并清理档案(默认 30 天,I-16) */
+  offlineNodeTtlMs?: number;
 }
 
 export interface EnrollInput {
@@ -122,11 +128,35 @@ export class Registry {
   private readonly nowFn: () => number;
   private readonly enrollTtlMs: number;
   private readonly maxKeysPerNode: number;
+  private readonly maxNodesPerOwner: number;
+  private readonly orphanTeamTtlMs: number;
+  private readonly offlineNodeTtlMs: number;
+  /** §7.1:目录变更监听(join/suspend/revoke/轮换时触发);网关订阅以即时推送替代盲轮询 */
+  private readonly changeListeners = new Set<() => void>();
 
   constructor(opts: RegistryOptions = {}) {
     this.nowFn = opts.now ?? (() => Date.now());
     this.enrollTtlMs = opts.enrollTtlMs ?? 30 * 60 * 1000;
     this.maxKeysPerNode = Math.max(3, opts.maxKeysPerNode ?? 5);
+    this.maxNodesPerOwner = Math.max(1, opts.maxNodesPerOwner ?? 100);
+    this.orphanTeamTtlMs = opts.orphanTeamTtlMs ?? 30 * 24 * 3_600_000;
+    this.offlineNodeTtlMs = opts.offlineNodeTtlMs ?? 30 * 24 * 3_600_000;
+  }
+
+  /** 订阅目录变更(§7.1);返回取消订阅函数 */
+  onDirectoryChange(cb: () => void): () => void {
+    this.changeListeners.add(cb);
+    return () => this.changeListeners.delete(cb);
+  }
+
+  private notifyChange(): void {
+    for (const cb of this.changeListeners) {
+      try {
+        cb();
+      } catch {
+        /* 监听器异常不阻断目录变更 */
+      }
+    }
   }
 
   private get now(): number {
@@ -143,6 +173,7 @@ export class Registry {
 
   private bumpEpoch(): number {
     this.directoryEpoch += 1;
+    this.notifyChange(); // §7.1:变更即时推送(网关订阅者),不再依赖盲轮询
     return this.directoryEpoch;
   }
 
@@ -196,6 +227,19 @@ export class Registry {
   }
 
   private doEnroll(teamId: string, input: EnrollInput): EnrollResult {
+    // 每 owner 节点数配额(评审 I-16):owner 名下所有 team 的节点总数
+    const team = this.teams.get(teamId);
+    if (team?.owner_user_id) {
+      let owned = 0;
+      for (const t of this.teams.values()) {
+        if (t.owner_user_id === team.owner_user_id) {
+          for (const n of this.nodes.values()) if (n.team_id === t.team_id) owned += 1;
+        }
+      }
+      if (owned >= this.maxNodesPerOwner) {
+        throw new ApiError('quota_exceeded', `该 owner 名下节点数已达配额(${this.maxNodesPerOwner})`, 429, false);
+      }
+    }
     const node_id = randomUUID();
     const node_token = secureRandomB64(32);
     const node: NodeRecord = {
@@ -408,6 +452,51 @@ export class Registry {
       if ((g.from_team === fromTeam && g.to_team === toTeam) || (g.from_team === toTeam && g.to_team === fromTeam)) return true;
     }
     return false;
+  }
+
+  /**
+   * GC(评审 I-16/I-48):
+   * - 零成员且超过 orphanTeamTtlMs 的单机 team → 删除(连同未消费的 enroll tokens);
+   * - 超过 offlineNodeTtlMs 无心跳/无交互的节点 → revoked + 档案清理(caps/load,03 §8 留存语义)。
+   * 幂等;返回清理计数供运营观测。
+   */
+  gc(): { removedOrphanTeams: number; revokedOfflineNodes: number } {
+    const now = this.now;
+    let removedOrphanTeams = 0;
+    let revokedOfflineNodes = 0;
+
+    for (const team of [...this.teams.values()]) {
+      // orphan 推导:无 owner 且零活成员(revoke 后 state 字段不会自动变,按事实判定)
+      if (team.owner_user_id) continue;
+      const hasMembers = [...this.nodes.values()].some((n) => n.team_id === team.team_id && n.status !== 'revoked');
+      if (hasMembers) continue;
+      const createdAt = Date.parse(team.created_at);
+      if (Number.isFinite(createdAt) && now - createdAt >= this.orphanTeamTtlMs) {
+        this.teams.delete(team.team_id);
+        for (const [h, rec] of [...this.enrollTokens.entries()]) {
+          if (rec.team_id === team.team_id) this.enrollTokens.delete(h);
+        }
+        removedOrphanTeams += 1;
+      }
+    }
+
+    for (const node of this.nodes.values()) {
+      if (node.status !== 'active') continue;
+      if (this.presence.get(node.node_id) === true) continue;
+      const last = node.last_seen ?? node.joined_at;
+      const ts = last ? Date.parse(last) : Number.NaN;
+      if (!Number.isFinite(ts)) continue;
+      if (now - ts >= this.offlineNodeTtlMs) {
+        node.status = 'revoked';
+        node.caps = [];
+        node.load = null;
+        this.nodeByTokenHash.delete(node.tokenHash);
+        this.presence.set(node.node_id, false);
+        this.bumpEpoch();
+        revokedOfflineNodes += 1;
+      }
+    }
+    return { removedOrphanTeams, revokedOfflineNodes };
   }
 
   snapshot(): DirectorySnapshot {

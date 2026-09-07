@@ -17,6 +17,8 @@ import { FileOutbox } from '../outbox/file-outbox.js';
 import { DeepSeekHarnessDriver } from '../driver/harness-driver.js';
 import { RemoteNodeSession } from './session.js';
 import { loadOrCreateIdentity } from '../identity.js';
+import { CapsHealth } from '../caps-health.js';
+import { makeAudit } from '@qlong/core';
 import { DEFAULT_PARAMS, type QlongParams } from '@qlong/core';
 import type { LoadSnapshot } from '../executor/gates.js';
 
@@ -37,6 +39,8 @@ export interface ProductionNodeOptions {
   load?: () => LoadSnapshot | undefined;
   /** 上报周期,默认 60s(03 §4 动态刷新);0 = 关闭周期上报 */
   reportIntervalMs?: number;
+  /** 审计事件出口(含能力自愈 cap_tag_* 事件,01 §11) */
+  onAudit?: (a: import('@qlong/core').AuditRecord) => void;
 }
 
 export interface ProductionNode {
@@ -70,6 +74,14 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
   });
 
   // 3) 组装 session(harness driver 或自定义)
+  // 能力自愈两段式(03 §7):健康视图 = 静态声明 − 软摘 − 硬摘;fail(caps_missing) 回流驱动
+  const health = opts.capabilities
+    ? new CapsHealth({
+        staticCaps: opts.capabilities,
+        onEvent: (event, tag) =>
+          opts.onAudit?.(makeAudit(event, { node_id: me.node_id, reason: tag }, () => new Date().toISOString())),
+      })
+    : undefined;
   const session = new RemoteNodeSession({
     nodeId: me.node_id,
     teamId: me.team_id,
@@ -78,8 +90,17 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     client,
     params: opts.params ?? DEFAULT_PARAMS,
     driver: opts.driver ?? new DeepSeekHarnessDriver(),
-    capabilities: opts.capabilities,
+    onAudit: opts.onAudit,
+    capabilities: () => (health ? health.effectiveCaps() : (opts.capabilities?.() ?? [])),
     load: opts.load,
+    onOutboundFail: (body) => {
+      const missing = (body as { missing_caps?: unknown }).missing_caps;
+      if (!health || !Array.isArray(missing)) return;
+      const tags = missing.filter((t): t is string => typeof t === 'string');
+      if (tags.length === 0) return;
+      const delta = health.onCapsMissing(tags);
+      if (delta.suspected.length > 0 || delta.removed.length > 0) reportCaps(); // 档案与健康视图对齐
+    },
   });
 
   const putRegistry = (path: string, body: unknown): void => {
@@ -90,21 +111,28 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     }).catch(() => {});
   };
 
-  // 4) caps/load 上报(03 §4):静态启动即报 + 动态周期刷新
+  // 4) caps/load 上报(03 §4):静态启动即报 + 动态周期刷新 + 变更检测即报
   const reportIntervalMs = opts.reportIntervalMs ?? 60_000;
+  let lastCapsJson = '';
   const reportCaps = (): void => {
-    putRegistry('/v1/nodes/me/caps', { caps: opts.capabilities?.() ?? [] });
+    const caps = session.opts.capabilities?.() ?? [];
+    const json = JSON.stringify(caps);
+    if (json === lastCapsJson) return; // 变更检测:未变化不重报(评审 I-59 语义)
+    lastCapsJson = json;
+    putRegistry('/v1/nodes/me/caps', { caps });
   };
   const reportLoad = (): void => {
     const l = opts.load?.();
-    if (!l) return;
-    putRegistry('/v1/nodes/me/load', {
-      queue_depth: l.queueDepth,
-      running: l.running,
-      accepting: true,
-      ts: new Date().toISOString(),
-      ttl_ms: 60_000,
-    });
+    if (l) {
+      putRegistry('/v1/nodes/me/load', {
+        queue_depth: l.queueDepth,
+        running: l.running,
+        accepting: true,
+        ts: new Date().toISOString(),
+        ttl_ms: 60_000,
+      });
+    }
+    reportCaps(); // 周期内顺带做变更检测(自愈/静态变更即报,03 §4)
   };
 
   // 5) taskStatusReporter:lead 终态时自动上报到 registry
@@ -123,6 +151,7 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     client,
     start: async () => {
       await client.open().catch(() => {}); // weak-net 后台重连兜底
+      lastCapsJson = '';
       reportCaps();
       if (reportIntervalMs > 0) reportTimer = setInterval(reportLoad, reportIntervalMs);
     },

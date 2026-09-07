@@ -10,3 +10,5 @@ export * from './attempt-gate.js';
 export * from './dedup.js';
 export * from './audit.js';
 export * from './frames.js';export * from './caps.js';
+export * from './metrics.js';
+export * from './logger.js';

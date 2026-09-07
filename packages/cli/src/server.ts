@@ -10,10 +10,19 @@ export interface ServerHandles {
   close(): Promise<void>;
   registryPort: number;
   gatewayPort: number;
+  /** 最近一次 GC 结果(运营观测) */
+  readonly lastGc: { removedOrphanTeams: number; revokedOfflineNodes: number };
 }
 
 export async function startQlongServer(
-  opts: { registryPort?: number; gatewayPort?: number; host?: string; enrollRatePerMinPerIp?: number } = {},
+  opts: {
+    registryPort?: number;
+    gatewayPort?: number;
+    host?: string;
+    enrollRatePerMinPerIp?: number;
+    /** GC 周期(默认 6h;0 = 关闭) */
+    gcIntervalMs?: number;
+  } = {},
 ): Promise<ServerHandles> {
   const host = opts.host ?? '127.0.0.1';
   const registry = new Registry({ now: () => Date.now() });
@@ -39,15 +48,28 @@ export async function startQlongServer(
       resolve((httpServer.address() as { port: number }).port);
     });
   });
-  // 目录快照 → 网关(02 §7.1:epoch 推进的简化实现——周期全量同步;增量推送列 v0.3)
-  const syncTimer = setInterval(() => {
+  const sync = (): void => {
     gw.syncRegistry(registry.snapshot(), (id) => registry.getNode(id)?.status);
-  }, 5_000);
+  };
+  // §7.1:目录变更即时推送(join/suspend/revoke/轮换经 onDirectoryChange 触发)
+  const offChange = registry.onDirectoryChange(sync);
+  // 60s 兜底全量同步 + 启动首推
+  sync();
+  const syncTimer = setInterval(sync, 60_000);
+  // GC(评审 I-16/I-48):启动跑一次 + 每 6 小时周期
+  const gcIntervalMs = opts.gcIntervalMs ?? 6 * 3_600_000;
+  let gcResult = registry.gc();
+  const gcTimer = gcIntervalMs > 0 ? setInterval(() => (gcResult = registry.gc()), gcIntervalMs) : undefined;
   return {
     registryPort,
     gatewayPort,
+    get lastGc(): { removedOrphanTeams: number; revokedOfflineNodes: number } {
+      return gcResult;
+    },
     close: async () => {
+      offChange();
       clearInterval(syncTimer);
+      if (gcTimer) clearInterval(gcTimer);
       await gw.close();
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     },

@@ -103,4 +103,16 @@
 - **CLI 运营面**:qlong join(入网写配置)/ run(常驻节点)/ server(单进程中心三件套:registry HTTP + 通讯网关 ws)
 - 修复 gateway grant.spec 类型错误;全量 **180 测试全绿**,5 包 typecheck 干净
 
-**待办(v0.3+)**:git bundle payload 存储(§8.4 定稿排期 v0.3)、目录 epoch 增量推送(现为周期全量同步)、网关集群化(02 §12.1)、双机纸面走查回填任务书模板与全矩阵。
+## v0.4 新增(设计收尾:残余缺口清零)
+
+- **同队缓冲带**(03 §6.3):per-source offer 限速(超限 reject busy)、远端任务开始/结束本地通知、本地即时暂停接单开关(独立于 accepting 快照)
+- **能力自愈两段式**(03 §7 / D32):CapsHealth——10 分钟窗 ≥3 次 caps_missing → 软摘(24h 无复发自动恢复);确定性复核确认缺失 → 硬摘;24h 滞回防抖;cap_tag_suspected/removed/recovered 审计事件
+- **最小指标集**(01 §11):NodeMetrics——lost 计数、drain 命中、attempt 分布、reject/fail 直方图、心跳抖动、escalate 率;session 全链路埋点,`session.metrics.snapshot()` 读取
+- **日志关联规范**(01 §11):makeJsonLogger + logTaskEvent——任务日志强制 trace_id/task_id/attempt/msg_id 四字段,缺失在调用点抛错
+- **目录变更即时推送**(02 §7.1):registry.onDirectoryChange(join/suspend/revoke/轮换触发),CLI server 订阅即推,60s 全量同步降为兜底
+- **配额与 GC**(02 §4.2/I-16):每 owner 节点数配额(超限 429 quota_exceeded)、零成员单机 team 到期删除、长期离线节点吊销+档案清理;server 启动即跑 + 6h 周期
+- **发布物校验和**(02 §10/I-16):package.mjs 生成 SHA256SUMS.txt;install.sh(sha256sum/shasum)与 install.ps1(Get-FileHash)下载后强制校验
+- **R10 重定向加固**:payload 拉取一律不跟随 3xx,堵住白名单主机借重定向探测私网的绕过路径
+- 去重保留期接线 R1 公式(dedupRetentionMs);全量 **198 测试全绿**,5 包 typecheck 干净
+
+**待办(v0.5)**:git bundle payload 存储、网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、真实 deepseek-harness 联调。

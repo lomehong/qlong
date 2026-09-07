@@ -33,6 +33,28 @@ fi
 
 echo ">>> 下载 qlong..."
 curl -fsSL "https://github.com/lomehong/qlong/releases/latest/download/qlong-$OS-$ARCH" -o "$INSTALL_DIR/qlong"
+
+# 发布物校验(评审 I-16):SHA256SUMS.txt 比对,不匹配即中止
+echo ">>> 校验发布物..."
+curl -fsSL "https://github.com/lomehong/qlong/releases/latest/download/SHA256SUMS.txt" -o "$INSTALL_DIR/SHA256SUMS.txt"
+if command -v sha256sum >/dev/null 2>&1; then
+  EXPECTED=$(grep "  qlong-$OS-$ARCH\$" "$INSTALL_DIR/SHA256SUMS.txt" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  EXPECTED=$(grep "  qlong-$OS-$ARCH\$" "$INSTALL_DIR/SHA256SUMS.txt" | awk '{print $1}')
+else
+  EXPECTED=""
+  echo ">>> 警告:未找到 sha256sum/shasum,跳过校验和验证"
+fi
+if [ -n "$EXPECTED" ]; then
+  ACTUAL=$(sha256sum "$INSTALL_DIR/qlong" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$INSTALL_DIR/qlong" | awk '{print $1}')
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo ">>> 安装中止:发布物校验和不匹配(预期 $EXPECTED,实际 $ACTUAL)" >&2
+    rm -f "$INSTALL_DIR/qlong" "$INSTALL_DIR/SHA256SUMS.txt"
+    exit 1
+  fi
+  echo ">>> 校验通过"
+fi
+rm -f "$INSTALL_DIR/SHA256SUMS.txt"
 chmod +x "$INSTALL_DIR/qlong"
 
 # enrollment(token 经 stdin,不进命令行)

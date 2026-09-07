@@ -75,6 +75,72 @@ describe('createProductionNode', () => {
   });
 });
 
+describe('caps 变更检测与自愈上报(03 §4/§7)', () => {
+  it('静态变更 → 周期内即报;caps_missing 自愈软摘 → 档案对齐', async () => {
+    const capsPuts: string[][] = [];
+    const srv: Server = createServer((req, res) => {
+      const path = req.url ?? '';
+      if (req.method === 'GET' && path === '/v1/nodes/me') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ node_id: '22222222-2222-4222-8222-222222222222', team_id: 't1', key_epoch: 1 }));
+        return;
+      }
+      if (req.method === 'PUT' && path === '/v1/nodes/me/caps') {
+        let raw = '';
+        req.on('data', (c: Buffer) => (raw += c.toString()));
+        req.on('end', () => {
+          capsPuts.push((JSON.parse(raw) as { caps: string[] }).caps);
+          res.writeHead(200);
+          res.end('{}');
+        });
+        return;
+      }
+      if (req.method === 'PUT' && path === '/v1/nodes/me/load') {
+        res.writeHead(200);
+        res.end('{}');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as { port: number }).port;
+
+    const staticCaps = ['tool:node@20'];
+    const dataDir = mkdtempSync(join(tmpdir(), 'qlong-caps-'));
+    const { createProductionNode } = await import('../src/remote/factory.js');
+    const node = await createProductionNode({
+      registryUrl: `http://127.0.0.1:${port}`,
+      gatewayUrl: 'ws://127.0.0.1:9',
+      nodeToken: 'node_test',
+      dataDir,
+      capabilities: () => [...staticCaps],
+      reportIntervalMs: 25,
+    });
+    try {
+      await node.start();
+      await new Promise((r) => setTimeout(r, 60));
+      expect(capsPuts[0]).toEqual(['tool:node@20']);
+      // 静态变更(装了新工具)→ 下一周期即报
+      staticCaps.push('tool:ffmpeg');
+      await new Promise((r) => setTimeout(r, 80));
+      expect(capsPuts.some((c) => c.join(',') === 'tool:node@20,tool:ffmpeg')).toBe(true);
+      // 自愈:同一标签 3 次 caps_missing → 软摘 → 档案排除(健康视图生效)
+      const fail = { reason_code: 'caps_missing', retryable: true, summary: 'x', missing_caps: ['tool:ffmpeg'] };
+      node.session.opts.onOutboundFail?.(fail);
+      node.session.opts.onOutboundFail?.(fail);
+      node.session.opts.onOutboundFail?.(fail);
+      await new Promise((r) => setTimeout(r, 80));
+      const last = capsPuts[capsPuts.length - 1];
+      expect(last).toEqual(['tool:node@20']);
+    } finally {
+      node.stop();
+      srv.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('节点身份存档(02 §3.2)', () => {
   it('同一 dataDir 二次加载返回同一密钥(私钥不重生成)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'qlong-id-'));

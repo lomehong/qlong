@@ -9,6 +9,7 @@ export const ERROR_CODES = [
   'node_suspended',
   'key_epoch_conflict',
   'rate_limited',
+  'quota_exceeded',
   'owner_auth_unconfigured',
   'bad_request',
 ] as const;

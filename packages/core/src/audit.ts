@@ -19,6 +19,7 @@ export const AUDIT_EVENTS = [
   'escalate',
   'cap_tag_suspected',
   'cap_tag_removed',
+  'cap_tag_recovered',
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

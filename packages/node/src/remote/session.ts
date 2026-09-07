@@ -6,13 +6,18 @@
 import {
   DEFAULT_PARAMS,
   DedupStore,
+  dedupRetentionMs,
+  logTaskEvent,
   makeAudit,
   newId,
   newTraceContext,
   signEnvelope,
   validateEnvelope,
+  NodeMetrics,
   type AuditRecord,
   type EnvelopeV1,
+  type LogFields,
+  type QlongLogger,
   type QlongParams,
   type TraceContext,
 } from '@qlong/core';
@@ -52,6 +57,18 @@ export interface RemoteSessionOptions {
   onEscalate?: (summary: { task_id: string; attempts: unknown[]; final_reason: string }) => void;
   onAudit?: (a: AuditRecord) => void;
   onRoutingDenied?: (d: { rule: string; reason_code: string; msg_id: string }) => void;
+  /** 最小指标集(01 §11):缺省内置实例;快照经 session.metrics.snapshot() 读取 */
+  metrics?: NodeMetrics;
+  /** 结构化日志器(01 §11 日志关联规范);缺省静默 */
+  logger?: QlongLogger;
+  /** 03 §6.3 远端任务开始/结束的本地可见通知(通知不阻断) */
+  notify?: (n: { kind: 'task_start' | 'task_end'; task_id: string; from: string; state?: string; summary?: string }) => void;
+  /** 03 §6.3 同队缓冲带:每来源每分钟 offer 上限;超限 reject(busy) */
+  rateLimit?: { maxOffersPerMinPerSource?: number };
+  /** 03 §6.3 本地即时暂停开关(独立于 accepting 快照);true = 拒绝新远端单 */
+  acceptRemotePaused?: boolean;
+  /** 03 §7 自愈:出站 task.fail 钩子(执行方侧;缺 reason_code 的内部错误也回调) */
+  onOutboundFail?: (body: Record<string, unknown>) => void;
 }
 
 interface OutboundSpec {
@@ -80,7 +97,8 @@ export class RemoteNodeSession {
   rejectedInbound = 0;
 
   private readonly params: QlongParams;
-  private readonly dedup = new DedupStore(3_600_000);
+  /** R1:去重保留期按参数推导(≥ max(offer_ttl, lease) × max_attempts + drain,两种 kind 取大) */
+  private readonly dedup: DedupStore;
   private readonly traces = new Map<string, TraceContext>();
   private readonly lastOfferBody = new Map<string, Record<string, unknown>>();
   private readonly leadTimers = new Map<string, NodeJS.Timeout>();
@@ -91,6 +109,16 @@ export class RemoteNodeSession {
   private execCtx: ExecContext | null = null;
   /** 牵头方"节点-能力"记忆(03 §7):来源 = reject(unsupported_caps).missing 与 fail(caps_missing).missing_caps;软降权用,协议排除仍由 R8 承担 */
   private readonly capMemory = new Map<string, Set<string>>();
+  /** 03 §6.3 同队缓冲带:每来源 offer 时间戳滑动窗(ms) */
+  private readonly offersBySource = new Map<string, number[]>();
+  /** 03 §6.3 本地即时暂停开关:暂停期间新 offer 一律 reject(busy) */
+  private acceptRemotePaused: boolean;
+  /** 每 task 最近一条消息的关联字段(终态日志用,01 §11) */
+  private readonly lastTaskMsg = new Map<string, { trace_id: string; msg_id: string; attempt: number }>();
+  readonly metrics: NodeMetrics;
+  private readonly logger?: QlongLogger;
+  private readonly notify?: RemoteSessionOptions['notify'];
+  private readonly maxOffersPerMinPerSource: number;
   /** rpc.ask 去重(重投只答一次)+ 外发问题登记(01 §4.1:按 request_id 关联应答) */
   private readonly answeredRpc = new Set<string>();
   private readonly pendingAsks = new Map<
@@ -103,7 +131,14 @@ export class RemoteNodeSession {
     this.nodeId = opts.nodeId;
     this.teamId = opts.teamId;
     this.params = opts.params ?? DEFAULT_PARAMS;
+    const p = this.params;
+    this.dedup = new DedupStore(Math.max(dedupRetentionMs('project', p), dedupRetentionMs('aid', p)));
     this.lead = opts.lead;
+    this.metrics = opts.metrics ?? new NodeMetrics();
+    this.logger = opts.logger;
+    this.notify = opts.notify;
+    this.acceptRemotePaused = opts.acceptRemotePaused ?? false;
+    this.maxOffersPerMinPerSource = opts.rateLimit?.maxOffersPerMinPerSource ?? 30;
     this.exec =
       opts.executor ??
       new ExecutorMachine({
@@ -142,6 +177,7 @@ export class RemoteNodeSession {
     if (this.lastProgressMsgId !== '' && ack.msg_id === this.lastProgressMsgId && this.execCtx) {
       this.lastProgressMsgId = '';
       const ctx = this.execCtx;
+      this.metrics.onHeartbeatAcked(this.now());
       const acts = this.exec.onHeartbeatAcked(this.now());
       this.processExec(acts, ctx);
     }
@@ -178,12 +214,15 @@ export class RemoteNodeSession {
     for (const a of actions) {
       switch (a.kind) {
         case 'send': {
+          if (a.msg.type === 'task.reject') this.metrics.onReject((a.msg.body as { reason_code?: string }).reason_code ?? 'other');
+          if (a.msg.type === 'task.fail') this.metrics.onFail((a.msg.body as { reason_code?: string }).reason_code ?? 'other');
           const trace = this.traces.get(a.msg.task_id ?? '') ?? newTraceContext(this.nodeId);
           this.traces.set(a.msg.task_id ?? '', trace);
           void this.deliver(this.seal(a.msg, trace));
           break;
         }
         case 'audit':
+          if (a.event === 'reclaim' && a.reason === 'lease lost') this.metrics.onLost();
           this.opts.onAudit?.(makeAudit(a.event, { node_id: this.nodeId, reason: a.reason }, () => new Date(this.now()).toISOString()));
           break;
         case 'schedule':
@@ -202,11 +241,25 @@ export class RemoteNodeSession {
           if (target !== undefined) this.redispatchLead(m.task_id, target);
           break;
         }
-        case 'terminal':
-          this.opts.onTerminal?.(this.lead?.task_id ?? '', a.state, this.lead?.rec.resultBody);
-        this.opts.taskStatusReporter?.({ task_id: this.lead?.task_id ?? '', type: 'project', team_id: this.opts.teamId, lead: this.opts.nodeId, exec: this.lead?.rec.target ?? '', attempt: this.lead?.rec.attempt ?? 0, status: a.state });
+        case 'terminal': {
+          this.metrics.onTerminal(this.lead?.rec.attempt ?? 0);
+          const taskId = this.lead?.task_id ?? '';
+          const last = this.lastTaskMsg.get(taskId);
+          if (this.logger && last) {
+            logTaskEvent(this.logger, 'info', '任务到达终态 ' + a.state, {
+              trace_id: last.trace_id,
+              task_id: taskId,
+              attempt: last.attempt,
+              msg_id: last.msg_id,
+            });
+          }
+          this.notify?.({ kind: 'task_end', task_id: taskId, from: this.lead?.rec.target ?? '', state: a.state });
+          this.opts.onTerminal?.(taskId, a.state, this.lead?.rec.resultBody);
+          this.opts.taskStatusReporter?.({ task_id: this.lead?.task_id ?? '', type: 'project', team_id: this.opts.teamId, lead: this.opts.nodeId, exec: this.lead?.rec.target ?? '', attempt: this.lead?.rec.attempt ?? 0, status: a.state });
           break;
+        }
         case 'escalate':
+          this.metrics.onEscalate();
           this.opts.onEscalate?.(a.summary);
           break;
       }
@@ -221,6 +274,19 @@ export class RemoteNodeSession {
         case 'send': {
           const env = this.seal(a.msg, ctx.trace);
           if (a.msg.type === 'task.progress') this.lastProgressMsgId = env.msg_id;
+          if (a.msg.type === 'task.reject') this.metrics.onReject((a.msg.body as { reason_code?: string }).reason_code ?? 'other');
+          if (a.msg.type === 'task.fail') {
+            this.metrics.onFail((a.msg.body as { reason_code?: string }).reason_code ?? 'other');
+            this.opts.onOutboundFail?.(a.msg.body);
+          }
+          if (a.msg.type === 'task.result' || a.msg.type === 'task.fail') {
+            this.notify?.({
+              kind: 'task_end',
+              task_id: a.msg.task_id ?? '',
+              from: this.execCtx?.offer.__from ? String(this.execCtx.offer.__from) : '',
+              state: a.msg.type === 'task.result' ? 'result_sent' : 'fail_sent',
+            });
+          }
           void this.deliver(env);
           break;
         }
@@ -238,6 +304,7 @@ export class RemoteNodeSession {
               break;
             }
           }
+          this.notify?.({ kind: 'task_start', task_id: a.task_id, from: String(ctx.offer.__from ?? ''), summary: String(ctx.offer.summary ?? '') });
           this.opts.driver?.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost(a.task_id, a.attempt, ctx));
           break;
         case 'stopDriver':
@@ -312,6 +379,33 @@ export class RemoteNodeSession {
     const now = this.now();
     if (env.type === 'task.offer') {
       const taskId = env.task_id ?? '';
+      // 03 §6.3 缓冲带①:本地暂停开关(即时生效,独立于 accepting 快照)
+      if (this.acceptRemotePaused) {
+        void this.deliver(
+          this.seal(
+            { type: 'task.reject', to_node: env.from.node_id, task_id: taskId, attempt: env.attempt, body: { reason_code: 'busy', retry_after_ms: 30_000, detail: '本地已暂停接远端单' } },
+            env.trace,
+          ),
+        );
+        this.metrics.onReject('busy');
+        return;
+      }
+      // 03 §6.3 缓冲带②:per-source 滑动窗限速(60s 窗口)
+      const win = (this.offersBySource.get(env.from.node_id) ?? []).filter((t) => now - t < 60_000);
+      if (win.length >= this.maxOffersPerMinPerSource) {
+        this.offersBySource.set(env.from.node_id, win);
+        void this.deliver(
+          this.seal(
+            { type: 'task.reject', to_node: env.from.node_id, task_id: taskId, attempt: env.attempt, body: { reason_code: 'busy', retry_after_ms: 60_000, detail: '来源限速' } },
+            env.trace,
+          ),
+        );
+        this.metrics.onReject('busy');
+        return;
+      }
+      win.push(now);
+      this.offersBySource.set(env.from.node_id, win);
+      this.logTask(env, 'info', 'task.offer 已接收');
       this.traces.set('exec:' + taskId, env.trace);
       const acts = this.exec.onOffer({
         from: env.from.node_id,
@@ -344,15 +438,53 @@ export class RemoteNodeSession {
       this.onRpcAnswer(env);
       return;
     }
+    if (fam === 'task') {
+      this.lastTaskMsg.set(env.task_id ?? '', {
+        trace_id: env.trace.trace_id,
+        msg_id: env.msg_id,
+        attempt: env.attempt ?? 0,
+      });
+    }
     if (this.lead) {
       // 能力记忆采集(03 §7):失败回执中的缺失标签 → 节点画像,供改派候选软降权
-      if (env.type === 'task.reject' && (env.body as { reason_code?: string }).reason_code === 'unsupported_caps') {
-        this.recordCapMemory(env.from.node_id, (env.body as { missing?: unknown }).missing);
-      } else if (env.type === 'task.fail' && (env.body as { reason_code?: string }).reason_code === 'caps_missing') {
-        this.recordCapMemory(env.from.node_id, (env.body as { missing_caps?: unknown }).missing_caps);
+      if (env.type === 'task.reject') {
+        const reason = (env.body as { reason_code?: string }).reason_code ?? 'other';
+        this.metrics.onReject(reason);
+        if (reason === 'unsupported_caps') {
+          this.recordCapMemory(env.from.node_id, (env.body as { missing?: unknown }).missing);
+          this.logTask(env, 'warn', 'offer 被拒:unsupported_caps');
+        }
+      } else if (env.type === 'task.fail') {
+        const reason = (env.body as { reason_code?: string }).reason_code ?? 'other';
+        this.metrics.onFail(reason);
+        if (reason === 'caps_missing') {
+          this.recordCapMemory(env.from.node_id, (env.body as { missing_caps?: unknown }).missing_caps);
+        }
       }
+      const prevState = this.lead.rec.state;
       this.processLead(this.lead.onMessage(env.type, env.from.node_id, env.attempt ?? 0, env.body, now));
+      // drain 命中(01 §11):reclaiming/cancelling 窗口内收到 result 且落 done
+      if (
+        env.type === 'task.result' &&
+        (prevState === 'reclaiming' || prevState === 'cancelling') &&
+        this.lead.rec.state === 'done'
+      ) {
+        this.metrics.onDrainHit();
+      }
     }
+  }
+
+  /** 01 §11 日志关联规范:任务相关日志强制四字段(缺失即抛错) */
+  private logTask(env: EnvelopeV1, level: 'info' | 'warn' | 'error', msg: string): void {
+    if (!this.logger) return;
+    const fields: LogFields & { trace_id: string; task_id: string; attempt: number; msg_id: string } = {
+      trace_id: env.trace.trace_id,
+      task_id: env.task_id ?? '',
+      attempt: env.attempt ?? 0,
+      msg_id: env.msg_id,
+      key_epoch: env.from.key_epoch,
+    };
+    logTaskEvent(this.logger, level, msg, fields);
   }
 
   private recordCapMemory(nodeId: string, missing: unknown): void {
@@ -487,6 +619,15 @@ export class RemoteNodeSession {
       clearTimeout(t);
       pool.delete(key);
     }
+  }
+
+  /** 03 §6.3:本地即时暂停/恢复接远端单(独立于 load.accepting 快照) */
+  setAcceptRemotePaused(paused: boolean): void {
+    this.acceptRemotePaused = paused;
+  }
+
+  isAcceptRemotePaused(): boolean {
+    return this.acceptRemotePaused;
   }
 
   dispose(): void {
