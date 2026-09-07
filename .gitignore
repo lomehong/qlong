@@ -3,3 +3,4 @@ dist/
 coverage/
 *.tsbuildinfo
 packages/console/dist
+dist-release/
