@@ -1,35 +1,43 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>群龙控制台</title>
 <style>
 :root{--bg:#f0f2f5;--card:#fff;--side:#151b2e;--side-txt:#8892b0;--pri:#4361ee;--pri-bg:#eef2ff;--green:#16c784;--red:#ea3943;--orange:#f5a623;--text:#1a1a2e;--mut:#718096;--bd:#e2e8f0;--r:8px}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
 a{color:var(--pri);text-decoration:none}
+button{font-family:inherit}
 .sidebar{position:fixed;left:0;top:0;bottom:0;width:230px;background:var(--side);display:flex;flex-direction:column;z-index:10}
-.logo{padding:24px 20px 20px;font-size:20px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
+.logo{padding:24px 20px 16px;font-size:20px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
 .logo em{color:var(--pri);font-style:normal}
-.nav{flex:1}
-.nav a{display:flex;align-items:center;gap:12px;padding:11px 20px;color:var(--side-txt);font-size:14px;border-left:3px solid transparent;transition:.15s}
+.nav{flex:1;overflow-y:auto}
+.nav .section{padding:16px 20px 6px;font-size:11px;color:var(--side-txt);text-transform:uppercase;letter-spacing:.5px}
+.nav a{display:flex;align-items:center;gap:12px;padding:10px 20px;color:var(--side-txt);font-size:14px;border-left:3px solid transparent;transition:.15s}
 .nav a:hover{color:#fff;background:rgba(255,255,255,.04)}
 .nav a.on{color:#ccd6f6;background:rgba(67,97,238,.12);border-left-color:var(--pri)}
 .nav .ico{width:20px;text-align:center;font-size:15px}
-.side-user{padding:16px 20px;border-top:1px solid rgba(255,255,255,.06)}
-.side-user .role{font-size:11px;color:var(--side-txt)}
-.side-user .name{font-size:14px;color:#fff;margin-top:2px}
+.nav .sub-item{padding-left:44px;font-size:13px}
+.side-bottom{padding:16px 20px;border-top:1px solid rgba(255,255,255,.06)}
+.side-bottom .role{font-size:11px;color:var(--side-txt)}
+.side-bottom .name{font-size:14px;color:#fff;margin-top:2px}
+.side-bottom .back-btn{margin-top:10px;font-size:12px;color:var(--side-txt);cursor:pointer;display:flex;align-items:center;gap:6px}
+.side-bottom .back-btn:hover{color:#fff}
 .main{margin-left:230px;padding:28px 36px;min-height:100vh}
 .page{display:none}.page.on{display:block}
 h1{font-size:22px;margin-bottom:4px}
 .sub{color:var(--mut);font-size:13px;margin-bottom:24px}
 h2{font-size:15px;font-weight:600;margin:0 0 12px}
+.breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:13px;color:var(--mut)}
+.breadcrumb a{cursor:pointer}.breadcrumb a:hover{color:var(--pri)}
+.breadcrumb .sep{color:var(--bd)}
+.breadcrumb .current{color:var(--text);font-weight:500}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
-.stat{background:#fff;border-radius:var(--r);padding:18px 20px;border:1px solid var(--bd);cursor:pointer;transition:.15s}
-.stat:hover{border-color:var(--pri)}
-.stat .n{font-size:30px;font-weight:700;line-height:1.1}
-.stat .l{font-size:12px;color:var(--mut);margin-top:4px}
+.dcard{background:#fff;border-radius:var(--r);padding:18px 20px;border:1px solid var(--bd);cursor:pointer;transition:.15s}
+.dcard:hover{border-color:var(--pri)}
+.dcard .n{font-size:30px;font-weight:700;line-height:1.1}
+.dcard .l{font-size:12px;color:var(--mut);margin-top:4px}
 .card{background:#fff;border:1px solid var(--bd);border-radius:var(--r);padding:20px;margin-bottom:20px}
 .card>h2{margin:0 0 14px}
 .tbl{width:100%;border-collapse:collapse}
@@ -64,9 +72,7 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 .toolbar{display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap}
 .toolbar input[type=text],.toolbar select{padding:7px 12px;border:1px solid var(--bd);border-radius:6px;font-size:13px}
 .toolbar input[type=text]{width:240px}
-.flex{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
-.cd{font-weight:700;font-size:13px}
-.cd-warn{color:var(--red)}
+.cd{font-weight:700;font-size:13px}.cd-warn{color:var(--red)}
 .ev{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
 .ev-red{background:#feecea;color:var(--red)}.ev-org{background:#fff8e1;color:#b8860b}.ev-blu{background:var(--pri-bg);color:var(--pri)}.ev-grn{background:#e6f9f0;color:#0a8f5c}
 .kv{display:grid;grid-template-columns:140px 1fr;gap:6px 16px;font-size:13px}
@@ -77,50 +83,105 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--side)}
 .login-box{background:#fff;border-radius:12px;padding:40px;width:380px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
 .login-box h1{font-size:20px;text-align:center;margin-bottom:24px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.tcard{background:#fff;border:1px solid var(--bd);border-radius:var(--r);padding:24px;cursor:pointer;transition:.15s}
+.tcard:hover{border-color:var(--pri);box-shadow:0 4px 16px rgba(67,97,238,.1)}
+.tcard .name{font-size:18px;font-weight:700;margin-bottom:8px}
+.tcard .meta{font-size:12px;color:var(--mut);display:flex;gap:16px;margin-top:12px}
+.tcard .arrow{float:right;color:var(--mut);font-size:18px}
 .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 .detail-grid .card{margin-bottom:0}
 .back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-bottom:16px;cursor:pointer}
 .back:hover{color:var(--pri)}
 .token-display{background:var(--side);color:var(--green);padding:14px 18px;border-radius:var(--r);font-family:monospace;font-size:15px;word-break:break-all;position:relative}
 .token-display .copy{position:absolute;right:10px;top:10px;background:rgba(255,255,255,.1);border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}
-.dgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
-.dcard{background:#fff;border-radius:var(--r);padding:18px 20px;border:1px solid var(--bd);cursor:pointer;transition:.15s}
-.dcard:hover{border-color:var(--pri)}
-.dcard .n{font-size:30px;font-weight:700;line-height:1.1}
-.dcard .l{font-size:12px;color:var(--mut);margin-top:4px}
 </style>
 </head>
 <body>
-<div id="pg-login" class="login-wrap">
+
+<!-- ===== LOGIN ===== -->
+<div id="pg-login" class="login-wrap" style="display:flex">
 <div class="login-box">
 <div style="text-align:center;font-size:28px;font-weight:700;margin-bottom:8px">🐉 群龙<em style="color:var(--pri);font-style:normal">Console</em></div>
 <p style="text-align:center;color:var(--mut);margin-bottom:24px;font-size:13px">分布式 AI Agent 协作平台</p>
 <div class="fg"><label>邮箱</label><input type="email" value="owner@qlong.io"></div>
 <div class="fg"><label>密码</label><input type="password" value="password123"></div>
-<button class="btn btn-p" style="width:100%;padding:10px;margin-top:8px" onclick="doLogin()">登录控制台</button>
+<button class="btn btn-p" style="width:100%;padding:10px;margin-top:8px" onclick="showPage('pg-teams');initSidebar()">登录控制台</button>
 <p style="text-align:center;margin-top:16px;font-size:12px;color:var(--mut)">登录由产品侧提供;控制台仅使用会话 cookie</p>
 </div>
 </div>
-<div id="pg-main" style="display:none">
+
+<!-- ===== APP SHELL ===== -->
+<div id="pg-app" style="display:none">
 <nav class="sidebar">
-<div class="logo">🐉 群龙<em>Console</em></div>
-<div class="nav">
-<a href="#" class="on" data-p="overview" onclick="nav(this.dataset.p)"><span class="ico">📊</span> 团队概览</a>
-<a href="#" data-p="nodes" onclick="nav(this.dataset.p)"><span class="ico">🖥️</span> 节点管理</a>
-<a href="#" data-p="tokens" onclick="nav(this.dataset.p)"><span class="ico">🎫</span> Enroll Token</a>
-<a href="#" data-p="grants" onclick="nav(this.dataset.p)"><span class="ico">🔗</span> 跨队授权</a>
-<a href="#" data-p="audit" onclick="nav(this.dataset.p)"><span class="ico">📋</span> 审计事件</a>
-<a href="#" data-p="settings" onclick="nav(this.dataset.p)"><span class="ico">⚙️</span> 团队设置</a>
+<div class="logo">🐉 群龙<em style="color:var(--pri);font-style:normal">Console</em></div>
+
+<!-- 团队列表模式导航 -->
+<div class="nav" id="nav-team-list">
+<div class="section">团队</div>
+<a href="#" class="on" data-p="pg-teams" onclick="showPage(this.dataset.p)"><span class="ico">🏠</span> 我的团队</a>
 </div>
-<div class="side-user"><div class="role">Owner</div><div class="name">owner@qlong.io</div></div>
+
+<!-- 团队内导航(选中团队后显示) -->
+<div class="nav" id="nav-team-ctx" style="display:none">
+<div class="section" id="nav-team-name">团队</div>
+<a href="#" data-p="pg-t-overview" onclick="showPage(this.dataset.p)"><span class="ico">📊</span> 概览</a>
+<a href="#" data-p="pg-t-nodes" onclick="showPage(this.dataset.p)"><span class="ico">🖥️</span> 节点管理</a>
+<a href="#" data-p="pg-t-tokens" onclick="showPage(this.dataset.p)"><span class="ico">🎫</span> Token 管理</a>
+<a href="#" data-p="pg-t-grants" onclick="showPage(this.dataset.p)"><span class="ico">🔗</span> 跨队授权</a>
+<a href="#" data-p="pg-t-audit" onclick="showPage(this.dataset.p)"><span class="ico">📋</span> 审计事件</a>
+<a href="#" data-p="pg-t-settings" onclick="showPage(this.dataset.p)"><span class="ico">⚙️</span> 团队设置</a>
+</div>
+
+<div class="nav" style="border-top:1px solid rgba(255,255,255,.06);padding-top:8px">
+<a href="#" onclick="showPage('pg-login');return false;"><span class="ico">←</span> 退出登录</a>
+</div>
+
+<div class="side-bottom">
+<div class="role">Owner</div>
+<div class="name">owner@qlong.io</div>
+<div class="back-btn" id="back-to-teams" style="display:none" onclick="showPage('pg-teams');initSidebar()">
+← 返回团队列表
+</div>
+</div>
 </nav>
+
 <main class="main">
-<div id="pg-overview" class="page on">
-<h1>团队概览</h1><div class="sub">team-x · 研发团队 · 5 个节点</div>
+
+<!-- ===== TEAMS LIST ===== -->
+<div id="pg-teams" class="page on">
+<h1>我的团队</h1><div class="sub">选择一个团队进入控制台</div>
 <div class="dgrid">
-<div class="dcard" onclick="nav('nodes')"><div class="n">5</div><div class="l">总节点</div></div>
+<div class="tcard" onclick="selectTeam('team-x')">
+<div class="arrow">→</div>
+<div class="name">研发团队</div>
+<div style="display:flex;gap:6px;margin:4px 0"><span class="bdg g">active</span></div>
+<div class="meta"><span>🖥 5 节点</span><span style="color:var(--green)">● 3 在线</span></div>
+<div class="meta" style="margin-top:6px"><span class="mono">33333333-...</span></div>
+</div>
+<div class="tcard" onclick="selectTeam('team-y')">
+<div class="arrow">→</div>
+<div class="name">研究团队</div>
+<div style="display:flex;gap:6px;margin:4px 0"><span class="bdg g">active</span></div>
+<div class="meta"><span>🖥 2 节点</span><span style="color:var(--green)">● 1 在线</span></div>
+<div class="meta" style="margin-top:6px"><span class="mono">34444444-...</span></div>
+</div>
+<div class="tcard" style="opacity:.5;cursor:default">
+<div class="name">个人设备</div>
+<div style="display:flex;gap:6px;margin:4px 0"><span class="bdg gr">self-owned</span></div>
+<div class="meta"><span>🖥 1 节点</span><span>offline</span></div>
+</div>
+</div>
+</div>
+
+<!-- ===== TEAM OVERVIEW ===== -->
+<div id="pg-t-overview" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-teams')">我的团队</a><span class="sep">/</span><span class="current" id="bc-team-name"></span></div>
+<h1 id="ov-name"></h1><div class="sub" id="ov-sub"></div>
+<div class="grid4">
+<div class="dcard" onclick="showPage('pg-t-nodes')"><div class="n">5</div><div class="l">总节点</div></div>
 <div class="dcard"><div class="n" style="color:var(--green)">3</div><div class="l">在线</div></div>
-<div class="dcard" onclick="nav('audit')"><div class="n">47</div><div class="l">近 24h 审计事件</div></div>
+<div class="dcard" onclick="showPage('pg-t-audit')"><div class="n">47</div><div class="l">近 24h 审计事件</div></div>
 <div class="dcard"><div class="n">2</div><div class="l">活跃任务</div></div>
 </div>
 <div class="card"><h2>节点状态</h2><table class="tbl"><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>key_epoch</th><th>最近活跃</th><th>caps</th></tr></thead><tbody>
@@ -137,16 +198,21 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <tr><td class="mono">21:12:40</td><td><span class="ev ev-grn">cap_tag_removed</span></td><td>确定性检查失败,已硬摘</td></tr>
 </tbody></table></div>
 </div>
-<div id="pg-nodes" class="page">
-<h1>节点管理</h1><div class="sub">管理团队内全部节点</div>
+
+<!-- ===== TEAM NODES ===== -->
+<div id="pg-t-nodes" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-t-overview')" id="bc2-team"></a><span class="sep">/</span><span class="current">节点管理</span></div>
+<h1>节点管理</h1>
 <div class="toolbar">
 <input type="text" placeholder="🔍 搜索别名或 node_id..." oninput="filterNodes(this.value)">
 <select onchange="filterNodes(document.getElementById('node-search').value)"><option>全部状态</option><option>在线</option><option>离线</option><option>suspended</option></select>
 </div>
 <div class="card"><table class="tbl"><thead><tr><th>状态</th><th>别名</th><th>node_id</th><th>平台</th><th>key_epoch</th><th>caps_rev</th><th>最近活跃</th><th style="text-align:right">操作</th></tr></thead><tbody id="nodes-body"></tbody></table></div>
 </div>
+
+<!-- ===== NODE DETAIL ===== -->
 <div id="pg-node-detail" class="page">
-<a class="back" onclick="nav('nodes')">← 返回节点列表</a>
+<div class="breadcrumb"><a onclick="showPage('pg-t-nodes')">节点管理</a><span class="sep">/</span><span class="current" id="bc-node-name"></span></div>
 <h1 id="nd-name"></h1><div class="sub" id="nd-id"></div>
 <div class="detail-grid">
 <div class="card"><h2>基本信息</h2><dl class="kv">
@@ -177,7 +243,10 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <button class="btn btn-d" onclick="showModal('确认永久吊销该节点?','此操作不可逆。该节点将立即断连且无法恢复。')">吊销</button>
 </div>
 </div>
-<div id="pg-tokens" class="page">
+
+<!-- ===== TEAM TOKENS ===== -->
+<div id="pg-t-tokens" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-t-overview')" id="bc3-team"></a><span class="sep">/</span><span class="current">Token 管理</span></div>
 <h1>Enroll Token 管理</h1><div class="sub">签发一次性邀请码,新节点凭此入网</div>
 <div class="card"><h2>签发新 Token</h2>
 <div class="flex">
@@ -185,7 +254,7 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <button class="btn btn-p" style="margin-bottom:14px" onclick="issueToken()">签发</button>
 </div>
 <div id="new-token-area" style="display:none">
-<div class="section-title" style="color:var(--orange);font-weight:600;margin:12px 0">⚠️ 明文只显示一次,请立即复制</div>
+<div style="color:var(--orange);font-weight:600;margin:12px 0;font-size:13px">⚠️ 明文只显示一次,请立即复制</div>
 <div class="token-display" id="new-token-val"></div>
 </div>
 </div>
@@ -198,7 +267,10 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <tr><td class="mono">f7b2...1a4e</td><td>2026-09-06 19:00</td><td>build-server</td></tr>
 </tbody></table></div>
 </div>
-<div id="pg-grants" class="page">
+
+<!-- ===== TEAM GRANTS ===== -->
+<div id="pg-t-grants" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-t-overview')">概览</a><span class="sep">/</span><span class="current">跨队授权</span></div>
 <h1>跨队授权</h1><div class="sub">显式授权其他 team 与本 team 通信(D27 扩展)</div>
 <div class="card"><h2>创建 Grant</h2>
 <div class="flex">
@@ -212,7 +284,10 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <tr><td>X → Z</td><td>team-z (ops)</td><td>—(全部)</td><td>—</td><td><span class="bdg o">已过期</span></td><td><button class="btn btn-s btn-d">删除</button></td></tr>
 </tbody></table></div>
 </div>
-<div id="pg-audit" class="page">
+
+<!-- ===== TEAM AUDIT ===== -->
+<div id="pg-t-audit" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-t-overview')">概览</a><span class="sep">/</span><span class="current">审计事件</span></div>
 <h1>审计事件</h1><div class="sub">安全与操作审计(只读;P3:不记录 body)</div>
 <div class="toolbar">
 <select><option>全部事件</option><option>sig_verify_failed</option><option>reclaim</option><option>escalate</option><option>stale_attempt_rejected</option><option>dedup_mismatch</option></select>
@@ -221,7 +296,10 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 </div>
 <div class="card"><table class="tbl"><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>原因</th><th>trace_id</th><th>task_id</th><th>头摘要</th></tr></thead><tbody id="audit-body"></tbody></table></div>
 </div>
-<div id="pg-settings" class="page">
+
+<!-- ===== TEAM SETTINGS ===== -->
+<div id="pg-t-settings" class="page">
+<div class="breadcrumb"><a onclick="showPage('pg-t-overview')">概览</a><span class="sep">/</span><span class="current">团队设置</span></div>
 <h1>团队设置</h1>
 <div class="card"><h2>基本信息</h2>
 <div class="fg"><label>Team ID</label><input value="33333333-3333-4333-8333-333333333333" readonly class="mono"></div>
@@ -231,18 +309,21 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 </div>
 <div class="card" style="border:1px solid var(--red)"><h2 style="color:var(--red)">Danger Zone</h2><p class="mut">以下操作不可逆,请谨慎操作。v0.3 排期。</p><br><button class="btn btn-d" disabled style="opacity:.5">删除团队</button></div>
 </div>
+
 </main></div>
+
 <div class="ovl" id="modal" onclick="if(event.target===this)hideModal()">
 <div class="modal"><h3 id="modal-title"></h3><p id="modal-body" class="mut"></p><div class="row"><button class="btn btn-o" onclick="hideModal()">取消</button><button class="btn btn-d" onclick="hideModal();showToast('已执行')">确认</button></div></div>
 </div>
 <div class="toast" id="toast"></div>
+
 <script>
 var NODES=[
 {id:"a4763d9c",name:"dev-machine",status:"active",online:true,platform:"windows",version:"0.1.0",epoch:1,capsRev:3,caps:["tool:node@20","env:windows"],lastSeen:"刚刚",joined:"2026-08-01",pubkey:"a3f0e2b7c1d8e9f4",queue:0,running:0,accepting:true},
 {id:"2c0fb067",name:"build-server",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:2,capsRev:5,caps:["tool:node@20","env:linux","net:office-vpn"],lastSeen:"2 分钟前",joined:"2026-08-15",pubkey:"b4c5d6e7f8a9b0c1",queue:1,running:1,accepting:true},
 {id:"8a1b2c3d",name:"gpu-node",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:1,capsRev:2,caps:["hw:gpu-cuda","env:linux"],lastSeen:"5 分钟前",joined:"2026-09-01",pubkey:"c5d6e7f8a9b0c1d2",queue:0,running:0,accepting:true},
 {id:"9f8e7d6c",name:"macbook-pro",status:"active",online:false,platform:"darwin",version:"0.1.0",epoch:1,capsRev:1,caps:["env:darwin"],lastSeen:"2 小时前",joined:"2026-08-20",pubkey:"d6e7f8a9b0c1d2e3",queue:0,running:0,accepting:true},
-{id:"0a1b2c3d",name:"old-laptop",team:"team-x",status:"suspended",online:false,platform:"linux",version:"0.1.0",epoch:1,capsRev:1,caps:[],lastSeen:"3 天前",joined:"2026-07-01",pubkey:"e7f8a9b0c1d2e3f4",queue:0,running:0,accepting:false}
+{id:"0a1b2c3d",name:"old-laptop",status:"suspended",online:false,platform:"linux",version:"0.1.0",epoch:1,capsRev:1,caps:[],lastSeen:"3 天前",joined:"2026-07-01",pubkey:"e7f8a9b0c1d2e3f4",queue:0,running:0,accepting:false}
 ];
 var AUDITS=[
 {ts:"2026-09-06 21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
@@ -252,21 +333,21 @@ var AUDITS=[
 {ts:"2026-09-06 21:05:44",event:"escalate",cls:"ev-red",node:"2c0f...37fa",reason:"预算耗尽(3/3)",trace:"7b0e...",task:"d41a..."},
 {ts:"2026-09-06 20:58:22",event:"cap_tag_removed",cls:"ev-org",node:"8a1b...2c3d",reason:"确定性检查失败",trace:"",task:""}
 ];
-var TOKENS=[
-{trunc:"a7f3...9e2b",created:"2026-09-06 21:00",ttl:720,used:false},
-{trunc:"c2d8...7f1a",created:"2026-09-06 20:30",ttl:0,used:true}
-];
-function nav(page){document.querySelectorAll(".nav a").forEach(function(a){a.classList.toggle("on",a.dataset.p===page)});document.querySelectorAll(".page").forEach(function(p){p.classList.toggle("on",p.id==="pg-"+page)})}
-function doLogin(){document.getElementById("pg-login").style.display="none";document.getElementById("pg-main").style.display="block";renderNodes();renderAudit()}
+var currentTeam='';
+var currentTeamName='';
+function doLogin(){document.getElementById("pg-login").style.display="none";document.getElementById("pg-app").style.display="block";showPage("pg-teams");initSidebar()}
+function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.classList.toggle("on",p.id===id)});document.querySelectorAll(".nav a").forEach(function(a){a.classList.toggle("on",a.dataset.p===id)});if(id==="pg-teams"){initSidebar()}}
+function initSidebar(){document.getElementById("nav-team-list").style.display="block";document.getElementById("nav-team-ctx").style.display="none";document.getElementById("back-to-teams").style.display="none"}
+function selectTeam(id){currentTeam=id;currentTeamName=id==="team-x"?"研发团队":"研究团队";document.getElementById("nav-team-list").style.display="none";document.getElementById("nav-team-ctx").style.display="block";document.getElementById("nav-team-name").textContent=currentTeamName;document.getElementById("back-to-teams").style.display="block";document.getElementById("back-to-teams").onclick=function(){showPage("pg-teams");initSidebar()};showPage("pg-t-overview");renderNodes();renderAudit();var bn=document.querySelectorAll(".breadcrumb a");}}
+function nav(p){showPage(p)}
+function filterNodes(v){renderNodes(v)}
 function showModal(t,b){document.getElementById("modal-title").textContent=t;document.getElementById("modal-body").textContent=b||"";document.getElementById("modal").classList.add("show")}
 function hideModal(){document.getElementById("modal").classList.remove("show")}
 function showToast(msg){var t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");setTimeout(function(){t.classList.remove("show")},3000)}
 function statusDot(n){if(n.status==="suspended")return'<span class="dot o"></span><span class="bdg o">suspended</span>';if(n.online)return'<span class="dot g"></span><span class="bdg g">在线</span>';return'<span class="dot gr"></span><span class="bdg gr">离线</span>'}
-function renderNodes(filter){var tbody=document.getElementById("nodes-body");tbody.innerHTML="";NODES.filter(function(n){return !filter||n.name.indexOf(filter)>=0||n.id.indexOf(filter)>=0}).forEach(function(n,i){var tr=document.createElement("tr");tr.innerHTML=statusDot(n)+"<td><strong>"+n.name+"</strong></td><td class='mono'>"+n.id.slice(0,8)+"...</td><td>"+n.platform+"</td><td>"+n.epoch+"</td><td>"+n.capsRev+"</td><td>"+n.lastSeen+"</td><td style='text-align:right'><button class='btn btn-s btn-o' onclick='event.stopPropagation();showModal(\"确认暂停 "+n.name+"?\",\"暂停后该节点将无法收发消息。可随时恢复。\")'>暂停</button> <button class='btn btn-s btn-d' onclick='event.stopPropagation();showModal(\"确认永久吊销 "+n.name+"?\",\"此操作不可逆。该节点将立即断连。\")'>吊销</button></td>";tr.style.cursor="pointer";tr.onclick=function(){showDetail(i)};tbody.appendChild(tr)})}
-function filterNodes(v){renderNodes(v)}
-function showDetail(i){var n=NODES[i];nav("node-detail");document.getElementById("nd-name").textContent=n.name;document.getElementById("nd-id").textContent="node_id: "+n.id;document.getElementById("nd-full-id").textContent=n.id;document.getElementById("nd-team").textContent="team-x";document.getElementById("nd-platform").textContent=n.platform;document.getElementById("nd-version").textContent=n.version;document.getElementById("nd-status").innerHTML=statusDot(n);document.getElementById("nd-joined").textContent=n.joined;document.getElementById("nd-lastseen").textContent=n.lastSeen;document.getElementById("nd-epoch").textContent=n.epoch;document.getElementById("nd-pubkey").textContent=n.pubkey.slice(0,16)+"...";document.getElementById("nd-history").textContent="1, 2";document.getElementById("nd-capsrev").textContent=n.capsRev;document.getElementById("nd-caps").innerHTML=n.caps.map(function(c){return '<span class="chip">'+c+"</span>"}).join("")||'<span class="mut">无</span>';document.getElementById("nd-queue").textContent=n.queue;document.getElementById("nd-running").textContent=n.running;document.getElementById("nd-accepting").textContent=n.accepting?"✓ 是":"✗ 否";var auditHtml=AUDITS.slice(0,5).map(function(a){return '<div class="tl-item"><span class="ev '+a.cls+'">'+a.event+'</span> <span class="mut sm">'+a.ts+"</span><br><span class='sm'>"+a.reason+"</span></div>"}).join("");document.getElementById("nd-audit").innerHTML=auditHtml}
-function issueToken(){var tok="[[SECRET_19]]".toString("base64url");document.getElementById("new-token-area").style.display="block";document.getElementById("new-token-val").textContent=tok;showToast("Token 已签发,TTL 见上方选择")}
+function renderNodes(filter){var tbody=document.getElementById("nodes-body");tbody.innerHTML="";NODES.forEach(function(n,i){if(filter&&n.name.indexOf(filter)<0&&n.id.indexOf(filter)<0)return;var tr=document.createElement("tr");tr.innerHTML=statusDot(n)+"<td><strong>"+n.name+"</strong></td><td class='mono'>"+n.id+"</td><td>"+n.platform+"</td><td>"+n.epoch+"</td><td>"+n.capsRev+"</td><td>"+n.lastSeen+"</td><td style='text-align:right'><button class='btn btn-s btn-o' onclick='event.stopPropagation();showModal(\"确认暂停 "+n.name+"?\",\"暂停后该节点将无法收发消息。\")'>暂停</button> <button class='btn btn-s btn-d' onclick='event.stopPropagation();showModal(\"确认永久吊销 "+n.name+"?\",\"此操作不可逆。\")'>吊销</button></td>";tr.style.cursor="pointer";tr.onclick=function(){showDetail(i)};tbody.appendChild(tr)})}
+function showDetail(i){var n=NODES[i];showPage("pg-node-detail");document.getElementById("nd-name").textContent=n.name;document.getElementById("nd-id").textContent="node_id: "+n.id;document.getElementById("nd-full-id").textContent=n.id;document.getElementById("nd-team").textContent="team-x";document.getElementById("nd-platform").textContent=n.platform;document.getElementById("nd-version").textContent=n.version;document.getElementById("nd-status").innerHTML=statusDot(n);document.getElementById("nd-joined").textContent=n.joined;document.getElementById("nd-lastseen").textContent=n.lastSeen;document.getElementById("nd-epoch").textContent=n.epoch;document.getElementById("nd-pubkey").textContent=n.pubkey.slice(0,16)+"...";document.getElementById("nd-history").textContent="1, 2";document.getElementById("nd-capsrev").textContent=n.capsRev;document.getElementById("nd-caps").innerHTML=n.caps.map(function(c){return '<span class="chip">'+c+"</span>"}).join("")||'<span class="mut">无</span>';document.getElementById("nd-queue").textContent=n.queue;document.getElementById("nd-running").textContent=n.running;document.getElementById("nd-accepting").textContent=n.accepting?"✓ 是":"✗ 否";var ah=AUDITS.slice(0,5).map(function(a){return '<div class="tl-item"><span class="ev '+a.cls+'">'+a.event+"</span> <span class='mut sm'>"+a.ts+"</span><br><span class='sm'>"+a.reason+"</span></div>"}).join("");document.getElementById("nd-audit").innerHTML=ah}
+function issueToken(){var tok="qlt_"+Math.random().toString(36).slice(2)+"_"+Math.random().toString(36).slice(2);document.getElementById("new-token-area").style.display="block";document.getElementById("new-token-val").textContent=tok;showToast("Token 已签发,TTL 见上方选择")}
 function renderAudit(){var tbody=document.getElementById("audit-body");tbody.innerHTML=AUDITS.map(function(a){return "<tr><td class='mono'>"+a.ts+'</td><td><span class="ev '+a.cls+'">'+a.event+"</span></td><td class='mono'>"+a.node+"</td><td>"+a.reason+'</td><td class="mono">'+(a.trace||"—")+'</td><td class="mono">'+(a.task||"—")+"</td></tr>"}).join("")}
-renderAudit();renderNodes();
 </script>
 </body></html>
