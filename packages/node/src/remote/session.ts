@@ -44,6 +44,8 @@ export interface RemoteSessionOptions {
   /** 闸5:confirm 级 requires 的本地人确认通道(缺省 = 无通道 → 一律拒绝) */
   confirmHandler?: (req: { cls: string; value: string; reason: string }, offer: Record<string, unknown>) => boolean;
   pickTarget?: (taskId: string, nextAttempt: number, excluded: Record<string, 'permanent' | 'once'>) => string | undefined;
+  /** rpc.ask 应答器(01 §4.1):缺省用内置 caps.query/status.query;自定义则完全接管 */
+  rpcHandler?: (q: { from: string; request_id: string; question: string; timeout_ms?: number }) => Promise<unknown> | unknown;
   onTerminal?: (taskId: string, state: string, resultBody?: Record<string, unknown>) => void;
   /** v0.2:任务状态上报到 registry(供 console Tasks 页查询) */
   taskStatusReporter?: (t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }) => void;
@@ -57,6 +59,7 @@ interface OutboundSpec {
   to_node: string;
   task_id?: string;
   attempt?: number;
+  reply_to?: string;
   body: Record<string, unknown>;
 }
 
@@ -86,6 +89,14 @@ export class RemoteNodeSession {
   private readonly activeWorkspaces = new Map<string, WorkspaceHandle>();
   private lastProgressMsgId = '';
   private execCtx: ExecContext | null = null;
+  /** 牵头方"节点-能力"记忆(03 §7):来源 = reject(unsupported_caps).missing 与 fail(caps_missing).missing_caps;软降权用,协议排除仍由 R8 承担 */
+  private readonly capMemory = new Map<string, Set<string>>();
+  /** rpc.ask 去重(重投只答一次)+ 外发问题登记(01 §4.1:按 request_id 关联应答) */
+  private readonly answeredRpc = new Set<string>();
+  private readonly pendingAsks = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
+  >();
 
   constructor(opts: RemoteSessionOptions) {
     this.opts = opts;
@@ -325,9 +336,110 @@ export class RemoteNodeSession {
       this.processExec(this.exec.onCancel(env.from.node_id, env.attempt ?? 0), ctx);
       return;
     }
+    if (env.type === 'rpc.ask') {
+      this.onRpcAsk(env);
+      return;
+    }
+    if (env.type === 'rpc.answer') {
+      this.onRpcAnswer(env);
+      return;
+    }
     if (this.lead) {
+      // 能力记忆采集(03 §7):失败回执中的缺失标签 → 节点画像,供改派候选软降权
+      if (env.type === 'task.reject' && (env.body as { reason_code?: string }).reason_code === 'unsupported_caps') {
+        this.recordCapMemory(env.from.node_id, (env.body as { missing?: unknown }).missing);
+      } else if (env.type === 'task.fail' && (env.body as { reason_code?: string }).reason_code === 'caps_missing') {
+        this.recordCapMemory(env.from.node_id, (env.body as { missing_caps?: unknown }).missing_caps);
+      }
       this.processLead(this.lead.onMessage(env.type, env.from.node_id, env.attempt ?? 0, env.body, now));
     }
+  }
+
+  private recordCapMemory(nodeId: string, missing: unknown): void {
+    if (!Array.isArray(missing)) return;
+    const tags = missing.filter((t): t is string => typeof t === 'string');
+    if (tags.length === 0) return;
+    const set = this.capMemory.get(nodeId) ?? new Set<string>();
+    for (const t of tags) set.add(t);
+    this.capMemory.set(nodeId, set);
+  }
+
+  /** 节点 → 已观测缺失的能力标签(只增不减;快照形式,供 pickTarget 软降权参考) */
+  capabilityMemory(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const [k, v] of this.capMemory) out[k] = [...v];
+    return out;
+  }
+
+  // ---------- rpc.*(01 §4.1:问答,轻量只读,不进状态机) ----------
+
+  /** 问对端一个问题;以 body.request_id 关联应答(reply_to 仅辅助),timeout 兜底拒绝 */
+  ask(target: string, question: string, timeoutMs = 5_000): Promise<unknown> {
+    const request_id = newId();
+    const p = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAsks.delete(request_id);
+        reject(new Error(`rpc ask 超时(${timeoutMs}ms): ${question}`));
+      }, timeoutMs);
+      this.pendingAsks.set(request_id, { resolve, reject, timer });
+    });
+    const trace = newTraceContext(this.nodeId);
+    void this.deliver(
+      this.seal({ type: 'rpc.ask', to_node: target, body: { request_id, question, timeout_ms: timeoutMs } }, trace),
+    );
+    return p;
+  }
+
+  private async onRpcAsk(env: EnvelopeV1): Promise<void> {
+    const b = env.body as { request_id?: string; question?: string; timeout_ms?: number };
+    const request_id = typeof b.request_id === 'string' ? b.request_id : '';
+    if (request_id === '') return; // 缺 request_id 无法关联,静默丢弃
+    // 重投去重:同一 request_id 只答一次(R1 精神的 rpc 版;answer 发送由 outbox 兜底)
+    if (this.answeredRpc.has(request_id)) return;
+    this.answeredRpc.add(request_id);
+    if (this.answeredRpc.size > 1_000) {
+      const first = this.answeredRpc.values().next().value;
+      if (first !== undefined) this.answeredRpc.delete(first);
+    }
+    const q = { from: env.from.node_id, request_id, question: b.question ?? '', timeout_ms: b.timeout_ms };
+    let answer: unknown;
+    try {
+      answer = this.opts.rpcHandler ? await this.opts.rpcHandler(q) : this.builtinRpcAnswer(q.question);
+    } catch {
+      answer = { error: 'handler_error' };
+    }
+    void this.deliver(
+      this.seal(
+        { type: 'rpc.answer', to_node: env.from.node_id, reply_to: env.msg_id, body: { request_id, answer, refs: [] } },
+        env.trace,
+      ),
+    );
+  }
+
+  /** 内置应答器:能力探询(03 §5 兜底通道)与节点状态 */
+  private builtinRpcAnswer(question: string): unknown {
+    if (question === 'caps.query') {
+      return { caps: this.opts.capabilities?.() ?? [], load: this.opts.load?.() ?? null };
+    }
+    if (question === 'status.query') {
+      return {
+        node_id: this.nodeId,
+        team_id: this.teamId,
+        exec_state: this.exec.rec.state,
+        lead_state: this.lead?.rec.state ?? null,
+      };
+    }
+    return { error: 'no_handler' };
+  }
+
+  private onRpcAnswer(env: EnvelopeV1): void {
+    const b = env.body as { request_id?: string; answer?: unknown };
+    const request_id = typeof b.request_id === 'string' ? b.request_id : '';
+    const pending = this.pendingAsks.get(request_id);
+    if (!pending) return; // 迟到/未知应答:忽略
+    clearTimeout(pending.timer);
+    this.pendingAsks.delete(request_id);
+    pending.resolve(b.answer);
   }
 
   // ---------- 公共 ----------
@@ -342,6 +454,7 @@ export class RemoteNodeSession {
       from: { node_id: this.nodeId, team_id: this.teamId, key_epoch: this.opts.keyEpoch },
       to: { node_id: out.to_node, team_id: this.teamId },
       trace,
+      ...(out.reply_to !== undefined ? { reply_to: out.reply_to } : {}),
       ...(out.task_id !== undefined ? { hops: 0, task_id: out.task_id, attempt: out.attempt ?? 1 } : {}),
       body: out.body,
     };
@@ -381,5 +494,10 @@ export class RemoteNodeSession {
       for (const t of pool.values()) clearTimeout(t);
       pool.clear();
     }
+    for (const p of this.pendingAsks.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error('session disposed'));
+    }
+    this.pendingAsks.clear();
   }
 }

@@ -81,7 +81,7 @@
 
 ## 状态
 
-架构方向已确定。01–03 篇详细设计已成,经**三轮评审修订**,评审委员会 60 条意见全部处置;M0–M4 实现已完成:packages/core(协议/签名/语义)、packages/node(双状态机/闸5/驱动接口)、packages/registry(enroll/目录锚定/纪元现势)、packages/gateway(ACL A0–A6/收件箱/回执帧)、packages/cli。全量 157 项测试全绿(typecheck 0 错),跨机端到端 lost/改派演练通过。**v0.1 可运行,待 主任 终验**。下一批次:§8.4 文件协同定稿+实现、真实 deepseek-harness 基座适配、§8.5 安装器。
+架构方向已确定。01–03 篇详细设计已成,经**三轮评审修订**,评审委员会 60 条意见全部处置。实现现状:packages/core(协议/JCS 签名/新鲜性/R0 闸门)、packages/node(双状态机/五道闸/执行档案/驱动)、packages/registry(enroll/目录锚定/纪元现势/grant/审计)、packages/gateway(ACL A0–A6/收件箱/回执帧/语义断连)、packages/cli(join/run/server/status/tasks)、packages/console(控制台)。跨机端到端 lost/改派演练通过。
 
 > 商用前请自查商标与域名占用。
 
@@ -93,3 +93,14 @@
 - deepseek-harness 驱动 + 弱网增强
 - §8.5 安装器(scripts/install.sh + ps1)
 - 审计查询路由 + 控制台 React App(packages/console)
+
+## v0.3 新增(设计落地收口)
+
+- **rpc.* 问答族运行时**(01 §4.1):ask/answer 按 request_id 关联、重投去重、超时兜底;内置 caps.query / status.query 应答器,支持自定义 rpcHandler
+- **牵头方能力记忆**(03 §7):reject.missing / fail.missing_caps → 节点画像,`capabilityMemory()` 供改派软降权
+- **节点 caps/load 周期上报**(03 §4):启动即报 + 60s 动态刷新(factory 一站式)
+- **真实身份存档**(02 §3.2):identity.json(0600)在 join/run 间同源恢复,替换 v0.2 的空私钥占位
+- **CLI 运营面**:qlong join(入网写配置)/ run(常驻节点)/ server(单进程中心三件套:registry HTTP + 通讯网关 ws)
+- 修复 gateway grant.spec 类型错误;全量 **180 测试全绿**,5 包 typecheck 干净
+
+**待办(v0.3+)**:git bundle payload 存储(§8.4 定稿排期 v0.3)、目录 epoch 增量推送(现为周期全量同步)、网关集群化(02 §12.1)、双机纸面走查回填任务书模板与全矩阵。

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { EnvelopeV1 } from '@qlong/core';
 import { newId } from '@qlong/core';
 import { evaluateUplink } from '../src/acl.js';
-import type { GatewayConnection, GatewayDirectorySnapshot } from '../src/types.js';
+import type { EnvelopeHeadLite, GatewayConnection, GatewayDirectorySnapshot } from '../src/types.js';
 
 const TX = 't-x';
 const TY = 't-y';
@@ -24,7 +24,12 @@ function connFor(nodeId: string, teamId: string): GatewayConnection {
   return { connId: 'c-' + nodeId, nodeId, teamId, connectedAt: 0 };
 }
 
-function mkOffer(fromId: string, fromTeam: string, toId: string, toTeam?: string): EnvelopeV1 {
+function mkOffer(fromId: string, fromTeam: string, toId: string, toTeam?: string): EnvelopeHeadLite {
+  const env = mkEnvelope(fromId, fromTeam, toId, toTeam);
+  return { ...env, envelope: env };
+}
+
+function mkEnvelope(fromId: string, fromTeam: string, toId: string, toTeam?: string): EnvelopeV1 {
   return {
     v: 1,
     type: 'task.offer',
@@ -66,10 +71,10 @@ describe('D1 cross-team grant', () => {
   it('reverse: B(TY) -> A(TX) with grant -> route', () => {
     grantActive = true;
     const connB = connFor(B, TY);
-    const env = mkOffer(B, TY, A, TX);
+    const env = mkEnvelope(B, TY, A, TX);
     const v = evaluateUplink({
       conn: connB,
-      head: env as never,
+      head: { ...env, envelope: env },
       dir: { snapshotEpoch: 1, lookup: (id) => dir.nodes.find((n) => n.node_id === id), grantLookup: testGrant },
     });
     expect(v.verdict).toBe('route');

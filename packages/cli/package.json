@@ -3,10 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "qlong": "./dist/cli.mjs" },
+  "bin": {
+    "qlong": "./dist/cli.mjs"
+  },
   "scripts": {
     "build": "node build.mjs",
     "demo": "node dist/cli.mjs demo",
-    "takeover": "node dist/cli.mjs takeover"
+    "takeover": "node dist/cli.mjs takeover",
+    "test": "vitest run",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p ."
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7",
+    "@types/node": "^24.13.3"
   }
 }

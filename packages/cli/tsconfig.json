@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@qlong/core": [
+        "../core/src/index.ts"
+      ],
+      "@qlong/registry": [
+        "../registry/src/index.ts"
+      ],
+      "@qlong/gateway": [
+        "../gateway/src/index.ts"
+      ],
+      "@qlong/node": [
+        "../node/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "vitest.config.ts"
+  ]
+}
