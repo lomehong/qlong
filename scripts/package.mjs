@@ -22,7 +22,10 @@ async function writeRelease(dir) {
   const rel = (p) => join(dir, p);
 
   console.log('  >>> 构建 CLI bundle...');
-  execSync(`node ../../node_modules/esbuild/bin/esbuild src/main.ts --bundle --outfile=${JSON.stringify(rel('qlong-cli.mjs'))} --format=esm --platform=node --alias:@qlong/core=../core/src/index.ts`, {
+  // createRequire banner:ESM bundle 内 CJS 依赖(如 ws)的动态 require 需要它,
+  // 否则 server/run 路径(加载网关 ws)一启动即崩(现场冒烟发现的真 bug)
+  const banner = "import { createRequire } from 'module'; const require = createRequire(import.meta.url);";
+  execSync(`node ../../node_modules/esbuild/bin/esbuild src/main.ts --bundle --outfile=${JSON.stringify(rel('qlong-cli.mjs'))} --format=esm --platform=node --banner:js=${JSON.stringify(banner)} --alias:@qlong/core=../core/src/index.ts`, {
     cwd: join(ROOT, 'packages/cli'), stdio: 'inherit',
   });
 

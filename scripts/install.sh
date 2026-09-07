@@ -1,7 +1,9 @@
 #!/bin/sh
 # 群龙(Qlong)安装脚本 — Linux/macOS
-# 用法: curl -fsSL https://qlong.qianji.io/install.sh | sh -s -- --enroll-stdin
-# token 经 stdin 传入(评审 I-16:不进 shell history / 进程参数)
+# 用法(两步式:token 经 stdin 传给脚本,评审 I-16 不进 history):
+#   curl -fsSL https://qlong.qianji.io/install.sh -o /tmp/qlong-install.sh
+#   echo "<邀请码>" | sh /tmp/qlong-install.sh --enroll-stdin [--version vX.Y.Z]
+# 卸载: sh /tmp/qlong-install.sh --uninstall
 set -e
 
 ENROLL_TOKEN=""
