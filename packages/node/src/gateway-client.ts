@@ -5,6 +5,8 @@
 import WebSocket from 'ws';
 import { DEFAULT_PARAMS, newId, validateEnvelope, type EnvelopeV1, type QlongParams } from '@qlong/core';
 import { MemoryOutbox, type OutboxStore } from './outbox.js';
+import { FileOutbox } from './outbox/file-outbox.js';
+import { backoffDelay, shouldReconnect, ConnTracker, DEFAULT_WEAK_NET } from './weak-net.js';
 
 export const AUTH_KEY = 'node_' + 'token';
 
@@ -13,6 +15,8 @@ export interface GatewayClientOptions {
   nodeToken: string;
   params?: QlongParams;
   outbox?: OutboxStore;
+  /** v0.2:传入 dataDir 时由调用方创建 FileOutbox 传入(session 工厂辅助) */
+  dataDir?: string;
   onEnvelope?: (env: EnvelopeV1) => void;
   onAck?: (ack: { ack_type: string; msg_id: string; reason?: string }) => void;
   onRoutingDenied?: (d: { rule: string; reason_code: string; msg_id: string }) => void;
@@ -43,7 +47,7 @@ export class GatewayClient {
   onRoutingDenied: (d: { rule: string; reason_code: string; msg_id: string }) => void = () => {};
   onClose: (code: number) => void = () => {};
   constructor(private readonly opts: GatewayClientOptions) {
-    this.outbox = opts.outbox ?? new MemoryOutbox();
+    this.outbox = opts.outbox ?? (opts.dataDir ? new FileOutbox(opts.dataDir) : new MemoryOutbox());
     this.verifyInbound = opts.verifyInbound ?? (async () => false);
     this.onEnvelope = opts.onEnvelope ?? (() => {});
     this.onAck = opts.onAck ?? (() => {});
@@ -204,14 +208,19 @@ export class GatewayClient {
   private scheduleReconnect(): void {
     if (this.closedByUser || this.reconnectTimer !== undefined || this.openPromise) return;
     this.reconnectAttempts += 1;
-    const base = this.opts.backoffMs ?? 25;
-    const delay = Math.min(base * 2 ** Math.min(this.reconnectAttempts, 6), 5_000);
+    if (!shouldReconnect(this.reconnectAttempts)) return; // §8.6:超上限停止自动重连
+    const base = this.opts.backoffMs ?? DEFAULT_WEAK_NET.baseBackoffMs;
+    const delay = backoffDelay(this.reconnectAttempts, { ...DEFAULT_WEAK_NET, baseBackoffMs: base });
     this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.open().catch(() => {
-        /* 继续退避 */
-      });
+    this.reconnectTimer = undefined;
+    this.openWithRetry();
     }, delay);
+  }
+
+  private openWithRetry(): void {
+    this.openPromise = this.open().catch(() => { /* 重连失败,下轮 scheduleReconnect */ }).finally(() => {
+      this.openPromise = undefined;
+    });
   }
 
   private safeSend(obj: unknown): void {
