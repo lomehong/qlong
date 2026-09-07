@@ -236,6 +236,22 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           sendJson(res, 200, { tasks });
           return;
         }
+        // 节点恢复(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/resume
+        if (seg[3] === 'nodes' && seg[5] === 'resume' && method === 'POST' && seg.length === 6) {
+          const self = registry.authByToken(token ?? '');
+          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可操作', 403);
+          registry.resume(seg[4] as string);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        // 节点暂停(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/suspend
+        if (seg[3] === 'nodes' && seg[5] === 'suspend' && method === 'POST' && seg.length === 6) {
+          const self = registry.authByToken(token ?? '');
+          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可操作', 403);
+          registry.suspend(seg[4] as string);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
         // 审计查询(§11):GET /v1/teams/{id}/audit
         if (seg[3] === 'audit' && method === 'GET' && seg.length === 4) {
           const self = registry.authByToken(token ?? '');
