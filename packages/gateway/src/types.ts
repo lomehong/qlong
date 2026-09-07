@@ -8,6 +8,13 @@ export interface GatewayDirectoryEntry {
   currentEpoch: number;
 }
 
+export interface GatewayGrantEntry {
+  from_team: string;
+  to_team: string;
+  caps_visible: string[];
+  expires_at?: number;
+}
+
 export interface GatewayDirectorySnapshot {
   epoch: number;
   nodes: GatewayDirectoryEntry[];
@@ -43,3 +50,4 @@ export interface RoutingDenied {
   reason_code: string;
   msg_id: string;
 }
+export type GrantLookup = (fromTeam: string, toTeam: string) => boolean;

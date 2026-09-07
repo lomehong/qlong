@@ -6,6 +6,7 @@
 import type { GatewayConnection, GatewayDirectoryEntry, EnvelopeHeadLite } from './types.js';
 
 export interface DirectoryLookup {
+  grantLookup?: (fromTeam: string, toTeam: string) => boolean;
   snapshotEpoch: number;
   lookup(nodeId: string): GatewayDirectoryEntry | undefined;
 }
@@ -73,12 +74,16 @@ export function evaluateUplink(args: {
     };
   }
   if (sender.team_id !== toTeam.team_id) {
+    // v0.2 D1:跨队 grant 检查 —— 有活跃 grant 则放行
+    if (args.dir.grantLookup && args.dir.grantLookup(sender.team_id, toTeam.team_id)) {
+      return { verdict: 'route', toTeam: toTeam.team_id };
+    }
     return {
       verdict: 'routing_denied',
       rule: 'A1',
       reasonCode: 'acl_rejected_cross_team',
       auditEvent: 'acl_rejected_cross_team',
-      reason: '跨 team 投递被目录锚定拒绝',
+      reason: '跨 team 投递被目录锚定拒绝(无 grant)',
     };
   }
   return { verdict: 'route', toTeam: toTeam.team_id };
