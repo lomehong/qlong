@@ -62,12 +62,11 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     driver: opts.driver ?? new DeepSeekHarnessDriver(),
   });
 
-  // 5) taskStatusReporter:lead 终态时自动 POST /v1/teams/{teamId}/tasks 上报
-  // (通过 opts 注入;实际 HTTP 调用由 registry 的 upsertTask 处理)
+  // 5) taskStatusReporter:lead 终态时自动上报到 registry
   session.opts.taskStatusReporter = (t) => {
-    fetch(opts.registryUrl + '/v1/teams/' + t.team_id + '/tasks', {'
-      method: 'POST','
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },'
+    fetch(opts.registryUrl + '/v1/teams/' + t.team_id + '/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
       body: JSON.stringify(t),
     }).catch(() => {});
   };
