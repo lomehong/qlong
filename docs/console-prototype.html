@@ -320,70 +320,56 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 
 
 <!-- ===== 硬编码导航兜底 ===== -->
-<script>
-// === 页面切换 ===
-function _pg(id) {
-  var pages = ["pg-login","pg-app","pg-teams","pg-t-overview","pg-t-nodes","pg-node-detail","pg-t-tokens","pg-t-grants","pg-t-audit","pg-t-settings"];
+
+`n<script>
+// === 页面切换(pg-app 容器始终可见,只切换子页面)===
+function showPage(id) {
+  // pg-app 始终显示
+  var app = document.getElementById("pg-app");
+  if (app) app.style.display = "block";
+  var login = document.getElementById("pg-login");
+  if (login) login.style.display = "none";
+  // 子页面切换
+  var pages = ["pg-teams","pg-t-overview","pg-t-nodes","pg-node-detail","pg-t-tokens","pg-t-grants","pg-t-audit","pg-t-settings"];
   for (var i = 0; i < pages.length; i++) {
     var el = document.getElementById(pages[i]);
     if (el) el.style.display = (pages[i] === id) ? "block" : "none";
   }
-  if (id === "pg-login") {
-    var lg = document.getElementById("pg-login");
-    if (lg) lg.style.display = "flex";
-  }
-}
-function _side(mode) {
-  var list = document.getElementById("nav-team-list");
-  var ctx = document.getElementById("nav-team-ctx");
-  var back = document.getElementById("back-to-teams");
-  if (!list || !ctx || !back) return;
-  list.style.display = mode === "list" ? "block" : "none";
-  ctx.style.display = mode === "ctx" ? "block" : "none";
-  back.style.display = mode === "ctx" ? "block" : "none";
+  // 侧边栏模式
+  var listNav = document.getElementById("nav-team-list");
+  var ctxNav = document.getElementById("nav-team-ctx");
+  var backBtn = document.getElementById("back-to-teams");
+  var isTeamCtx = (id !== "pg-teams" && id !== "pg-login");
+  if (listNav) listNav.style.display = isTeamCtx ? "none" : "block";
+  if (ctxNav) ctxNav.style.display = isTeamCtx ? "block" : "none";
+  if (backBtn) backBtn.style.display = isTeamCtx ? "block" : "none";
 }
 // === 登录 ===
 var loginBtn = document.querySelector(".login-box button");
-if (loginBtn) loginBtn.onclick = function() {
-  _pg("pg-app");
-  _side("list");
-  _pg("pg-teams");
-};
+if (loginBtn) loginBtn.onclick = function() { showPage("pg-teams"); };
 // === 团队卡片 ===
 var cards = document.querySelectorAll(".tcard");
-for (var i = 0; i < cards.length; i++) {
+for (var ci = 0; ci < cards.length; ci++) {
   (function(card) {
-    card.onclick = function() {
-      _side("ctx");
-      _pg("pg-t-overview");
-      // 设置面包屑
-      var name = card.querySelector(".name");
-      var bcs = document.querySelectorAll(".breadcrumb");
-      for (var j = 0; j < bcs.length; j++) {
-        var links = bcs[j].querySelectorAll("a");
-        for (var k = 0; k < links.length; k++) {
-          links[k].textContent = currentTeamName || "我的团队";
-        }
-      }
-    };
+    card.onclick = function() { showPage("pg-t-overview"); };
   })(cards[i]);
 }
 // === 侧边栏子导航 ===
-var subNav = { "概览": "pg-t-overview", "节点管理": "pg-t-nodes", "Token 管理": "pg-t-tokens", "跨队授权": "pg-t-grants", "审计事件": "pg-t-audit", "团队设置": "pg-t-settings" };
+var subNavMap = { "概览": "pg-t-overview", "节点管理": "pg-t-nodes", "Token 管理": "pg-t-tokens", "跨队授权": "pg-t-grants", "审计事件": "pg-t-audit", "团队设置": "pg-t-settings" };
 var subLinks = document.querySelectorAll("#nav-team-ctx a");
-for (var i = 0; i < subLinks.length; i++) {
+for (var si = 0; si < subLinks.length; si++) {
   (function(a) {
     a.onclick = function(e) {
       e.preventDefault();
       var txt = a.textContent.trim();
-      if (subNav[txt]) _pg(subNav[txt]);
+      if (subNavMap[txt]) showPage(subNavMap[txt]);
     };
-  })(subLinks[i]);
+  })(subLinks[si]);
 }
 // === 返回团队列表 ===
 var backBtn = document.getElementById("back-to-teams");
-if (backBtn) backBtn.onclick = function() { _side("list"); _pg("pg-teams"); };
-// === 节点表渲染 ===
+if (backBtn) backBtn.onclick = function() { showPage("pg-teams"); };
+// === 节点表 ===
 var NODES = [
   {id:"a4763d9c",name:"dev-machine",st:"active",on:true,plat:"windows",ep:1,cr:3,caps:["tool:node@20","env:windows"],ls:"刚刚"},
   {id:"2c0fb067",name:"build-server",st:"active",on:true,plat:"linux",ep:2,cr:5,caps:["tool:node@20","env:linux","net:office-vpn"],ls:"2 分钟前"},
@@ -391,22 +377,21 @@ var NODES = [
   {id:"9f8e7d6c",name:"macbook-pro",st:"active",on:false,plat:"darwin",ep:1,cr:1,caps:["env:darwin"],ls:"2 小时前"},
   {id:"0a1b2c3d",name:"old-laptop",st:"suspended",on:false,plat:"linux",ep:1,cr:1,caps:[],ls:"3 天前"}
 ];
-var tbody = document.getElementById("nodes-body");
-if (tbody) {
-  for (var i = 0; i < NODES.length; i++) {
-    var n = NODES[i];
+var nodesBody = document.getElementById("nodes-body");
+if (nodesBody) {
+  for (var ni = 0; ni < NODES.length; ni++) {
+    var n = NODES[ni];
     var dotCls = n.st === "suspended" ? "dot o" : (n.on ? "dot g" : "dot gr");
     var stTxt = n.st === "suspended" ? "suspended" : (n.on ? "在线" : "离线");
     var capsHtml = "";
-    for (var j = 0; j < n.caps.length; j++) capsHtml += '<span class="chip">' + n.caps[j] + "</span>";
-    var tr = document.createElement("tr");
-    tr.innerHTML = '<td><span class="' + dotCls + '"></span>' + stTxt + "</td><td><strong>" + n.name + "</strong></td><td class='mono'>" + n.id + "</td><td>" + n.plat + "</td><td>" + n.ep + "</td><td>" + n.cr + "</td><td>" + n.ls + "</td>";
-    tr.style.cursor = "pointer";
-    tr.onclick = function() { _pg("pg-node-detail"); };
+    for (var cj = 0; cj < n.caps.length; cj++) capsHtml += '<span class="chip">' + n.caps[cj] + '</span>';
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><span class="' + dotCls + '"></span>' + stTxt + '</td><td><strong>' + n.name + '</strong></td><td class="mono">' + n.id + '</td><td>' + n.plat + '</td><td>' + n.ep + '</td><td>' + n.cr + '</td><td>' + n.ls + '</td>';
+    tr.style.cursor = 'pointer';
     tbody.appendChild(tr);
   }
 }
-// === 审计表渲染 ===
+// === 审计表 ===
 var AUDITS = [
   {ts:"21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
   {ts:"21:17:15",event:"reclaim",cls:"ev-org",node:"2c0f...37fa",reason:"lease lost",trace:"7b0e...",task:"d41a..."},
@@ -416,23 +401,12 @@ var AUDITS = [
 ];
 var auditBody = document.getElementById("audit-body");
 if (auditBody) {
-  for (var i = 0; i < AUDITS.length; i++) {
-    var a = AUDITS[i];
-    var tr = document.createElement("tr");
-    tr.innerHTML = "<td class='mono'>" + a.ts + '</td><td><span class="ev ' + a.cls + '">' + a.event + "</span></td><td class='mono'>" + a.node + "</td><td>" + a.reason + '</td><td class="mono">' + a.trace + '</td><td class="mono">' + a.task + "</td>";
+  for (var ai = 0; ai < AUDITS.length; ai++) {
+    var a = AUDITS[ai];
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td class="mono">' + a.ts + '</td><td><span class="ev ' + a.cls + '">' + a.event + '</span></td><td class="mono">' + a.node + '</td><td>' + a.reason + '</td><td class="mono">' + a.trace + '</td><td class="mono">' + a.task + '</td>';
     auditBody.appendChild(tr);
   }
 }
-// === Token 签发 ===
-var issueBtn = document.querySelector("#pg-t-tokens .btn-p");
-if (issueBtn) issueBtn.onclick = function() {
-  var area = document.getElementById("new-token-area");
-  var val = document.getElementById("new-token-val");
-  if (area && val) {
-    area.style.display = "block";
-    val.textContent = "qlt_" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-    showToast("Token 已签发");
-  }
-};
 </script>
-`n</body></html>
+</body></html>
