@@ -37,6 +37,7 @@ describe('fetchPayload checks (loopback allowlist policy)', () => {
     server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (req.url === '/ok') { res.writeHead(200); res.end(payload); return; }
       if (req.url === '/big') { res.writeHead(200); res.end(Buffer.alloc(2000)); return; }
+      if (req.url === '/jump') { res.writeHead(302, { Location: 'http://169.254.169.254/latest/meta-data' }); res.end(); return; }
       res.writeHead(404); res.end();
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -53,6 +54,11 @@ describe('fetchPayload checks (loopback allowlist policy)', () => {
     const r = await fetchPayload({ ref_uri: base + '/ok', sha256: payloadSha, size: payload.length }, { allowedSchemes: ['https', 'http'], allowHosts: [host] });
     expect(r.ok).toBe(true);
     expect(r.data?.toString()).toBe('hello payload');
+  });
+  it('R10:重定向一律拒绝(不跟随,防白名单借道私网)', async () => {
+    const r = await fetchPayload({ ref_uri: base + '/jump', sha256: payloadSha, size: payload.length }, { allowedSchemes: ['https', 'http'], allowHosts: [host] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('302'); // 不跟随:3xx 按 HTTP 错误拒绝(opaqueredirect 不产生第二次请求)
   });
   it('sha256 mismatch -> corrupt', async () => {
     const r = await fetchPayload({ ref_uri: base + '/ok', sha256: 'f'.repeat(64), size: payload.length }, { allowedSchemes: ['https', 'http'], allowHosts: [host] });

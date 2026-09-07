@@ -119,7 +119,12 @@ export async function fetchPayload(
 }
 
 async function defaultFetch(uri: string): Promise<{ ok: boolean; status: number; body: Buffer }> {
-  const res = await fetch(uri);
+  // R10:重定向不得越出白名单 —— v0.3 实现为一律不跟随(3xx 直接拒绝);
+  // 逐跳重验证(每个 Location 重新过 scheme/私网检查)列为后续增强。
+  const res = await fetch(uri, { redirect: 'manual' });
+  if (res.status >= 300 && res.status < 400) {
+    return { ok: false, status: res.status, body: Buffer.from('redirect rejected (R10)') };
+  }
   const body = Buffer.from(await res.arrayBuffer());
   return { ok: res.ok, status: res.status, body };
 }
