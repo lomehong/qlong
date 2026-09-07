@@ -42,6 +42,8 @@ export interface RemoteSessionOptions {
   confirmHandler?: (req: { cls: string; value: string; reason: string }, offer: Record<string, unknown>) => boolean;
   pickTarget?: (taskId: string, nextAttempt: number, excluded: Record<string, 'permanent' | 'once'>) => string | undefined;
   onTerminal?: (taskId: string, state: string, resultBody?: Record<string, unknown>) => void;
+  /** v0.2:任务状态上报到 registry(供 console Tasks 页查询) */
+  taskStatusReporter?: (t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }) => void;
   onEscalate?: (summary: { task_id: string; attempts: unknown[]; final_reason: string }) => void;
   onAudit?: (a: AuditRecord) => void;
   onRoutingDenied?: (d: { rule: string; reason_code: string; msg_id: string }) => void;
@@ -187,6 +189,7 @@ export class RemoteNodeSession {
         }
         case 'terminal':
           this.opts.onTerminal?.(this.lead?.task_id ?? '', a.state, this.lead?.rec.resultBody);
+        this.opts.taskStatusReporter?.({ task_id: this.lead?.task_id ?? '', type: 'project', team_id: this.opts.teamId, lead: this.opts.nodeId, exec: this.lead?.rec.target ?? '', attempt: this.lead?.rec.attempt ?? 0, status: a.state });
           break;
         case 'escalate':
           this.opts.onEscalate?.(a.summary);
