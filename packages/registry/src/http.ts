@@ -87,9 +87,14 @@ async function serveDist(res: ServerResponse, distDir: string, pathname: string)
   const { stat } = await import('node:fs/promises');
   const path = await import('node:path');
   let rel: string;
-  if (pathname === '/install' || pathname === '/install.sh' || pathname === '/install.ps1') {
-    rel = join('latest', pathname.slice(1) + (pathname === '/install' ? '.html' : ''));
-    rel = rel.replace('latest/install.html', 'latest/install.html');
+  if (pathname === '/install') {
+    rel = 'latest/install.html';
+  } else if (pathname === '/install.sh' || pathname === '/install.ps1') {
+    rel = 'latest/' + pathname.slice(1);
+  } else if (pathname === '/' || pathname === '/console' || pathname === '/console.html') {
+    rel = 'latest/console.html';
+  } else if (pathname === '/console-bundle.js') {
+    rel = 'latest/console-bundle.js';
   } else {
     rel = pathname.replace(/^\/releases\//, '');
   }
@@ -142,7 +147,7 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       }
 
       // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
-      if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install')) {
+      if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install' || url.pathname === '/' || url.pathname === '/console' || url.pathname === '/console-bundle.js')) {
         await serveDist(res, opts.distDir, url.pathname);
         return;
       }

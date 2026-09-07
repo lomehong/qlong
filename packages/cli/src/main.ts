@@ -169,14 +169,17 @@ if (cmd === 'server') {
     const i = process.argv.indexOf(name);
     return i > 0 ? process.argv[i + 1] : def;
   };
+  // 默认单端口(PORT/7860 兼容容器平台):registry API + 书坊 + 控制台 + 网关 ws(/gateway)
   const handles = await startQlongServer({
-    registryPort: flag('--registry-port', 3200),
-    gatewayPort: flag('--gateway-port', 3100),
+    registryPort: flag('--registry-port', Number(process.env.PORT ?? 3200)),
+    gatewayPort: process.argv.includes('--gateway-port') ? flag('--gateway-port', 3100) : undefined,
+    gatewayPath: process.argv.includes('--gateway-port') ? undefined : '/gateway',
     distDir: sflag('--dist-dir', process.env.QLONG_DIST_DIR),
+    seedTeam: process.argv.includes('--no-seed-team') ? false : {},
   });
-  console.log('qlong server:registry http://127.0.0.1:' + handles.registryPort, '| gateway ws://127.0.0.1:' + handles.gatewayPort);
-  if (handles && sflag('--dist-dir', process.env.QLONG_DIST_DIR)) {
-    console.log('书坊分发:', sflag('--dist-dir', process.env.QLONG_DIST_DIR), '→ /install.sh /install.ps1 /install /releases/<版本>/');
+  console.log('qlong server:http://0.0.0.0:' + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
+  if (sflag('--dist-dir', process.env.QLONG_DIST_DIR)) {
+    console.log('书坊分发 → /install /install.sh /install.ps1 /releases/<版本>/ | 控制台 → /');
   }
   console.log('Ctrl+C 退出');
   process.on('SIGINT', () => {

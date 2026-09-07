@@ -34,6 +34,12 @@ async function writeRelease(dir) {
     cwd: join(ROOT, 'packages/console'), stdio: 'inherit',
   });
   copyFileSync(join(ROOT, 'packages/console/index.html'), rel('console.html'));
+  {
+    // 发布态:dev 引用(/src/main.tsx)替换为构建产物
+    const htmlPath = rel('console.html');
+    const html = readFileSync(htmlPath, 'utf8').replace('/src/main.tsx', './console-bundle.js');
+    writeFileSync(htmlPath, html);
+  }
 
   console.log('  >>> 携带安装脚本(版本与产物严格同源)...');
   copyFileSync(join(ROOT, 'scripts/install.sh'), rel('install.sh'));

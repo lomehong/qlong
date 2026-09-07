@@ -45,8 +45,32 @@ export class WsGateway {
   private currentConnByNode = new Map<string, string>();
   private syncTimer?: NodeJS.Timeout;
 
+  /** 单端口部署:附加挂载点路径(/gateway 等);'/' 由独立端口模式自动接管 */
+  private readonly attachedPaths = new Set<string>();
+
   constructor(private readonly opts: WsGatewayOptions) {
-    this.wss = new WebSocketServer({ server: this.server });
+    this.wss = new WebSocketServer({ noServer: true });
+    // 独立端口模式:listen() 的 server 上 '/' 即网关入口
+    this.bindUpgrade(this.server, '/');
+    this.start();
+  }
+
+  /** 单端口部署(02 §12.1):把网关挂到业务 HTTP server 的指定路径(/gateway) */
+  attach(server: import('node:http').Server, path: string): void {
+    this.bindUpgrade(server, path);
+  }
+
+  private bindUpgrade(server: import('node:http').Server, path: string): void {
+    this.attachedPaths.add(path);
+    server.on('upgrade', (req, socket, head) => {
+      const p = (req.url ?? '/').split('?')[0] ?? '';
+      if (this.attachedPaths.has(p)) {
+        this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
+      }
+    });
+  }
+
+  start(): void {
     this.wss.on('connection', (ws) => {
       let connId: string | null = null;
       let nodeId = '';
