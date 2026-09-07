@@ -53,7 +53,7 @@ export default function App() {
         {page === 'teams' && <Teams onNav={setPage} />}
         {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
         {page === 'grants' && <Grants teamId={teamId} />}
-        {page === 'audit' && <Audit />}
+        {page === 'audit' && <Audit teamId={teamId} />}
         {page === 'settings' && <Settings />}
       </main>
     </div>
