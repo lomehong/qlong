@@ -1,0 +1,1045 @@
+// ../node/src/local/harness.ts
+import { DEFAULT_PARAMS as DEFAULT_PARAMS3, defaultLeaseMs, defaultOfferTtlMs as defaultOfferTtlMs2, makeAudit, newId } from "@qlong/core";
+
+// ../node/src/lead/machine.ts
+import { DEFAULT_PARAMS, defaultOfferTtlMs, lostAfterMs, normalizeFailCode, normalizeRejectCode } from "@qlong/core";
+var ACTIVE_TIMERS = ["offer_ttl", "lease", "drain", "cancel_wait"];
+var LeadTaskMachine = class {
+  task_id;
+  rec;
+  params;
+  terminal = false;
+  validateAcceptance;
+  constructor(init) {
+    this.task_id = init.task_id;
+    this.params = init.params ?? DEFAULT_PARAMS;
+    this.validateAcceptance = init.validateAcceptance ?? ((b) => {
+      const arr = b.acceptance_results;
+      if (!Array.isArray(arr)) return true;
+      return arr.every((x) => x?.pass !== false);
+    });
+    this.rec = {
+      task_id: init.task_id,
+      kind: init.kind,
+      leaseMs: init.kind === "aid" ? this.params.leaseMsAid : this.params.leaseMsProject,
+      state: "drafting",
+      attempt: 0,
+      target: null,
+      acceptedThisAttempt: false,
+      acceptedFailedBudget: 0,
+      dispatchRounds: 0,
+      excluded: {},
+      history: []
+    };
+  }
+  out(type, to, body, replyTo) {
+    return {
+      kind: "send",
+      msg: { type, to_node: to, task_id: this.task_id, attempt: this.rec.attempt, reply_to: replyTo, body }
+    };
+  }
+  stopTimers() {
+    return { kind: "cancelTimers", timers: [...ACTIVE_TIMERS] };
+  }
+  finish(state) {
+    this.terminal = true;
+    this.rec.state = state;
+    return [this.stopTimers(), { kind: "terminal", state }];
+  }
+  /** 初始派发(attempt=1)或对 requestDispatch 的应答(attempt+1)。R4:撤销已在进入本调用前完成。 */
+  dispatchTo(target, offerBody, now) {
+    if (this.terminal) return [];
+    if (this.rec.state !== "drafting") return [];
+    this.rec.attempt = 1;
+    this.rec.target = target;
+    this.rec.acceptedThisAttempt = false;
+    this.rec.state = "offered";
+    const ttl = typeof offerBody.offer_ttl_ms === "number" ? offerBody.offer_ttl_ms : defaultOfferTtlMs(this.rec.kind, this.params);
+    this.rec.offerTtlUntil = now + ttl;
+    delete this.rec.drainUntil;
+    delete this.rec.drainClosed;
+    return [
+      this.stopTimers(),
+      this.out("task.offer", target, offerBody),
+      { kind: "schedule", timer: "offer_ttl", atMs: this.rec.offerTtlUntil }
+    ];
+  }
+  /** 对 requestDispatch 的应答:attempt+1 重新派发(R4 撤销已完成) */
+  redispatchTo(target, offerBody, now) {
+    if (this.terminal || this.rec.state !== "drafting") return [];
+    this.rec.attempt += 1;
+    this.rec.target = target;
+    this.rec.acceptedThisAttempt = false;
+    this.rec.state = "offered";
+    const ttl = typeof offerBody.offer_ttl_ms === "number" ? offerBody.offer_ttl_ms : defaultOfferTtlMs(this.rec.kind, this.params);
+    this.rec.offerTtlUntil = now + ttl;
+    delete this.rec.drainUntil;
+    delete this.rec.drainClosed;
+    return [
+      this.stopTimers(),
+      this.out("task.offer", target, offerBody),
+      { kind: "schedule", timer: "offer_ttl", atMs: this.rec.offerTtlUntil }
+    ];
+  }
+  /** 入站 task.*(attempt 已对齐本记录;attempt 不符的先行处置见 onForeignAttempt) */
+  onMessage(type, fromNode, attempt, body, now) {
+    if (this.terminal) return [];
+    if (attempt !== this.rec.attempt) {
+      if (attempt < this.rec.attempt) {
+        return [
+          this.out("task.reject", fromNode, { reason_code: "stale_attempt" }),
+          { kind: "audit", event: "stale_attempt_rejected", reason: `inbound attempt ${attempt} < current ${this.rec.attempt}` }
+        ];
+      }
+      return [{ kind: "audit", event: "stale_attempt_rejected", reason: `inbound attempt ${attempt} > current` }];
+    }
+    switch (this.rec.state) {
+      case "offered":
+        return this.onOfferedMessage(type, fromNode, body, now);
+      case "running":
+        return this.onRunningMessage(type, fromNode, body, now);
+      case "reclaiming":
+        return this.onReclaimingMessage(type, body, now);
+      case "cancelling":
+        return this.onCancellingMessage(type, body);
+      default:
+        return [];
+    }
+  }
+  onOfferedMessage(type, fromNode, body, now) {
+    if (type === "task.accept" && fromNode === this.rec.target) {
+      this.rec.acceptedThisAttempt = true;
+      this.rec.state = "running";
+      const lease = typeof body.lease_ms === "number" ? body.lease_ms : this.rec.leaseMs;
+      this.rec.leaseMs = lease;
+      this.rec.leaseDeadline = now + lostAfterMs(lease, this.params);
+      this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: "accepted" });
+      return [
+        this.stopTimers(),
+        { kind: "schedule", timer: "lease", atMs: this.rec.leaseDeadline }
+      ];
+    }
+    if (type === "task.reject" && fromNode === this.rec.target) {
+      const { code } = normalizeRejectCode(typeof body.reason_code === "string" ? body.reason_code : "other");
+      this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: "rejected", reason_code: code });
+      this.applyExclusion(code, body);
+      return this.budgetOrEscalate(now, false);
+    }
+    return [];
+  }
+  onRunningMessage(type, fromNode, body, now) {
+    if (fromNode !== this.rec.target) return [];
+    if (type === "task.progress") {
+      this.rec.leaseDeadline = now + lostAfterMs(this.rec.leaseMs, this.params);
+      return [
+        { kind: "cancelTimers", timers: ["lease"] },
+        { kind: "schedule", timer: "lease", atMs: this.rec.leaseDeadline }
+      ];
+    }
+    if (type === "task.result") {
+      this.rec.resultBody = body;
+      if (this.validateAcceptance(body)) {
+        this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: "result_delivered" });
+        return this.finish("done");
+      }
+      return this.beginReclaim("acceptance_failed", now, {
+        node: fromNode,
+        attempt: this.rec.attempt,
+        outcome: "acceptance_failed"
+      });
+    }
+    if (type === "task.fail") {
+      const { code } = normalizeFailCodeOrReject(body.reason_code);
+      const retryable = body.retryable !== false;
+      if (!retryable) {
+        this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: "fail_fatal", reason_code: code });
+        return this.finish("failed");
+      }
+      return this.beginReclaim("reclaim", now, {
+        node: fromNode,
+        attempt: this.rec.attempt,
+        outcome: "fail_retryable",
+        reason_code: code
+      });
+    }
+    if (type === "task.cancel.ack") {
+      return [];
+    }
+    return [];
+  }
+  onReclaimingMessage(type, body, now) {
+    if (this.rec.drainClosed) return [];
+    if (type === "task.result") {
+      this.rec.resultBody = body;
+      if (!this.validateAcceptance(body)) {
+        this.rec.history.push({
+          node: this.rec.target ?? "?",
+          attempt: this.rec.attempt,
+          outcome: "acceptance_failed"
+        });
+        return [];
+      }
+      this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "result_delivered" });
+      return this.finish("done");
+    }
+    if (type === "task.fail") {
+      const { code } = normalizeFailCodeOrReject(body.reason_code);
+      if (body.retryable === false) {
+        this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "fail_fatal", reason_code: code });
+        return this.finish("failed");
+      }
+      this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "fail_retryable", reason_code: code });
+      return [];
+    }
+    if (type === "task.cancel.ack") {
+      this.rec.drainClosed = true;
+      return this.budgetOrEscalate(now, this.rec.acceptedThisAttempt);
+    }
+    return [];
+  }
+  onCancellingMessage(type, body) {
+    if (type === "task.result") {
+      this.rec.resultBody = body;
+      this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "result_delivered" });
+      return this.finish("done");
+    }
+    if (type === "task.fail") {
+      return this.finish("closed");
+    }
+    if (type === "task.cancel.ack") {
+      return this.finish("closed");
+    }
+    return [];
+  }
+  onTimer(timer, now) {
+    if (this.terminal) return [];
+    if (timer === "offer_ttl" && this.rec.state === "offered") {
+      this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "expired" });
+      return this.beginReclaim("reclaim", now);
+    }
+    if (timer === "lease" && this.rec.state === "running") {
+      if (this.rec.leaseDeadline !== void 0 && now < this.rec.leaseDeadline) {
+        return [{ kind: "schedule", timer: "lease", atMs: this.rec.leaseDeadline }];
+      }
+      this.rec.history.push({ node: this.rec.target ?? "?", attempt: this.rec.attempt, outcome: "lost" });
+      const actions = this.beginReclaim("reclaim", now);
+      return [{ kind: "audit", event: "reclaim", reason: "lease lost" }, ...actions];
+    }
+    if (timer === "drain" && this.rec.state === "reclaiming" && !this.rec.drainClosed) {
+      this.rec.drainClosed = true;
+      return this.budgetOrEscalate(now, this.rec.acceptedThisAttempt);
+    }
+    if (timer === "cancel_wait" && this.rec.state === "cancelling") {
+      return this.finish("closed");
+    }
+    return [];
+  }
+  cancelByUser(now) {
+    if (this.terminal) return [];
+    if (this.rec.state === "cancelling") return [];
+    this.rec.cancelReason = "user";
+    const target = this.rec.target;
+    const sendCancel = target ? [this.out("task.cancel", target, { reason: "user" })] : [];
+    this.rec.cancelWaitUntil = now + this.params.cancelWaitMs;
+    this.rec.state = "cancelling";
+    return [
+      this.stopTimers(),
+      ...sendCancel,
+      { kind: "schedule", timer: "cancel_wait", atMs: this.rec.cancelWaitUntil }
+    ];
+  }
+  /** R4:一切回收路径统一 先撤销、后改派 */
+  beginReclaim(reason, now, historyEntry) {
+    if (historyEntry) this.rec.history.push(historyEntry);
+    this.rec.state = "reclaiming";
+    this.rec.drainClosed = false;
+    this.rec.drainUntil = now + this.params.drainMs;
+    const cancelBody = { reason };
+    const target = this.rec.target;
+    return [
+      this.stopTimers(),
+      ...target ? [this.out("task.cancel", target, cancelBody)] : [],
+      { kind: "audit", event: "reclaim", reason },
+      { kind: "schedule", timer: "drain", atMs: this.rec.drainUntil }
+    ];
+  }
+  /** R7:双预算(已接受失败 / 未接受改派轮次);耗尽 → escalate(结构化事件,§11) */
+  budgetOrEscalate(_now, acceptedThisAttempt) {
+    if (acceptedThisAttempt) this.rec.acceptedFailedBudget += 1;
+    else this.rec.dispatchRounds += 1;
+    const exhausted = this.rec.acceptedFailedBudget >= this.params.maxAttempts || this.rec.dispatchRounds >= this.params.maxDispatchRounds;
+    if (exhausted) {
+      const summary = {
+        task_id: this.task_id,
+        attempts: [...this.rec.history],
+        final_reason: acceptedThisAttempt ? `accepted-failure budget exhausted (${this.rec.acceptedFailedBudget}/${this.params.maxAttempts})` : `dispatch-round budget exhausted (${this.rec.dispatchRounds}/${this.params.maxDispatchRounds})`
+      };
+      this.terminal = true;
+      this.rec.state = "escalated";
+      return [
+        this.stopTimers(),
+        { kind: "audit", event: "escalate", reason: summary.final_reason },
+        { kind: "escalate", summary },
+        { kind: "terminal", state: "escalated" }
+      ];
+    }
+    this.rec.state = "drafting";
+    return [{ kind: "requestDispatch", nextAttempt: this.rec.attempt + 1 }];
+  }
+  /** R8:按失败性质区分排除 */
+  applyExclusion(code, body) {
+    if (!this.rec.target) return;
+    const persistent = code === "unsupported_caps" || code === "policy_denied" || code === "refused_loop";
+    if (persistent) {
+      this.rec.excluded[this.rec.target] = "permanent";
+      return;
+    }
+    if (code === "busy" && typeof body.retry_after_ms === "number") return;
+    if (code === "busy") return;
+    this.rec.excluded[this.rec.target] = "once";
+  }
+};
+function normalizeFailCodeOrReject(raw) {
+  return { code: normalizeFailCode(typeof raw === "string" ? raw : "other").code };
+}
+
+// ../node/src/lead/checkpoint.ts
+function checkpointLeadMachine(m) {
+  const cp = { v: 1, task_id: m.task_id, kind: m.rec.kind, terminal: m.terminal, rec: m.rec };
+  return JSON.stringify(cp);
+}
+function restoreLeadMachine(blob, opts = {}) {
+  const cp = JSON.parse(blob);
+  if (cp.v !== 1) throw new Error(`checkpoint: \u4E0D\u652F\u6301\u7684\u7248\u672C ${cp.v}`);
+  const m = new LeadTaskMachine({
+    task_id: cp.task_id,
+    kind: cp.kind,
+    params: opts.params,
+    validateAcceptance: opts.validateAcceptance
+  });
+  m.rec = cp.rec;
+  m.terminal = cp.terminal;
+  return m;
+}
+function pendingTimers(m) {
+  const r = m.rec;
+  const out = [];
+  if (r.state === "offered" && r.offerTtlUntil !== void 0) out.push({ timer: "offer_ttl", atMs: r.offerTtlUntil });
+  if (r.state === "running" && r.leaseDeadline !== void 0) out.push({ timer: "lease", atMs: r.leaseDeadline });
+  if (r.state === "reclaiming" && !r.drainClosed && r.drainUntil !== void 0) {
+    out.push({ timer: "drain", atMs: r.drainUntil });
+  }
+  if (r.state === "cancelling" && r.cancelWaitUntil !== void 0) {
+    out.push({ timer: "cancel_wait", atMs: r.cancelWaitUntil });
+  }
+  return out;
+}
+
+// ../node/src/executor/machine.ts
+import { DEFAULT_PARAMS as DEFAULT_PARAMS2, isExpiredByExp } from "@qlong/core";
+
+// ../node/src/executor/caps.ts
+import {
+  KNOWN_CAP_CLASSES,
+  parseTag,
+  matchOne,
+  matchCaps
+} from "@qlong/core";
+
+// ../node/src/executor/gates.ts
+function gatePolicy(policy, offer) {
+  if (!policy) return { ok: true };
+  const r = policy(offer);
+  return r.ok ? { ok: true } : {
+    ok: false,
+    code: "policy_denied",
+    detail: r.retry_after_ms !== void 0 ? { retry_after_ms: r.retry_after_ms } : void 0
+  };
+}
+function gateCaps(requiredCaps, owned) {
+  if (!requiredCaps || requiredCaps.length === 0) return { ok: true };
+  const m = matchCaps(requiredCaps, owned);
+  return m.ok ? { ok: true } : { ok: false, code: "unsupported_caps", detail: { missing: m.missing } };
+}
+function gateLoad(load) {
+  if (!load) return { ok: true };
+  if (load.queueDepth > load.maxQueue || load.running > load.maxRunning) {
+    return {
+      ok: false,
+      code: "busy",
+      detail: load.retryAfterMs !== void 0 ? { retry_after_ms: load.retryAfterMs } : void 0
+    };
+  }
+  return { ok: true };
+}
+
+// ../node/src/executor/machine.ts
+var ALL_TIMERS = ["ttl", "lease_self", "heartbeat"];
+var ExecutorMachine = class {
+  rec;
+  params;
+  opts;
+  constructor(opts = {}) {
+    this.opts = opts;
+    this.params = opts.params ?? DEFAULT_PARAMS2;
+    this.rec = { state: "idle", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+  }
+  out(type, to, body, replyTo) {
+    return {
+      kind: "send",
+      msg: {
+        type,
+        to_node: to,
+        task_id: this.rec.task_id,
+        attempt: this.rec.attempt,
+        reply_to: replyTo,
+        body
+      }
+    };
+  }
+  stopAllTimers() {
+    return { kind: "cancelTimers", timers: [...ALL_TIMERS] };
+  }
+  /**
+   * 入站 offer(R0:更高 attempt = 隐式取消旧态;相同 attempt = 重复忽略;更低 = stale)。
+   * 通过五道闸(闸1 在传输层)后接受并启动驱动。
+   */
+  onOffer(o) {
+    if (this.rec.task_id === o.task_id && (this.rec.state === "result_sent" || this.rec.state === "fail_sent" || this.rec.state === "stopped" || this.rec.state === "cleaned") && (o.attempt ?? 0) <= (this.rec.attempt ?? 0)) {
+      return [];
+    }
+    if ((this.rec.state === "offered" || this.rec.state === "running") && this.rec.task_id === o.task_id) {
+      if (o.attempt === this.rec.attempt) return [];
+      if (o.attempt < (this.rec.attempt ?? 0)) {
+        return [
+          this.out("task.reject", o.from, { reason_code: "stale_attempt" }),
+          { kind: "audit", event: "stale_attempt_rejected", reason: "inbound attempt < local" }
+        ];
+      }
+      const staleReject = {
+        type: "task.reject",
+        to_node: o.from,
+        task_id: o.task_id,
+        attempt: this.rec.attempt,
+        body: { reason_code: "stale_attempt", detail: { old_attempt: this.rec.attempt, old_state: this.rec.state } }
+      };
+      const cleanups = this.rec.state === "running" && !this.rec.driverCompleted ? [{ kind: "stopDriver" }] : [];
+      this.rec = { state: "idle", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      return [
+        ...cleanups,
+        this.stopAllTimers(),
+        { kind: "send", msg: staleReject },
+        { kind: "audit", event: "stale_attempt_rejected", reason: "implicit cancel by higher attempt" },
+        ...this.evaluateOffer(o)
+      ];
+    }
+    if (o.exp !== void 0 && isExpiredByExp(o.exp, o.now)) {
+      this.rec = { state: "rejected", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      return [this.outFor(o, "task.reject", { reason_code: "expired" })];
+    }
+    if (this.rec.state === "running" || this.rec.state === "offered") {
+      return [
+        this.outFor(o, "task.reject", { reason_code: "busy", detail: { reason: "v1 \u5355\u6267\u884C\u4F4D,\u5DF2\u6709\u5728\u9014\u4EFB\u52A1" } })
+      ];
+    }
+    return this.evaluateOffer(o);
+  }
+  evaluateOffer(o) {
+    const policy = gatePolicy(this.opts.policy, o.body);
+    if (!policy.ok) {
+      this.rec = { state: "rejected", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      const rejectBody = { reason_code: "policy_denied", ...policy.detail ?? {} };
+      return [this.outFor(o, "task.reject", rejectBody)];
+    }
+    const required = Array.isArray(o.body.required_caps) ? o.body.required_caps : [];
+    const caps = gateCaps(required, this.opts.capabilities?.() ?? []);
+    if (!caps.ok) {
+      this.rec = { state: "rejected", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      return [this.outFor(o, "task.reject", { reason_code: "unsupported_caps", ...caps.detail ?? {} })];
+    }
+    const load = gateLoad(this.opts.load?.());
+    if (!load.ok) {
+      this.rec = { state: "rejected", lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      return [this.outFor(o, "task.reject", { reason_code: "busy", ...load.detail ?? {} })];
+    }
+    const requiresList = Array.isArray(o.body.requires) ? o.body.requires : [];
+    const confirmReq = requiresList.find((r) => r && r.cls === "confirm");
+    if (confirmReq) {
+      if (!this.opts.confirmHandler) {
+        return [
+          (() => {
+            this.rec = {
+              state: "rejected",
+              task_id: o.task_id,
+              attempt: o.attempt,
+              from: o.from,
+              msg_id: o.msg_id,
+              offerBody: o.body,
+              receivedAt: o.now,
+              lastSeq: 0,
+              driverCompleted: false,
+              cancelReceived: false,
+              paused: false
+            };
+            return this.outFor(o, "task.reject", { reason_code: "policy_denied", detail: { reason: "confirm_required_no_channel" } });
+          })()
+        ];
+      }
+      const approved = this.opts.confirmHandler(
+        { cls: String(confirmReq.cls), value: String(confirmReq.value ?? ""), reason: String(confirmReq.reason ?? "") },
+        o.body
+      );
+      if (!approved) {
+        return [
+          (() => {
+            this.rec = {
+              state: "rejected",
+              task_id: o.task_id,
+              attempt: o.attempt,
+              from: o.from,
+              msg_id: o.msg_id,
+              offerBody: o.body,
+              receivedAt: o.now,
+              lastSeq: 0,
+              driverCompleted: false,
+              cancelReceived: false,
+              paused: false
+            };
+            return this.outFor(o, "task.reject", { reason_code: "policy_denied", detail: { reason: "confirmed_denied" } });
+          })()
+        ];
+      }
+    }
+    const offeredLease = typeof o.body.lease_ms === "number" ? o.body.lease_ms : this.params.leaseMsProject;
+    this.rec = {
+      state: "running",
+      task_id: o.task_id,
+      attempt: o.attempt,
+      from: o.from,
+      msg_id: o.msg_id,
+      offerBody: o.body,
+      receivedAt: o.now,
+      ttlMs: typeof o.body.offer_ttl_ms === "number" ? o.body.offer_ttl_ms : void 0,
+      leaseConfirmedMs: offeredLease,
+      leaseSelfDeadline: o.now + offeredLease,
+      lastSeq: 0,
+      driverCompleted: false,
+      cancelReceived: false,
+      paused: false
+    };
+    const hb = Math.floor(offeredLease / 3);
+    return [
+      this.outFor(o, "task.accept", { lease_ms: offeredLease, started_at: new Date(o.now).toISOString() }),
+      { kind: "startDriver", task_id: o.task_id, attempt: o.attempt, offer: o.body },
+      { kind: "schedule", timer: "heartbeat", atMs: o.now + hb },
+      { kind: "schedule", timer: "lease_self", atMs: o.now + offeredLease }
+    ];
+  }
+  outFor(o, type, body) {
+    return {
+      kind: "send",
+      msg: { type, to_node: o.from, task_id: o.task_id, attempt: o.attempt, reply_to: o.msg_id, body }
+    };
+  }
+  /** offer_ttl 到期(R2):晚于才过期;过期必须立刻 reject(expired),禁止沉默 */
+  onTtlCheck(now) {
+    if (this.rec.state !== "offered" || this.rec.receivedAt === void 0) return [];
+    const ttl = this.rec.ttlMs ?? this.params.offerTtlMsAid;
+    if (now > (this.rec.receivedAt ?? 0) + ttl) {
+      this.rec.state = "rejected";
+      const from = this.rec.from ?? "";
+      return [this.out("task.reject", from, { reason_code: "expired" })];
+    }
+    return [];
+  }
+  /** 心跳到期:发出 progress(seq 单调递增),续自身租约由回执驱动(R11/M3) */
+  onHeartbeatDue(now) {
+    if (this.rec.state !== "running" || this.rec.paused) return [];
+    this.rec.lastSeq += 1;
+    const seq = this.rec.lastSeq;
+    const from = this.rec.from ?? "";
+    const actions = [
+      this.out("task.progress", from, { state: "working", seq }),
+      { kind: "schedule", timer: "heartbeat", atMs: now + Math.floor((this.rec.leaseConfirmedMs ?? this.params.leaseMsProject) / 3) }
+    ];
+    return actions;
+  }
+  /** 心跳获网关回执 → 自身租约续期(R3 执行方对称计时器) */
+  onHeartbeatAcked(now) {
+    if (this.rec.state !== "running") return [];
+    if (this.rec.paused) {
+      this.rec.paused = false;
+      this.rec.leaseSelfDeadline = now + (this.rec.leaseConfirmedMs ?? this.params.leaseMsProject);
+      return [
+        { kind: "resumeDriver" },
+        { kind: "schedule", timer: "lease_self", atMs: this.rec.leaseSelfDeadline }
+      ];
+    }
+    this.rec.leaseSelfDeadline = now + (this.rec.leaseConfirmedMs ?? this.params.leaseMsProject);
+    return [
+      { kind: "cancelTimers", timers: ["lease_self"] },
+      { kind: "schedule", timer: "lease_self", atMs: this.rec.leaseSelfDeadline }
+    ];
+  }
+  /** 自身租约超时:暂停产生新副作用(R3),不强求杀进程 */
+  onLeaseSelfTimeout(now) {
+    if (this.rec.state !== "running") return [];
+    if ((this.rec.leaseSelfDeadline ?? 0) > now) {
+      return [{ kind: "schedule", timer: "lease_self", atMs: this.rec.leaseSelfDeadline ?? now }];
+    }
+    this.rec.paused = true;
+    return [{ kind: "pauseDriver" }];
+  }
+  /** 驱动完成:R5 自检 —— 已收到 cancel(执行中)→ 不发 result 回 ack;本地租约已超时(paused)同此;否则发 result */
+  onDriverCompleted(resultBody) {
+    if (this.rec.state !== "running") return [];
+    this.rec.driverCompleted = true;
+    this.rec.resultBody = resultBody;
+    if (this.rec.paused) {
+      this.rec.state = "stopped";
+      const from0 = this.rec.from ?? "";
+      return [this.stopAllTimers(), this.out("task.cancel.ack", from0, {})];
+    }
+    if (this.rec.cancelReceived) {
+      this.rec.state = "stopped";
+      const from2 = this.rec.from ?? "";
+      return [
+        this.stopAllTimers(),
+        this.out("task.cancel.ack", from2, {})
+      ];
+    }
+    this.rec.state = "result_sent";
+    const from = this.rec.from ?? "";
+    return [
+      this.stopAllTimers(),
+      this.out("task.result", from, { status: "done", ...resultBody })
+    ];
+  }
+  /** 驱动失败:发 fail(码走 §4.3 登记表) */
+  onDriverFailed(failBody) {
+    if (this.rec.state !== "running") return [];
+    this.rec.state = "fail_sent";
+    const from = this.rec.from ?? "";
+    return [this.stopAllTimers(), this.out("task.fail", from, failBody)];
+  }
+  /** 入站 cancel(01 §5.2/R5):running → 停止+ack;已完成未交付 → result+completed_before_cancel;result_sent → ack 带标记不重发 */
+  onCancel(fromNode, attempt) {
+    if (this.rec.state === "running" && attempt === this.rec.attempt) {
+      this.rec.cancelReceived = true;
+      if (this.rec.driverCompleted) {
+        this.rec.state = "result_sent";
+        const result = { status: "done", ...this.rec.resultBody ?? {}, completed_before_cancel: true };
+        return [this.stopAllTimers(), this.out("task.result", fromNode, result)];
+      }
+      this.rec.state = "stopped";
+      return [
+        this.stopAllTimers(),
+        { kind: "stopDriver" },
+        this.out("task.cancel.ack", fromNode, {})
+      ];
+    }
+    if (this.rec.state === "offered" && attempt === this.rec.attempt) {
+      this.rec.state = "stopped";
+      return [this.stopAllTimers(), this.out("task.cancel.ack", fromNode, {})];
+    }
+    if (this.rec.state === "result_sent") {
+      return [this.out("task.cancel.ack", fromNode, { completed_before_cancel: true })];
+    }
+    return [];
+  }
+  /** 收到 reject(stale_attempt):本地记账/清理 → 终态(R0/R5) */
+  onStaleReject() {
+    if (this.rec.state === "running" || this.rec.state === "offered") {
+      const actions = [];
+      if (this.rec.state === "running") actions.push({ kind: "stopDriver" });
+      this.rec.state = "cleaned";
+      return [...actions, this.stopAllTimers()];
+    }
+    return [];
+  }
+};
+
+// ../node/src/executor/driver.ts
+var ScriptStubDriver = class {
+  host = null;
+  cancelFn = null;
+  stopped = false;
+  startedCount = 0;
+  scripts;
+  constructor(scripts) {
+    this.scripts = Array.isArray(scripts) ? scripts : [scripts];
+  }
+  start(task, host) {
+    void task;
+    this.host = host;
+    this.stopped = false;
+    this.cancelFn = null;
+    const startedAt = host.now();
+    const script = this.scripts[Math.min(this.startedCount, this.scripts.length - 1)];
+    this.startedCount += 1;
+    if (script.completeAfterMs !== void 0) {
+      const at = startedAt + script.completeAfterMs;
+      this.cancelFn = host.schedule(at, () => {
+        if (this.stopped) return;
+        host.complete({ summary: "stub \u5B8C\u6210", ...script.resultBody ?? {} });
+      });
+    } else if (script.failAfter) {
+      const failSpec = script.failAfter;
+      const at = startedAt + failSpec.ms;
+      this.cancelFn = host.schedule(at, () => {
+        if (this.stopped) return;
+        host.fail(failSpec.body);
+      });
+    }
+  }
+  stop() {
+    this.stopped = true;
+    this.cancelFn?.();
+    this.cancelFn = null;
+  }
+  pause() {
+  }
+  resume() {
+  }
+};
+
+// ../node/src/local/harness.ts
+var SingleNodeHarness = class {
+  taskId;
+  kind;
+  nodeAId;
+  nodeBId;
+  params;
+  opts;
+  lead;
+  exec;
+  driver;
+  audits = [];
+  escalateSummary;
+  terminalState;
+  heartbeatCount = 0;
+  clock = 0;
+  timers = [];
+  lastOfferBody;
+  constructor(opts = {}) {
+    this.opts = opts;
+    this.params = opts.params ?? DEFAULT_PARAMS3;
+    this.kind = opts.kind ?? "project";
+    this.taskId = opts.taskId ?? newId();
+    this.nodeAId = newId();
+    this.nodeBId = newId();
+    this.lead = new LeadTaskMachine({
+      task_id: this.taskId,
+      kind: this.kind,
+      params: this.params,
+      validateAcceptance: opts.validateAcceptance
+    });
+    this.exec = new ExecutorMachine({
+      params: this.params,
+      capabilities: opts.capabilities ?? (() => ["tool:node@20"]),
+      policy: opts.policy,
+      load: opts.load
+    });
+    this.driver = new ScriptStubDriver(Array.isArray(opts.script) ? opts.script : [opts.script ?? {}]);
+    this.lastOfferBody = this.defaultOfferBody();
+  }
+  defaultOfferBody() {
+    return {
+      kind: this.kind,
+      summary: "stub \u4EFB\u52A1:\u5355\u673A\u603B\u7EBF\u96C6\u6210",
+      lease_ms: defaultLeaseMs(this.kind, this.params),
+      offer_ttl_ms: defaultOfferTtlMs2(this.kind, this.params)
+    };
+  }
+  startTask(offerBody) {
+    this.lastOfferBody = offerBody ?? this.defaultOfferBody();
+    this.processLead(this.lead.dispatchTo(this.nodeBId, this.lastOfferBody, this.clock), this.clock);
+  }
+  cancelTask() {
+    this.processLead(this.lead.cancelByUser(this.clock), this.clock);
+  }
+  /**
+   * 同机进程重启接管:从检查点恢复牵头方,并按 pendingTimers 重挂定时器
+   * (评审 M1-ARCH-1/M1-QA-5:恢复不重挂 = 接管特性不可用)。
+   * 执行方/驱动不恢复 —— 重启后其工作即丢失,由牵头方租约超时 → 改派闭环兜底。
+   */
+  adoptRestoredLead(blob) {
+    this.lead = restoreLeadMachine(blob, {
+      params: this.params,
+      validateAcceptance: this.opts.validateAcceptance
+    });
+    for (const t of pendingTimers(this.lead)) {
+      const timer = t.timer;
+      this.schedule("lead", timer, t.atMs, () => this.processLead(this.lead.onTimer(timer, t.atMs), t.atMs));
+    }
+    if (this.lead.rec.state === "drafting") {
+      this.processLead(this.lead.redispatchTo(this.nodeBId, this.lastOfferBody, this.clock), this.clock);
+    }
+  }
+  /** 推演时钟:按时间序触发全部到期定时器(含过程中新排程的) */
+  advanceTo(ms) {
+    for (; ; ) {
+      const due = this.timers.filter((t) => !t.cancelled && t.at <= ms).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      this.timers = this.timers.filter((t) => t !== due);
+      this.clock = Math.max(this.clock, due.at);
+      due.cb();
+    }
+    this.clock = Math.max(this.clock, ms);
+  }
+  schedule(owner, name, at, cb) {
+    this.timers.push({ owner, name, at, cb, cancelled: false });
+  }
+  cancelTimers(owner, names) {
+    for (const t of this.timers) {
+      if (t.owner === owner && names.includes(t.name)) t.cancelled = true;
+    }
+  }
+  processLead(actions, now) {
+    for (const a of actions) {
+      switch (a.kind) {
+        case "send":
+          this.deliverToExecutor(a.msg, now);
+          break;
+        case "audit":
+          this.audits.push(makeAudit(a.event, { node_id: this.nodeAId, reason: a.reason }, () => new Date(now).toISOString()));
+          break;
+        case "requestDispatch":
+          this.processLead(this.lead.redispatchTo(this.nodeBId, this.lastOfferBody, now), now);
+          break;
+        case "schedule":
+          this.schedule("lead", a.timer, a.atMs, () => this.processLead(this.lead.onTimer(a.timer, a.atMs), a.atMs));
+          break;
+        case "cancelTimers":
+          this.cancelTimers("lead", a.timers);
+          break;
+        case "terminal":
+          this.terminalState = a.state;
+          break;
+        case "escalate":
+          this.escalateSummary = a.summary;
+          break;
+      }
+    }
+  }
+  deliverToExecutor(msg, now) {
+    if (msg.type === "task.offer") {
+      this.processExec(
+        this.exec.onOffer({
+          from: this.nodeAId,
+          task_id: msg.task_id,
+          attempt: msg.attempt,
+          msg_id: newId(),
+          body: msg.body,
+          now,
+          exp: new Date(now + this.params.expHorizonMs).toISOString()
+        }),
+        now
+      );
+    } else if (msg.type === "task.cancel") {
+      this.processExec(this.exec.onCancel(this.nodeAId, msg.attempt ?? 0), now);
+    } else if (msg.type === "task.reject") {
+      this.processExec(this.exec.onStaleReject(), now);
+    }
+  }
+  deliverToLead(msg, now) {
+    if (msg.type === "task.progress") this.heartbeatCount += 1;
+    this.processLead(
+      this.lead.onMessage(msg.type, this.nodeBId, msg.attempt ?? this.lead.rec.attempt, msg.body, now),
+      now
+    );
+    if (msg.type === "task.progress") {
+      this.processExec(this.exec.onHeartbeatAcked(now), now);
+    }
+  }
+  processExec(actions, now) {
+    for (const a of actions) {
+      switch (a.kind) {
+        case "send":
+          this.deliverToLead(a.msg, now);
+          break;
+        case "audit":
+          this.audits.push(makeAudit(a.event, { node_id: this.nodeBId, reason: a.reason }, () => new Date(now).toISOString()));
+          break;
+        case "startDriver":
+          this.driver.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost());
+          break;
+        case "stopDriver":
+          this.driver.stop();
+          break;
+        case "pauseDriver":
+          this.driver.pause();
+          break;
+        case "resumeDriver":
+          this.driver.resume();
+          break;
+        case "schedule":
+          this.schedule("exec", a.timer, a.atMs, () => this.fireExecTimer(a.timer, a.atMs));
+          break;
+        case "cancelTimers":
+          this.cancelTimers("exec", a.timers);
+          break;
+      }
+    }
+  }
+  fireExecTimer(timer, at) {
+    if (timer === "heartbeat") {
+      this.processExec(this.exec.onHeartbeatDue(at), at);
+      this.processExec(this.exec.onHeartbeatAcked(at), at);
+    } else if (timer === "lease_self") {
+      this.processExec(this.exec.onLeaseSelfTimeout(at), at);
+    } else {
+      this.processExec(this.exec.onTtlCheck(at), at);
+    }
+  }
+  driverHost() {
+    return {
+      now: () => this.clock,
+      schedule: (at, cb) => {
+        const entry = { owner: "driver", name: "cb", at, cb, cancelled: false };
+        this.timers.push(entry);
+        return () => {
+          entry.cancelled = true;
+        };
+      },
+      complete: (b) => this.processExec(this.exec.onDriverCompleted(b), this.clock),
+      fail: (b) => this.processExec(this.exec.onDriverFailed(b), this.clock)
+    };
+  }
+};
+
+// ../node/src/lead/supervisor.ts
+var LeadSupervisor = class {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  deps;
+  machines = /* @__PURE__ */ new Map();
+  create(taskId, kind) {
+    const m = new LeadTaskMachine({
+      task_id: taskId,
+      kind,
+      params: this.deps.params,
+      validateAcceptance: this.deps.validateAcceptance
+    });
+    this.machines.set(taskId, m);
+    this.persist(m);
+    return m;
+  }
+  /** 进程重启后调用:从存储恢复全部任务(含终态),重挂定时器并上报改派意图 */
+  restoreAll() {
+    const restored = [];
+    const needDispatch = [];
+    for (const taskId of this.deps.store.list()) {
+      const blob = this.deps.store.load(taskId);
+      if (!blob) continue;
+      const m = restoreLeadMachine(blob, this.deps);
+      this.machines.set(taskId, m);
+      restored.push(taskId);
+      if (m.terminal) continue;
+      this.deps.rearm?.(taskId, pendingTimers(m));
+      if (m.rec.state === "drafting") {
+        needDispatch.push(taskId);
+        this.deps.onNeedDispatch?.(taskId, m.rec.attempt + 1);
+      }
+    }
+    return { restored, needDispatch };
+  }
+  get(taskId) {
+    return this.machines.get(taskId);
+  }
+  dispatch(taskId, target, offerBody, now) {
+    const m = this.must(taskId);
+    const actions = m.dispatchTo(target, offerBody, now);
+    this.persist(m);
+    return actions;
+  }
+  redispatch(taskId, target, offerBody, now) {
+    const m = this.must(taskId);
+    const actions = m.redispatchTo(target, offerBody, now);
+    this.persist(m);
+    return actions;
+  }
+  deliver(taskId, type, from, attempt, body, now) {
+    const m = this.must(taskId);
+    const actions = m.onMessage(type, from, attempt, body, now);
+    this.persist(m);
+    return actions;
+  }
+  tick(taskId, timer, now) {
+    const m = this.must(taskId);
+    const actions = m.onTimer(timer, now);
+    this.persist(m);
+    return actions;
+  }
+  cancel(taskId, now) {
+    const m = this.must(taskId);
+    const actions = m.cancelByUser(now);
+    this.persist(m);
+    return actions;
+  }
+  historyOf(taskId) {
+    return this.must(taskId).rec.history;
+  }
+  must(taskId) {
+    const m = this.machines.get(taskId);
+    if (!m) throw new Error(`supervisor: \u4EFB\u52A1\u4E0D\u5B58\u5728 ${taskId}`);
+    return m;
+  }
+  persist(m) {
+    this.deps.store.save(m.task_id, checkpointLeadMachine(m));
+  }
+};
+
+// ../node/src/lead/store.ts
+var MemoryStore = class {
+  map = /* @__PURE__ */ new Map();
+  save(taskId, blob) {
+    this.map.set(taskId, blob);
+  }
+  load(taskId) {
+    return this.map.get(taskId);
+  }
+  list() {
+    return [...this.map.keys()];
+  }
+  delete(taskId) {
+    this.map.delete(taskId);
+  }
+};
+
+// src/main.ts
+var cmd = process.argv[2] ?? "demo";
+if (cmd === "demo") {
+  const h = new SingleNodeHarness({
+    kind: "project",
+    script: [
+      { failAfter: { ms: 1e3, body: { reason_code: "internal_error", retryable: true, summary: "\u77AC\u6001\u9519\u8BEF" } } },
+      { completeAfterMs: 2e3, resultBody: { summary: "\u91CD\u505A\u6210\u529F" } }
+    ]
+  });
+  h.startTask();
+  h.advanceTo(2e5);
+  console.log("state        :", h.lead.rec.state);
+  console.log("attempt      :", h.lead.rec.attempt);
+  console.log("heartbeats   :", h.heartbeatCount);
+  console.log("audit events :", h.audits.map((a) => a.event).join(", "));
+  process.exit(h.lead.rec.state === "done" && h.lead.rec.attempt === 2 ? 0 : 1);
+}
+if (cmd === "takeover") {
+  const store = new MemoryStore();
+  const s1 = new LeadSupervisor({ store });
+  const m1 = s1.create("demo-task", "project");
+  s1.dispatch("demo-task", "node-b", { kind: "project", summary: "\u63A5\u7BA1\u6F14\u7EC3", lease_ms: 3e5, offer_ttl_ms: 6e4 }, 0);
+  s1.deliver("demo-task", "task.accept", "node-b", 1, { lease_ms: 3e5 }, 0);
+  console.log("before crash :", m1.rec.state, "| attempt", m1.rec.attempt);
+  const s2 = new LeadSupervisor({ store });
+  s2.restoreAll();
+  const m2 = s2.get("demo-task");
+  console.log("after restore:", m2?.rec.state, "| attempt", m2?.rec.attempt);
+  s2.deliver("demo-task", "task.result", "node-b", 1, { status: "done", summary: "\u6062\u590D\u540E\u4EA4\u4ED8" }, 100);
+  console.log("after result :", m2?.rec.state);
+  process.exit(m2?.rec.state === "done" ? 0 : 1);
+}
+console.log("usage: qlong <demo|takeover>");
+process.exit(2);
