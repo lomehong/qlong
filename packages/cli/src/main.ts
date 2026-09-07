@@ -214,5 +214,31 @@ if (cmd === 'tasks') {
   process.exit(0);
 }
 
-console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|status|tasks>');
+if (cmd === 'doctor') {
+  console.log('qlong doctor(真实联调前检查)');
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  console.log(nodeMajor >= 20 ? '✓ node ' + process.versions.node + ' >= 20' : '✗ node ' + process.versions.node + ' < 20(需升级)');
+  if (process.env.DSH_HARNESS_CMD) {
+    console.log('✓ DSH_HARNESS_CMD =', process.env.DSH_HARNESS_CMD);
+  } else {
+    console.log('○ dsh 走默认 npx 通道(首次任务会拉取 @deepseek-ai/dsh,需 npm 网络)');
+    console.log('  模型凭证按 dsh 文档在 headless profile 侧配置');
+  }
+  const home = qlongHome();
+  let joined = false;
+  try { const c = readConfig(home); joined = true; console.log('✓ 已入网: node', c.node_id, '| team', c.team_id, '| registry', c.registry_url); } catch { console.log('○ 未入网(qlong join <token>)'); }
+  if (joined) {
+    try {
+      const cfg = readConfig(home);
+      const res = await fetch(cfg.registry_url + '/v1/nodes/me', { headers: { Authorization: 'Bearer ' + cfg.node_token } });
+      console.log(res.ok ? '✓ registry 可达且凭证有效(' + res.status + ')' : '✗ registry 返回 ' + res.status + '(token 失效/服务未启动)');
+    } catch (e) {
+      console.log('✗ registry 不可达:', e instanceof Error ? e.message : e);
+    }
+  }
+  console.log('提示:任务执行会调用 deepseek-harness(dsh);模型凭证见 https://deepseek-harness.github.io/deepseek-harness/');
+  process.exit(0);
+}
+
+console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks>');
 process.exit(2);
