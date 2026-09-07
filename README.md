@@ -133,7 +133,30 @@
   安装脚本支持 `--version vX.Y.Z` / 环境变量 `QLONG_VERSION`;携带脚本与产物严格同源
 - **Console 节点安装页**:生成一次性邀请码 → 按平台给出可复制安装命令,支持选择版本
 
-**待办(v0.7)**:网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、真实 dsh 联调演练(npx 通道 + 模型凭证配置)。
+## v0.7 新增(v0.6 待办五件全部兑现)
+
+- **真实 deepseek-harness 联调 ✅**:上游事实经仓库核实(npm `@deepseek-ai/dsh`,latest 0.1.2-rc.1;
+  `dsh --profile headless "<job>"` 一次性会话,stdout 输出最终答案后退出;调用目录即工作区)。
+  `DeepSeekHarnessDriver` 默认 npx 通道**零覆盖**实测:真实模型任务 31s 返回,complete 收到含答案的 result;
+  门控测试 `QLONG_DSH_E2E=1` 可复跑;新增 `qlong doctor` 联调前检查(node/凭证/registry 可达性)
+- **GitPayloadStore(§8.4)**:共享 bare 仓内对象分发——每负载一个 blob 挂 `refs/payload/<sha256>`
+  (独立根提交,fetch --depth 1 精确自足,多负载互不影响);store 走 plumbing(hash-object→mktree→
+  commit-tree→update-ref),https 远端走临时 worktree;`fetchPayloadGit` sha256/size 校验 + R10 基线
+  (非 https repo 须节点放行);产物回传 `pushArtifacts`(执行方推 `qlong/<task>` 分支)+
+  `collectArtifacts`(牵头方收取产物树)
+- **网关集群化 v1(02 §12.1)**:`GatewayCluster`——连接注册(member.has)在线直投;
+  FNV-1a 稳定分片,离线 project 单落 home 分片网关收件箱(节点连回 home 即补投);
+  `GatewayCore` deferOffline 语义;同进程多实例 + 外部 LB 为 v1 形态,跨进程总线列 v0.8
+- **跨机 leader 接管(01 §4.4 导出/导入候选)**:`exportCheckpoints/importCheckpoints`——
+  bundle 携带 attempt 高水位与在途清单;导入 fence(在途 attempt+1 归位 drafting,
+  原执行方迟到消息即刻 R0 拒收;本地高水位 ≥ 导入 → 跳过,禁双主回退;终态归档)
+- **双机走查文档三件套**:`QLONG_TASK_BRIEF_TEMPLATE.md`(任务书四要素模板 + 注入防线)、
+  `QLONG_STATE_MATRIX.md`((状态×消息×定时器)全矩阵,与实现逐格对齐 + 测试生成清单)、
+  `QLONG_E2E_WALKTHROUGH.md`(双机剧本 + 第一幕 npx 联调记录 + 故障注入清单)
+- `qlong doctor` 联调前检查;全量 **225 测试全绿**(含门控真实联调 1 项),5 包 typecheck 干净
+
+**待办(v0.8)**:网关跨进程总线(Redis pub/sub,route 接口已可替换)、双机实物演练执行(剧本已备)、
+控制台 URL 路由化(/install 直达 React 页)、FileMailboxStore(收件箱重启存活)。
 
 ## v0.5 新增(安装器完整化:真实联调前置件)
 
@@ -143,4 +166,4 @@
 - **平台产物补齐**:package.mjs 现产出 qlong-{linux,darwin}-{x64,arm64}(shebang 单文件,目标机需 node ≥20)+ qlong-win-x64.cmd 垫片;安装脚本增加 node ≥20 检测
 - 注:真单文件二进制(Node SEA/bun compile)列为 v0.6 可选,当前为"bundle + node 运行时"形态
 
-**待办(v0.6)**:git bundle payload 存储、网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、**真实 deepseek-harness 联调(前置件已齐)**。
+**待办(v0.6)已全部由 v0.7 兑现**(git bundle/集群化/跨机接管/走查文档/真实联调)。
