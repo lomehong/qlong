@@ -80,7 +80,7 @@ afterAll(async () => {
 });
 
 interface Stack {
-  creds: { node_id: string; team_id: string; node_token: string; priv: Uint8Array };
+  creds: { node_id: string; team_id: string; node_token: string; priv: Uint8Array; key_epoch: number };
   session: RemoteNodeSession;
   client: GatewayClient;
 }
@@ -92,7 +92,7 @@ async function enroll(opts: { gatewayIndex?: number; driver?: ScriptStubDriver }
     ['to' + 'ken']: tok,
     pubkey: Buffer.from(kp.publicKey).toString('base64'),
   } as Parameters<Registry['enroll']>[0]);
-  const creds = { node_id: res.node_id, team_id: res.team_id, node_token: res.node_token, priv: kp.priv };
+  const creds = { node_id: res.node_id, team_id: res.team_id, node_token: res.node_token, priv: kp.priv, key_epoch: res.key_epoch };
   const gi = opts.gatewayIndex ?? 0;
   const client = new GatewayClient({
     url: `ws://127.0.0.1:${ports[gi]}`,
@@ -148,6 +148,7 @@ describe('网关集群(02 §12.1 v1)', () => {
     const home = cluster.shardOf(cId);
     expect(home).toBeDefined();
     const homeIndex = cores.indexOf(home!.core);
+    if (homeIndex < 0) throw new Error('home member 不在集群');
     const before = cores.map((k) => k.inbox.size(cId));
 
     // 离线期间派单(project):经 gw0 → 集群路由 → home 分片入箱
@@ -157,7 +158,8 @@ describe('网关集群(02 §12.1 v1)', () => {
       kind: 'project', summary: '离线分片邮箱', lease_ms: FAST_PARAMS.leaseMsProject, offer_ttl_ms: FAST_PARAMS.offerTtlMsProject,
     });
     await new Promise((r) => setTimeout(r, 150));
-    expect(cores[homeIndex].inbox.size(cId)).toBeGreaterThan(0); // 落在 home 分片
+    const homeCore = cores[homeIndex]!;
+    expect(homeCore.inbox.size(cId)).toBeGreaterThan(0); // 落在 home 分片
     expect(before.filter((n) => n > 0).length).toBe(0);
 
     // 重新入网到 home 网关(新 session/client 同 node)

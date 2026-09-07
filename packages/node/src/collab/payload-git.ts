@@ -195,9 +195,9 @@ export function pushArtifacts(
   taskId: string,
   gitBin?: string,
 ): { branch: string; pushed: string[] } {
-  gitBin = resolveGitBin(gitBin);
+  const bin = resolveGitBin(gitBin);
   const git = (args: string[]): string =>
-    execFileSync(gitBin, args, {
+    execFileSync(bin, args, {
       cwd: worktreeDir,
       env: {
         ...process.env,
