@@ -42,5 +42,5 @@ if (cmd === 'takeover') {
   process.exit(m2?.rec.state === 'done' ? 0 : 1);
 }
 
-console.log('usage: qlong <demo|takeover>');
+if (cmd === 'status') {   console.log('qlong v0.2');   console.log('Team: ' + (process.env.QLONG_TEAM_ID ?? '(unset)'));   console.log('Registry: ' + (process.env.QLONG_REGISTRY_URL ?? 'http://127.0.0.1:3200'));   process.exit(0); } if (cmd === 'tasks') {   const regUrl = process.env.QLONG_REGISTRY_URL ?? 'http://127.0.0.1:3200';   const teamId = process.env.QLONG_TEAM_ID ?? '';   const tok = process.env.QLONG_NODE_TOKEN ?? '';   if (!teamId || !tok) { console.error('set QLONG_TEAM_ID + QLONG_NODE_TOKEN'); process.exit(1); }   const res = await fetch(regUrl + '/v1/teams/' + teamId + '/tasks', { headers: { Authorization: 'Bearer ' + tok } });   const d = await res.json() as { tasks?: Array<{ task_id: string; status: string; type: string }> };   for (const t of d.tasks ?? []) console.log(t.task_id.slice(0, 12), t.type, t.status);   process.exit(0); } console.log('usage: qlong <demo|takeover|status|tasks>');
 process.exit(2);
