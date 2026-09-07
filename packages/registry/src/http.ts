@@ -228,6 +228,14 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           sendJson(res, 200, { nodes: registry.listTeamNodes(teamId, { caps }), next_cursor: null });
           return;
         }
+        // 审计查询(§11):GET /v1/teams/{id}/audit
+        if (seg[3] === 'audit' && method === 'GET' && seg.length === 4) {
+          const self = registry.authByToken(token ?? '');
+          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          const events = registry.getAuditEvents ? registry.getAuditEvents(teamId, 1000) : [];
+          sendJson(res, 200, { events });
+          return;
+        }
         if (seg[3] === 'grants' && seg.length >= 4) {
         // grant 管理(v0.2 D1)
         if (seg[3] === 'grants' && seg.length === 4) {

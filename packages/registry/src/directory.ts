@@ -382,6 +382,16 @@ export class Registry {
   }
 
   /** A1 扩展:检查 from_team 是否有权向 to_team 发消息(grant 或同队) */
+  readonly auditLog: Array<{ ts: string; event: string; node: string; team: string; reason: string; trace_id?: string }> = [];
+
+  logAudit(event: string, node: string, team: string, reason: string, traceId?: string): void {
+    this.auditLog.push({ ts: new Date().toISOString(), event, node, team, reason, trace_id: traceId });
+    if (this.auditLog.length > 10_000) this.auditLog.shift();
+  }
+
+  getAuditEvents(teamId: string, limit: number): Array<{ ts: string; event: string; node: string; team: string; reason: string; trace_id?: string }> {
+    return this.auditLog.filter((e) => e.team === teamId).slice(-limit);
+  }
   hasGrant(fromTeam: string, toTeam: string): boolean {
     for (const g of this.grants.values()) {
       if (g.expires_at !== undefined && this.now > g.expires_at) continue;
