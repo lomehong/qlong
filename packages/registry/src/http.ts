@@ -206,12 +206,55 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       // ---- team 面 ----
       if (seg[1] === 'teams' && seg.length >= 3) {
         const teamId = seg[2] as string;
+
+        // 控制台概览(评审 I-21,§8.7):GET /v1/teams/{id}/overview
+        if (seg[3] === 'overview' && method === 'GET' && seg.length === 4) {
+          const self = registry.authByToken(token ?? '');
+          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          const nodes = registry.listTeamNodes(teamId);
+          const grantList = registry.listGrants(teamId);
+          sendJson(res, 200, {
+            team_id: teamId,
+            nodes,
+            grants: grantList,
+            stats: { total: nodes.length, online: nodes.filter((n: Record<string, unknown>) => n.online).length },
+          });
+          return;
+        }
         if (seg[3] === 'nodes' && method === 'GET' && seg.length === 4) {
           const self = registry.authByToken(token ?? '');
           if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
           const caps = url.searchParams.getAll('caps');
           sendJson(res, 200, { nodes: registry.listTeamNodes(teamId, { caps }), next_cursor: null });
           return;
+        }
+        if (seg[3] === 'grants' && seg.length >= 4) {
+        // grant 管理(v0.2 D1)
+        if (seg[3] === 'grants' && seg.length === 4) {
+          await assertOwner(opts, req, teamId);
+          if (method === 'GET') {
+            sendJson(res, 200, { grants: registry.listGrants(teamId) });
+            return;
+          }
+          if (method === 'POST') {
+            const body = await readJson(req);
+            const grant = registry.createGrant({
+              from_team: teamId,
+              to_team: String(body.to_team ?? ''),
+              caps_visible: Array.isArray(body.caps_visible) ? (body.caps_visible as string[]) : [],
+              ttlMs: typeof body.ttl_ms === 'number' ? body.ttl_ms : undefined,
+              created_by: 'owner',
+            });
+            sendJson(res, 200, grant);
+            return;
+          }
+        }
+        if (seg[3] === 'grants' && seg[4] && method === 'DELETE' && seg.length === 5) {
+          await assertOwner(opts, req, teamId);
+          registry.revokeGrant(seg[4] as string);
+          sendJson(res, 200, { ok: true });
+          return;
+        }
         }
         if (seg[3] === 'enroll-tokens' && method === 'POST' && seg.length === 4) {
           await assertOwner(opts, req, teamId);
