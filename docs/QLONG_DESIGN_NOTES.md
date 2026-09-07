@@ -115,3 +115,21 @@
 | D3 | 通讯通道 | **已基本关闭**:信封/语义与 v0 传输绑定已定(01 篇 §9/D12,自建 ws 通讯网关);v0 选型的关闭验收 = M1 双机互助闭环真实跑通;集群化形态另见 02 §12.1 |
 | D4 | 文件冲突 | 复用成熟机制(单机多会话冲突问题的推广),不发明新共识机制 |
 | D5 | 入网方式 | `/install` 一键下载安装 + 自动 Agent 注册,零手工配置 |
+
+## §8.4–§8.6 v0.2 定稿(2026-09-06)
+
+### §8.4 文件协同(定稿)
+- 工作区隔离:每 task 一个目录(`WorkspaceManager`,D33 语义——无 workspace 则一次性临时目录,路径越界拒绝)
+- payload 存储:v0.2 用 LocalPayloadStore(sha256 校验+size 验证+GC);git bundle 为 v0.3 排期
+- 产物回传:payload_ref 指向本地文件 URI;分布式场景经共享 repo(v0.3)
+
+### §8.5 安装器(定稿)
+- Linux/macOS:`scripts/install.sh`(curl 下载 + stdin 传 token + chmod)
+- Windows:`scripts/install.ps1`(Invoke-WebRequest + 环境变量 + enroll)
+- token 不进 shell history / 进程参数(评审 I-16②)
+
+### §8.6 弱网(定稿)
+- 重连:指数退避(base 25ms × 2^n,上限 5s)+ 30% 随机抖动(防雷群)
+- 重连上限 20 次后停止自动重连
+- ConnTracker 追踪连接状态 + 离线时长(供 outbox flush 策略)
+- 消息持久化:FileOutbox(原子写 tmp+rename,崩溃恢复不丢不重)
