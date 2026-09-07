@@ -27,7 +27,6 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
 
   start(task: DriverTask, host: DriverHost): void {
     this.stopped = false;
-    const summary = String(task.offer.summary ?? '无任务描述');
     const startedAt = host.now();
 
     // 用 deepseek CLI 执行,offer.summary 作为提示
@@ -38,12 +37,12 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
     });
 
     // 超时终止
-    const timer = host.schedule(startedAt + this.timeoutMs, () => {
+    const timer = setTimeout(() => {
       if (!this.stopped && this.proc) {
         this.proc.kill('SIGTERM');
         setTimeout(() => { if (this.proc && !this.proc.killed) this.proc.kill('SIGKILL'); }, 5_000);
       }
-    });
+    }, this.timeoutMs);
 
     let stdout = '';
     let stderr = '';
@@ -52,7 +51,7 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
 
     this.proc.on('close', (code) => {
       clearTimeout(timer);
-      if (this.stopped) return; // 被 stop() 主动终止
+      if (this.stopped) return;
       if (code === 0) {
         host.complete({
           summary: stdout.trim().slice(-2000) || '(无输出)',
@@ -64,7 +63,6 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
           reason_code: 'internal_error',
           retryable: true,
           summary: `harness 退出码 ${code}`,
-          diagnostics_ref: `stderr: ${stderr.slice(-500)}`,
         });
       }
     });
@@ -76,7 +74,6 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
       }
     });
   }
-
   stop(): void {
     this.stopped = true;
     if (this.proc && this.proc.exitCode === null) {
