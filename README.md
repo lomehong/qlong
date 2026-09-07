@@ -84,3 +84,12 @@
 架构方向已确定。01–03 篇详细设计已成,经**三轮评审修订**,评审委员会 60 条意见全部处置;M0–M4 实现已完成:packages/core(协议/签名/语义)、packages/node(双状态机/闸5/驱动接口)、packages/registry(enroll/目录锚定/纪元现势)、packages/gateway(ACL A0–A6/收件箱/回执帧)、packages/cli。全量 157 项测试全绿(typecheck 0 错),跨机端到端 lost/改派演练通过。**v0.1 可运行,待 主任 终验**。下一批次:§8.4 文件协同定稿+实现、真实 deepseek-harness 基座适配、§8.5 安装器。
 
 > 商用前请自查商标与域名占用。
+
+## v0.2 新增
+
+- FileOutbox 持久化(原子写+崩溃恢复)
+- 跨队 grant(Registry CRUD + Gateway ACL)
+- §8.4 WorkspaceManager + PayloadStore
+- deepseek-harness 驱动 + 弱网增强
+- §8.5 安装器(scripts/install.sh + ps1)
+- 审计查询路由 + 控制台 React App(packages/console)
