@@ -20,6 +20,7 @@ import { ExecutorMachine, type ExecAction } from '../executor/machine.js';
 import type { DriverHost, ExecutorDriver } from '../executor/driver.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { LeadTaskMachine, type LeadAction } from '../lead/machine.js';
+import { WorkspaceManager, type WorkspaceHandle } from '../collab/workspace.js';
 import type { GatewayClient } from '../gateway-client.js';
 
 export interface RemoteSessionOptions {
@@ -32,6 +33,8 @@ export interface RemoteSessionOptions {
   lead?: LeadTaskMachine;
   executor?: ExecutorMachine;
   driver?: ExecutorDriver;
+  /** v0.2 §8.4:传入后 startDriver 时自动创建工作区;不传则跳过 */
+  workspaceManager?: WorkspaceManager;
   policy?: LocalPolicy;
   capabilities?: () => string[];
   load?: () => LoadSnapshot | undefined;
@@ -80,6 +83,7 @@ export class RemoteNodeSession {
   private readonly leadTimers = new Map<string, NodeJS.Timeout>();
   private readonly execTimers = new Map<string, NodeJS.Timeout>();
   private readonly driverTimers = new Map<string, NodeJS.Timeout>();
+  private readonly activeWorkspaces = new Map<string, WorkspaceHandle>();
   private lastProgressMsgId = '';
   private execCtx: ExecContext | null = null;
 
@@ -214,9 +218,19 @@ export class RemoteNodeSession {
           break;
         case 'startDriver':
           this.execCtx = { taskId: ctx.taskId, attempt: ctx.attempt, trace: ctx.trace, offer: ctx.offer };
+          if (this.opts.workspaceManager) {
+            try {
+              const wsHandle = this.opts.workspaceManager.create(ctx.taskId, ctx.offer);
+              this.activeWorkspaces.set(ctx.taskId, wsHandle);
+            } catch (e) {
+              this.opts.onTerminal?.(ctx.taskId, 'workspace_error');
+              break;
+            }
+          }
           this.opts.driver?.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost(a.task_id, a.attempt, ctx));
           break;
         case 'stopDriver':
+          if (this.opts.workspaceManager) { this.opts.workspaceManager.destroy(ctx.taskId); this.activeWorkspaces.delete(ctx.taskId); }
           this.opts.driver?.stop();
           break;
         case 'pauseDriver':
