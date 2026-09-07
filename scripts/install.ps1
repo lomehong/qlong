@@ -3,8 +3,12 @@
 param(
   [string]$EnrollToken,
   [string]$InstallDir = "$env:LOCALAPPDATA\qlong",
+  [string]$Version = $env:QLONG_VERSION,
+  [string]$DistBase = $env:QLONG_DIST_URL,
   [switch]$Uninstall
 )
+if (-not $Version) { $Version = 'latest' }
+if (-not $DistBase) { $DistBase = 'https://qlong.qianji.io' }
 
 $ErrorActionPreference = 'Stop'
 
@@ -33,7 +37,7 @@ if ($nodeMajor -lt 20) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 Write-Host ">>> 下载 qlong.exe..."
-$releaseUrl = "https://github.com/lomehong/qlong/releases/latest/download/qlong-win-x64.cmd"
+$releaseUrl = "$DistBase/releases/$Version/qlong-win-x64.cmd"
 Invoke-WebRequest -Uri $releaseUrl -OutFile "$InstallDir\qlong.cmd"
 
 # 发布物校验(评审 I-16):SHA256SUMS.txt 比对,不匹配即中止

@@ -1,48 +1,124 @@
 /**
- * deepseek-harness 真实基座适配层(D3)。
- * 实现 ExecutorDriver 接口,spawn deepseek-harness CLI 进程执行任务。
- * v0.2:子进程管理 + 优雅终止 + 输出捕获。
+ * deepseek-harness 真实基座适配层(v0.5,按上游真实契约重写)。
+ *
+ * 上游事实(来源:github.com/deepseek-ai/deepseek-harness README 与 apps/cli/README.md):
+ * - npm 包:`@deepseek-ai/dsh`;入口命令 `dsh`;需 Node.js;developer preview(允许破坏性变更)
+ * - 无人值守模式:`dsh --profile headless "<job>"` —— 跑一个一次性持久会话,
+ *   把最终答案打到 stdout 后退出(退出码 0 = 成功)
+ * - 工作区:调用目录(invoking directory)即默认工作区根 —— 驱动以任务工作区为 cwd
+ * - 模型凭证:按上游文档在 profile/环境侧配置;本驱动透传 process.env,不碰凭证
+ *
+ * 本层契约:
+ * - 默认命令:`npx --yes @deepseek-ai/dsh --profile headless <task>`(Windows 经 shell)
+ * - DSH_HARNESS_CMD 覆盖(如全局安装的 dsh 或仓库 checkout 的启动脚本):此时不再走 npx 包装
+ * - cwd = DriverTask.workdir(§8.4 WorkspaceManager 的工作区);无工作区 → 进程工作目录
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import type { ExecutorDriver, DriverHost, DriverTask } from '../executor/driver.js';
 
 export interface HarnessDriverOptions {
-  /** deepseek-harness CLI 路径(默认从 PATH 查找) */
+  /** dsh 启动命令;缺省 npx;可被 env DSH_HARNESS_CMD 覆盖(全局安装的 dsh / 源码启动脚本) */
   harnessCmd?: string;
-  /** 单任务超时 ms(默认 300s) */
+  /** npm 包名(npx 模式用);默认 @deepseek-ai/dsh;可被 env DSH_HARNESS_PKG 覆盖 */
+  harnessPackage?: string;
+  /** headless profile 名;默认 headless */
+  profile?: string;
+  /** 单任务超时 ms(默认 30 分钟;真实 LLM 任务耗时长) */
   taskTimeoutMs?: number;
+  /** 测试/特殊部署:完整命令行覆盖(返回最终 spawn 的 cmd+args,prompt 已注入) */
+  commandLine?: (prompt: string, workdir?: string) => { cmd: string; args: string[] };
+}
+
+const DEFAULT_PACKAGE = '@deepseek-ai/dsh';
+const DEFAULT_PROFILE = 'headless';
+/** stdout 保留的答案尾部上限(结果体瘦身) */
+const STDOUT_TAIL = 4000;
+
+/** 任务书组装(01 §4.2):summary 为主干,contract 验收项逐条列出,附时限提示 */
+export function composeTaskPrompt(offer: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const summary = typeof offer.summary === 'string' ? offer.summary : '';
+  if (summary) lines.push(summary);
+  const contract = offer.contract as
+    | { deliverables?: Array<{ path?: string; artifact?: string; desc?: string }>; acceptance?: Array<{ check?: string; desc?: string }> }
+    | undefined;
+  if (contract && Array.isArray(contract.deliverables) && contract.deliverables.length > 0) {
+    lines.push('', '交付物:');
+    for (const d of contract.deliverables) {
+      lines.push(`- ${d.path ?? d.artifact ?? '?'}${d.desc ? ` —— ${d.desc}` : ''}`);
+    }
+  }
+  if (contract && Array.isArray(contract.acceptance) && contract.acceptance.length > 0) {
+    lines.push('', '验收判据:');
+    for (const a of contract.acceptance) {
+      lines.push(`- ${a.check ?? a.desc ?? '?'}`);
+    }
+  }
+  const deadline = typeof offer.deadline_ms === 'number' ? offer.deadline_ms : undefined;
+  if (deadline !== undefined) {
+    lines.push('', `(时限提示:请在约 ${Math.round(deadline / 1000)} 秒内完成,超时请尽早收束并说明进展)`);
+  }
+  return lines.join('\n').trim();
+}
+
+/** 构造最终 spawn 命令(npx 包装 / 覆盖命令两条路径) */
+export function buildHarnessCommand(
+  prompt: string,
+  workdir: string | undefined,
+  opts: HarnessDriverOptions = {},
+): { cmd: string; args: string[]; cwd: string | undefined } {
+  const override = opts.commandLine?.(prompt, workdir);
+  if (override) return { ...override, cwd: workdir };
+  const envCmd = process.env.DSH_HARNESS_CMD;
+  const pkg = process.env.DSH_HARNESS_PKG ?? opts.harnessPackage ?? DEFAULT_PACKAGE;
+  const profile = opts.profile ?? DEFAULT_PROFILE;
+  const extraArgs = (process.env.DSH_HARNESS_ARGS ?? '')
+    .split(' ')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (envCmd) {
+    // 覆盖命令:全局 dsh / 源码启动脚本 —— 直接转发 profile 与任务书
+    return { cmd: envCmd, args: [...extraArgs, '--profile', profile, prompt], cwd: workdir };
+  }
+  // 默认:npx 解析 npm 包(--yes 免交互确认)
+  return { cmd: 'npx', args: ['--yes', pkg, ...extraArgs, '--profile', profile, prompt], cwd: workdir };
 }
 
 export class DeepSeekHarnessDriver implements ExecutorDriver {
   private proc: ChildProcess | null = null;
   private stopped = false;
-  private readonly cmd: string;
+  private cancelTimeout: (() => void) | null = null;
+  private readonly opts: HarnessDriverOptions;
   private readonly timeoutMs: number;
 
   constructor(opts: HarnessDriverOptions = {}) {
-    this.cmd = opts.harnessCmd ?? 'deepseek';
-    this.timeoutMs = opts.taskTimeoutMs ?? 300_000;
+    this.opts = opts;
+    this.timeoutMs = opts.taskTimeoutMs ?? 1_800_000;
   }
 
   start(task: DriverTask, host: DriverHost): void {
     this.stopped = false;
-    const startedAt = host.now();
+    const prompt = composeTaskPrompt(task.offer);
+    const workdir = typeof task.workdir === 'string' ? task.workdir : undefined;
+    const { cmd, args, cwd } = buildHarnessCommand(prompt, workdir, this.opts);
 
-    // 用 deepseek CLI 执行,offer.summary 作为提示
-    this.proc = spawn(this.cmd, ['--no-input', '--no-annotations'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
-      env: { ...process.env, QLONG_TASK_ID: task.task_id, QLONG_ATTEMPT: String(task.attempt) },
-    });
-
-    // 超时终止
-    const timer = setTimeout(() => {
+    // 任务级硬上限:SIGTERM → 宽限 → SIGKILL(经 host.schedule,可随 stop 取消)
+    const killAt = host.now() + this.timeoutMs;
+    this.cancelTimeout = host.schedule(killAt, () => {
       if (!this.stopped && this.proc) {
         this.proc.kill('SIGTERM');
-        setTimeout(() => { if (this.proc && !this.proc.killed) this.proc.kill('SIGKILL'); }, 5_000);
+        host.schedule(host.now() + 5_000, () => {
+          if (this.proc && this.proc.exitCode === null) this.proc.kill('SIGKILL');
+        });
       }
-    }, this.timeoutMs);
+    });
+
+    this.proc = spawn(cmd, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32' && cmd === 'npx',
+      env: { ...process.env, QLONG_TASK_ID: task.task_id, QLONG_ATTEMPT: String(task.attempt) },
+    });
 
     let stdout = '';
     let stderr = '';
@@ -50,38 +126,49 @@ export class DeepSeekHarnessDriver implements ExecutorDriver {
     if (this.proc.stderr) this.proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
     this.proc.on('close', (code) => {
-      clearTimeout(timer);
+      this.cancelTimeout?.();
       if (this.stopped) return;
       if (code === 0) {
+        const answer = stdout.trim();
         host.complete({
-          summary: stdout.trim().slice(-2000) || '(无输出)',
+          summary: answer.slice(-STDOUT_TAIL) || '(无输出)',
           exit_code: 0,
-          stderr: stderr.slice(-1000) || undefined,
+          stderr_tail: stderr.trim().slice(-1000) || undefined,
         });
       } else {
         host.fail({
           reason_code: 'internal_error',
           retryable: true,
-          summary: `harness 退出码 ${code}`,
+          summary: `dsh headless 退出码 ${code}`,
+          diagnostics_ref: stderr.trim().slice(-2000) || undefined,
         });
       }
     });
 
-    this.proc.on('error', (e) => {
-      clearTimeout(timer);
+    this.proc.on('error', (e: Error) => {
+      this.cancelTimeout?.();
       if (!this.stopped) {
-        host.fail({ reason_code: 'internal_error', retryable: false, summary: 'harness 启动失败: ' + e.message });
+        host.fail({
+          reason_code: 'internal_error',
+          retryable: false,
+          summary: 'dsh 启动失败:' + e.message,
+        });
       }
     });
   }
+
   stop(): void {
     this.stopped = true;
+    this.cancelTimeout?.();
     if (this.proc && this.proc.exitCode === null) {
       this.proc.kill('SIGTERM');
-      setTimeout(() => { if (this.proc && this.proc.exitCode === null) this.proc.kill('SIGKILL'); }, 3_000);
+      setTimeout(() => {
+        if (this.proc && this.proc.exitCode === null) this.proc.kill('SIGKILL');
+      }, 3_000);
     }
   }
 
+  /** headless 为一次性进程:暂停 = SIGSTOP(非 Windows);恢复 = SIGCONT */
   pause(): void {
     if (this.proc && this.proc.exitCode === null && process.platform !== 'win32') {
       this.proc.kill('SIGSTOP');

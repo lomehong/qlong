@@ -8,9 +8,11 @@ import TeamDetail from './pages/TeamDetail';
 import Grants from './pages/Grants';
 import Audit from './pages/Audit';
 import Settings from './pages/Settings';
+import Install from './pages/Install';
 
 const NAV = [
   { key: 'dashboard', icon: '📊', label: '总览' },
+  { key: 'install', icon: '📦', label: '节点安装' },
   { key: 'agents', icon: '🖥️', label: 'Agent 管理' },
   { key: 'tasks', icon: '📋', label: '任务管理' },
   { key: 'teams', icon: '🏢', label: '团队管理' },
@@ -47,6 +49,7 @@ export default function App() {
       </nav>
       <main style={{ marginLeft: 230, padding: '28px 36px', flex: 1, maxWidth: 1200 }}>
         {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
+        {page === 'install' && <Install teamId={teamId} />}
         {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
         {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
         {page === 'tasks' && <Tasks teamId={teamId} />}

@@ -305,7 +305,11 @@ export class RemoteNodeSession {
             }
           }
           this.notify?.({ kind: 'task_start', task_id: a.task_id, from: String(ctx.offer.__from ?? ''), summary: String(ctx.offer.summary ?? '') });
-          this.opts.driver?.start({ task_id: a.task_id, attempt: a.attempt, offer: a.offer }, this.driverHost(a.task_id, a.attempt, ctx));
+          const wsHandle = this.activeWorkspaces.get(a.task_id);
+          this.opts.driver?.start(
+            { task_id: a.task_id, attempt: a.attempt, offer: a.offer, workdir: wsHandle?.rootPath },
+            this.driverHost(a.task_id, a.attempt, ctx),
+          );
           break;
         case 'stopDriver':
           if (this.opts.workspaceManager) { this.opts.workspaceManager.destroy(ctx.taskId); this.activeWorkspaces.delete(ctx.taskId); }

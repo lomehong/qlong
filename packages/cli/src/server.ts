@@ -22,6 +22,8 @@ export async function startQlongServer(
     enrollRatePerMinPerIp?: number;
     /** GC 周期(默认 6h;0 = 关闭) */
     gcIntervalMs?: number;
+    /** 书坊分发目录(纪要 §3):提供 /install.sh、/install.ps1、/install、/releases/<版本>/<文件> */
+    distDir?: string;
   } = {},
 ): Promise<ServerHandles> {
   const host = opts.host ?? '127.0.0.1';
@@ -42,6 +44,7 @@ export async function startQlongServer(
   const httpServer = createRegistryServer({
     registry,
     enrollRatePerMinPerIp: opts.enrollRatePerMinPerIp ?? 60,
+    distDir: opts.distDir,
   });
   const registryPort = await new Promise<number>((resolve) => {
     httpServer.listen(opts.registryPort ?? 3200, host, () => {

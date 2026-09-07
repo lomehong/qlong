@@ -3,6 +3,7 @@
  * 鉴权:节点 = Bearer node token;owner = opts.ownerAuth(产品侧会话代持接入点,v1 默认拒绝,P12)。
  * 错误:统一信封 {error:{code,message,retryable?,details?}}(评审 I-31)。
  */
+import { join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError } from './errors.js';
 import type { Registry } from './directory.js';
@@ -15,6 +16,8 @@ export interface RegistryServerOptions {
   verifyRotationSig?: (node: { node_id: string }, input: { pubkey: string; sig?: string }) => boolean;
   /** enroll 每 IP 每分钟上限(评审 I-16) */
   enrollRatePerMinPerIp?: number;
+  /** 书坊分发目录(纪要 §3):提供 /install.sh、/install.ps1、/install、/releases/<版本>/<文件> */
+  distDir?: string;
 }
 
 const MAX_BODY = 1 << 20;
@@ -70,6 +73,49 @@ function bearer(req: IncomingMessage): string | undefined {
   return token.length > 0 ? token : undefined;
 }
 
+const DIST_TYPES: Record<string, string> = {
+  '.sh': 'text/x-shellscript; charset=utf-8',
+  '.ps1': 'text/plain; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.cmd': 'text/plain; charset=utf-8',
+};
+
+/** 书坊:发布物静态服务。/install* 取 latest;/releases/<版本>/<文件> 支持多版本共存。 */
+async function serveDist(res: ServerResponse, distDir: string, pathname: string): Promise<void> {
+  const { stat } = await import('node:fs/promises');
+  const path = await import('node:path');
+  let rel: string;
+  if (pathname === '/install' || pathname === '/install.sh' || pathname === '/install.ps1') {
+    rel = join('latest', pathname.slice(1) + (pathname === '/install' ? '.html' : ''));
+    rel = rel.replace('latest/install.html', 'latest/install.html');
+  } else {
+    rel = pathname.replace(/^\/releases\//, '');
+  }
+  const base = path.resolve(distDir);
+  const target = path.resolve(base, rel);
+  if (!target.startsWith(base + path.sep) && target !== base) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
+  try {
+    const st = await stat(target);
+    if (!st.isFile()) throw new Error('not a file');
+    const ext = path.extname(target).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': DIST_TYPES[ext] ?? 'application/octet-stream',
+      'Content-Length': st.size,
+    });
+    const { createReadStream } = await import('node:fs');
+    createReadStream(target).pipe(res);
+  } catch {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('发布物不存在:' + pathname);
+  }
+}
+
 export function createRegistryServer(opts: RegistryServerOptions): Server {
   const { registry } = opts;
   const rate = new Map<string, { windowStart: number; count: number }>();
@@ -93,6 +139,12 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         if (bucket.count > enrollLimit) {
           throw new ApiError('rate_limited', '注册请求过于频繁', 429, true);
         }
+      }
+
+      // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
+      if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install')) {
+        await serveDist(res, opts.distDir, url.pathname);
+        return;
       }
 
       if (seg[0] !== 'v1') throw new ApiError('bad_request', 'not found', 404);

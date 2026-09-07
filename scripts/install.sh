@@ -6,10 +6,13 @@ set -e
 
 ENROLL_TOKEN=""
 UNINSTALL=0
+RELEASE="${QLONG_VERSION:-latest}"
+DIST_BASE="${QLONG_DIST_URL:-https://qlong.qianji.io}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --enroll-stdin) shift; IFS= read -r ENROLL_TOKEN ;;
     --uninstall) UNINSTALL=1 ;;
+    --version) shift; RELEASE="$1" ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
   shift
@@ -45,11 +48,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo ">>> 下载 qlong..."
-curl -fsSL "https://github.com/lomehong/qlong/releases/latest/download/qlong-$OS-$ARCH" -o "$INSTALL_DIR/qlong"
+curl -fsSL "$DIST_BASE/releases/$RELEASE/qlong-$OS-$ARCH" -o "$INSTALL_DIR/qlong"
 
 # 发布物校验(评审 I-16):SHA256SUMS.txt 比对,不匹配即中止
 echo ">>> 校验发布物..."
-curl -fsSL "https://github.com/lomehong/qlong/releases/latest/download/SHA256SUMS.txt" -o "$INSTALL_DIR/SHA256SUMS.txt"
+curl -fsSL "$DIST_BASE/releases/$RELEASE/SHA256SUMS.txt" -o "$INSTALL_DIR/SHA256SUMS.txt"
 if command -v sha256sum >/dev/null 2>&1; then
   EXPECTED=$(grep "  qlong-$OS-$ARCH\$" "$INSTALL_DIR/SHA256SUMS.txt" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then

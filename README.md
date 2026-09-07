@@ -115,6 +115,26 @@
 - **R10 重定向加固**:payload 拉取一律不跟随 3xx,堵住白名单主机借重定向探测私网的绕过路径
 - 去重保留期接线 R1 公式(dedupRetentionMs);全量 **198 测试全绿**,5 包 typecheck 干净
 
+## v0.6 新增(deepseek-harness 真实契约 + 书坊 + 多版本安装)
+
+- **上游真实事实落地**(github.com/deepseek-ai/deepseek-harness):npm 包 `@deepseek-ai/dsh`,入口 `dsh`;
+  无人值守模式 `dsh --profile headless "<job>"` —— 一次性持久会话,stdout 打印最终答案后退出;
+  调用目录即默认工作区。据此重写 DeepSeekHarnessDriver:
+  默认 `npx --yes @deepseek-ai/dsh --profile headless <任务书>`(Windows 经 shell);
+  `DSH_HARNESS_CMD` 可覆盖为全局安装/源码 checkout 的 dsh;`DSH_HARNESS_PKG` 换包名;
+  cwd = §8.4 工作区(DriverTask.workdir 贯通 WorkspaceManager);
+  任务书 = summary + contract 交付物/验收判据 + 时限提示(composeTaskPrompt);
+  退出码 0 → result(stdout 尾部为答案),非零 → fail(retryable);
+  任务级硬上限默认 30 分钟(SIGTERM→宽限→SIGKILL);真实 spawn 集成测试经 commandLine 覆盖钩子
+- **书坊分发落地**(纪要 §3 第三服务):registry HTTP 增加 `--dist-dir` 静态托管——
+  `/install.sh`、`/install.ps1`、`/install`(入口页)、`/releases/<版本>/<文件>`,
+  路径穿越防护(P12);CLI `qlong server --dist-dir` 一键启用
+- **多版本安装**:package.mjs 产出到 `dist-release/<版本>/` 并镜像 `latest/`,
+  安装脚本支持 `--version vX.Y.Z` / 环境变量 `QLONG_VERSION`;携带脚本与产物严格同源
+- **Console 节点安装页**:生成一次性邀请码 → 按平台给出可复制安装命令,支持选择版本
+
+**待办(v0.7)**:网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、真实 dsh 联调演练(npx 通道 + 模型凭证配置)。
+
 ## v0.5 新增(安装器完整化:真实联调前置件)
 
 - **CLI `enroll --stdin` 子命令**:修复安装脚本调用了不存在命令的断裂;token 经 stdin 传入(评审 I-16),无效邀请码输出人话 + 重新生成指引(I-23③)

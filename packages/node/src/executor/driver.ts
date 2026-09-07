@@ -7,6 +7,8 @@ export interface DriverTask {
   task_id: string;
   attempt: number;
   offer: Record<string, unknown>;
+  /** §8.4 工作区根目录(harness 的调用目录 = 工作区);无工作区时缺省 */
+  workdir?: string;
 }
 
 export interface DriverHost {
