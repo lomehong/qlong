@@ -46,7 +46,7 @@ export default function App() {
         </div>
       </nav>
       <main style={{ marginLeft: 230, padding: '28px 36px', flex: 1, maxWidth: 1200 }}>
-        {page === 'dashboard' && <Dashboard onNav={setPage} />}
+        {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
         {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
         {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
         {page === 'tasks' && <Tasks />}
