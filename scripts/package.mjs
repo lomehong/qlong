@@ -23,6 +23,23 @@ execSync('node ../../node_modules/esbuild/bin/esbuild src/main.tsx --bundle --ou
 });
 copyFileSync(join(ROOT, 'packages/console/index.html'), join(DIST, 'console.html'));
 
+console.log('>>> 产出平台产物(评审 I-22:平台矩阵)...');
+{
+  const { chmodSync } = await import('node:fs');
+  const cliPath = join(DIST, 'qlong-cli.mjs');
+  let cli = readFileSync(cliPath, 'utf8');
+  if (!cli.startsWith('#!')) cli = '#!/usr/bin/env node\n' + cli;
+  writeFileSync(cliPath, cli);
+  // unix:同一 bundle + shebang,按平台命名(需目标机 node ≥ 20)
+  for (const name of ['qlong-linux-x64', 'qlong-linux-arm64', 'qlong-darwin-x64', 'qlong-darwin-arm64']) {
+    const fp = join(DIST, name);
+    writeFileSync(fp, cli);
+    chmodSync(fp, 0o755);
+  }
+  // windows:cmd 垫片(经 PATH 调用本机 node)
+  writeFileSync(join(DIST, 'qlong-win-x64.cmd'), '@echo off\r\nnode "%~dp0qlong-cli.mjs" %*\r\n');
+}
+
 console.log('>>> 生成 SHA256SUMS.txt(发布物校验和,评审 I-16)...');
 {
   const { readdirSync, statSync } = await import('node:fs');
@@ -34,9 +51,7 @@ console.log('>>> 生成 SHA256SUMS.txt(发布物校验和,评审 I-16)...');
     const h = createHash('sha256').update(readFileSync(fp)).digest('hex');
     lines.push(`${h}  ${name}`);
   }
-  writeFileSync(join(DIST, 'SHA256SUMS.txt'), lines.join('
-') + '
-');
+  writeFileSync(join(DIST, 'SHA256SUMS.txt'), lines.join('\n') + '\n');
 }
 
 console.log('>>> 写入版本信息...');
@@ -49,3 +64,5 @@ console.log('  - console-bundle.js (控制台 JS)');
 console.log('  - console.html (控制台入口)');
 console.log('  - VERSION.txt');
 console.log('  - SHA256SUMS.txt(安装脚本校验用)');
+console.log('  - qlong-{linux,darwin}-{x64,arm64}(unix 可执行;需 node ≥20)');
+console.log('  - qlong-win-x64.cmd(Windows 垫片;需 node ≥20)');

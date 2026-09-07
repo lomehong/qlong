@@ -115,4 +115,12 @@
 - **R10 重定向加固**:payload 拉取一律不跟随 3xx,堵住白名单主机借重定向探测私网的绕过路径
 - 去重保留期接线 R1 公式(dedupRetentionMs);全量 **198 测试全绿**,5 包 typecheck 干净
 
-**待办(v0.5)**:git bundle payload 存储、网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、真实 deepseek-harness 联调。
+## v0.5 新增(安装器完整化:真实联调前置件)
+
+- **CLI `enroll --stdin` 子命令**:修复安装脚本调用了不存在命令的断裂;token 经 stdin 传入(评审 I-16),无效邀请码输出人话 + 重新生成指引(I-23③)
+- **`qlong service install/uninstall`**:三平台自启注册——Linux systemd user unit(Restart=on-failure)/ macOS LaunchAgent(RunAtLoad+KeepAlive)/ Windows 计划任务(ONLOGON,免外部依赖);纯函数生成注册物,单测覆盖
+- **安装脚本接通全链**:下载 → SHA256 校验 → enroll(stdin)→ 服务化自启 → `qlong status` 验收入网状态(I-22"装完即在线/重启自动在线"清单);`--uninstall` / `-Uninstall` 一键解除自启 + 删除二进制 + 清除凭证 ~/.qlong
+- **平台产物补齐**:package.mjs 现产出 qlong-{linux,darwin}-{x64,arm64}(shebang 单文件,目标机需 node ≥20)+ qlong-win-x64.cmd 垫片;安装脚本增加 node ≥20 检测
+- 注:真单文件二进制(Node SEA/bun compile)列为 v0.6 可选,当前为"bundle + node 运行时"形态
+
+**待办(v0.6)**:git bundle payload 存储、网关集群化(02 §12.1)、跨机 leader 接管(01 §4.4 开放问题)、双机纸面走查回填任务书模板与 (状态×消息×定时器) 全矩阵、**真实 deepseek-harness 联调(前置件已齐)**。

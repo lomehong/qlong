@@ -5,13 +5,26 @@
 set -e
 
 ENROLL_TOKEN=""
+UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --enroll-stdin) shift; IFS= read -r ENROLL_TOKEN ;;
+    --uninstall) UNINSTALL=1 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
   shift
 done
+
+# 卸载:停自启 → 删二进制 → 清凭证(纪要 §8.5:卸载与凭证清除)
+if [ "$UNINSTALL" = "1" ]; then
+  BIN="$HOME/.local/bin/qlong"
+  [ -x "$BIN" ] || BIN="/usr/local/bin/qlong"
+  "$BIN" service uninstall 2>/dev/null || true
+  rm -f "$BIN"
+  rm -rf "$HOME/.qlong"
+  echo ">>> 已卸载:自启解除、二进制与本地凭证(~/.qlong)已清除"
+  exit 0
+fi
 
 # 检测平台
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -57,6 +70,17 @@ fi
 rm -f "$INSTALL_DIR/SHA256SUMS.txt"
 chmod +x "$INSTALL_DIR/qlong"
 
+# 运行时检测:unix 产物为 node 单文件包(需 node ≥ 20)
+if ! command -v node >/dev/null 2>&1; then
+  echo ">>> 安装中止:未检测到 node,请先安装 Node.js >= 20(https://nodejs.org)" >&2
+  exit 1
+fi
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo ">>> 安装中止:Node.js 需 >= 20(当前 $(node -v))" >&2
+  exit 1
+fi
+
 # enrollment(token 经 stdin,不进命令行)
 if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 注册入网..."
@@ -64,5 +88,12 @@ if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 入网完成"
 fi
 
+# 服务化自启(纪要 §8.5:装完即在线/重启自动在线)
+"$INSTALL_DIR/qlong" service install
+
+# 装完即在线验收(I-22 清单)
+echo ">>> 验收入网状态..."
+"$INSTALL_DIR/qlong" status
+
 echo ">>> 安装完成: $INSTALL_DIR/qlong"
-echo ">>> 运行 qlong --help 查看用法"
+echo ">>> 卸载: $INSTALL_DIR/qlong --uninstall(含凭证清除)"

@@ -10,6 +10,7 @@ import { SingleNodeHarness } from '../../node/src/local/harness.js';
 import { LeadSupervisor } from '../../node/src/lead/supervisor.js';
 import { MemoryStore } from '../../node/src/lead/store.js';
 import { joinAndSave, qlongHome, readConfig } from './join.js';
+import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 
 const cmd = process.argv[2] ?? 'demo';
 
@@ -45,6 +46,60 @@ if (cmd === 'takeover') {
   s2.deliver('demo-task', 'task.result', 'node-b', 1, { status: 'done', summary: '恢复后交付' }, 100);
   console.log('after result :', m2?.rec.state);
   process.exit(m2?.rec.state === 'done' ? 0 : 1);
+}
+
+/** stdin 读取一行(安装器经管道传入邀请码,评审 I-16:不进 history/进程参数) */
+async function readStdinLine(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString('utf8').trim();
+}
+
+if (cmd === 'enroll') {
+  const stdinFlag = process.argv.includes('--stdin');
+  const positional = process.argv.slice(3).filter((a) => !a.startsWith('--'))[0];
+  const flag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  const token = stdinFlag ? await readStdinLine() : positional;
+  const registryUrl = (flag('--registry', process.env.QLONG_REGISTRY_URL) ?? 'http://127.0.0.1:3200') as string;
+  const gatewayUrl = (flag('--gateway', process.env.QLONG_GATEWAY_URL) ?? 'ws://127.0.0.1:3100') as string;
+  const caps = (flag('--caps', process.env.QLONG_CAPS ?? '') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!token) {
+    console.error('缺少邀请码:请经 stdin 传入(qlong enroll --stdin < token)或作为位置参数');
+    console.error('邀请码无效/过期时,请回到控制台或 /install 页面重新生成');
+    process.exit(1);
+  }
+  try {
+    const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps });
+    console.log('入网完成: node', cfg.node_id, '| team', cfg.team_id);
+    process.exit(0);
+  } catch (e) {
+    console.error('入网失败:', e instanceof Error ? e.message : e);
+    console.error('邀请码无效/过期时,请回到控制台或 /install 页面重新生成,重跑同一安装命令即可');
+    process.exit(1);
+  }
+}
+
+if (cmd === 'service') {
+  const action = process.argv[3] ?? 'install';
+  const platform = process.platform as ServicePlatform;
+  const entrance = process.argv[1] ?? 'qlong';
+  const home = qlongHome();
+  if (action === 'install') {
+    const r = await serviceInstall(platform, entrance, home);
+    console.log('服务已注册:', r.path || '(计划任务)');
+    console.log('自启已启用:重启后节点自动在线');
+    process.exit(0);
+  }
+  if (action === 'uninstall') {
+    await serviceUninstall(platform, entrance, home);
+    console.log('服务已卸载(自启解除)');
+    process.exit(0);
+  }
+  console.log('usage: qlong service <install|uninstall>');
+  process.exit(2);
 }
 
 if (cmd === 'join') {
@@ -151,5 +206,5 @@ if (cmd === 'tasks') {
   process.exit(0);
 }
 
-console.log('usage: qlong <demo|takeover|join|run|server|status|tasks>');
+console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|status|tasks>');
 process.exit(2);
