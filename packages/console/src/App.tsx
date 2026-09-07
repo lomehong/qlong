@@ -49,7 +49,7 @@ export default function App() {
         {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
         {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
         {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
-        {page === 'tasks' && <Tasks />}
+        {page === 'tasks' && <Tasks teamId={teamId} />}
         {page === 'teams' && <Teams onNav={setPage} />}
         {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
         {page === 'grants' && <Grants teamId={teamId} />}

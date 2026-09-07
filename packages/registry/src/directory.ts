@@ -392,6 +392,16 @@ export class Registry {
   getAuditEvents(teamId: string, limit: number): Array<{ ts: string; event: string; node: string; team: string; reason: string; trace_id?: string }> {
     return this.auditLog.filter((e) => e.team === teamId).slice(-limit);
   }
+  // ---------- 任务注册表(v0.2:任务列表查询) ----------
+  readonly taskIndex = new Map<string, { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string; updated_at: string }>();
+
+  upsertTask(t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }): void {
+    this.taskIndex.set(t.task_id, { ...t, updated_at: this.iso() });
+  }
+
+  listTasks(teamId: string, limit = 100): Array<{ task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string; updated_at: string }> {
+    return [...this.taskIndex.values()].filter((t) => t.team_id === teamId).slice(-limit);
+  }
   hasGrant(fromTeam: string, toTeam: string): boolean {
     for (const g of this.grants.values()) {
       if (g.expires_at !== undefined && this.now > g.expires_at) continue;
