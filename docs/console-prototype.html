@@ -2,160 +2,271 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>群龙控制台</title>
 <style>
-:root{--bg:#f5f6fa;--card:#fff;--sidebar:#1a1a2e;--sidebar-text:#a0a0b8;--sidebar-active:#fff;--primary:#4361ee;--primary-light:#e8edff;--success:#2dc76d;--warning:#f5a623;--danger:#e74c3c;--text:#2d3436;--text-light:#8395a7;--border:#e8ecf1;--radius:8px;--shadow:0 2px 8px rgba(0,0,0,.08)}
+:root{--bg:#f0f2f5;--card:#fff;--side:#151b2e;--side-txt:#8892b0;--pri:#4361ee;--pri-bg:#eef2ff;--green:#16c784;--red:#ea3943;--orange:#f5a623;--text:#1a1a2e;--mut:#718096;--bd:#e2e8f0;--r:8px}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
-.sidebar{width:220px;background:var(--sidebar);color:var(--sidebar-text);padding:20px 0;position:fixed;top:0;bottom:0;left:0;display:flex;flex-direction:column}
-.logo{padding:0 20px 20px;font-size:20px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
-.logo span{color:var(--primary)}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+a{color:var(--pri);text-decoration:none}
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:230px;background:var(--side);display:flex;flex-direction:column;z-index:10}
+.logo{padding:24px 20px 20px;font-size:20px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
+.logo em{color:var(--pri);font-style:normal}
 .nav{flex:1}
-.nav-item{padding:10px 20px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:14px;transition:.2s;border-left:3px solid transparent}
-.nav-item:hover{color:#fff;background:rgba(255,255,255,.05)}
-.nav-item.active{color:var(--sidebar-active);background:rgba(67,97,238,.15);border-left-color:var(--primary)}
-.nav-item .icon{width:18px;text-align:center}
-.main{flex:1;margin-left:220px;padding:24px 32px;max-width:1200px}
-.page{display:none}.page.active{display:block}
-h1{font-size:22px;margin-bottom:20px}
-h2{font-size:16px;margin:16px 0 10px}
-.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
-.stat-card{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);cursor:pointer;transition:.2s}
-.stat-card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.12)}
-.stat-card .num{font-size:28px;font-weight:700}
-.stat-card .label{font-size:13px;color:var(--text-light);margin-top:4px}
-.card{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);margin-bottom:20px}
-.card h2{margin-top:0}
-table{width:100%;border-collapse:collapse}
-th{text-align:left;padding:10px 12px;font-size:12px;color:var(--text-light);border-bottom:2px solid var(--border);font-weight:600}
-td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:14px}
-tr:hover td{background:var(--primary-light)}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.dot.on{background:var(--success)}.dot.off{background:#ccc}.dot.sus{background:var(--danger)}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px;font-weight:600}
-.badge.active{background:#e6f7ee;color:var(--success)}
-.badge.suspended{background:#fff3e0;color:var(--warning)}
-.badge.revoked{background:#fde8e8;color:var(--danger)}
-.badge.orphan{background:#f0f0f0;color:var(--text-light)}
-.btn{padding:6px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
-.btn-primary{background:var(--primary);color:#fff}
-.btn-primary:hover{background:#3a56d4}
-.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
-.btn-danger{background:var(--danger);color:#fff}
-.btn-sm{padding:4px 10px;font-size:12px}
-.chip{display:inline-block;padding:2px 10px;border-radius:14px;font-size:12px;background:var(--primary-light);color:var(--primary);margin:2px}
-.mono{font-family:monospace;font-size:13px}
-.muted{color:var(--text-light);font-size:13px}
-.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;align-items:center;justify-content:center}
-.modal-overlay.show{display:flex}
-.modal{background:var(--card);border-radius:var(--radius);padding:24px;width:420px;max-width:90%;box-shadow:0 8px 30px rgba(0,0,0,.2)}
-.modal h3{margin-bottom:16px}
-.modal .btn-group{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
-.toast{position:fixed;bottom:20px;right:20px;background:var(--text);color:#fff;padding:12px 20px;border-radius:var(--radius);font-size:14px;z-index:200;display:none}
-.form-group{margin-bottom:16px}
-.form-group label{display:block;font-size:13px;font-weight:600;margin-bottom:6px}
-.form-group input,.form-group select{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px}
-.audit-event{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}
-.audit-event.red{background:#fde8e8;color:var(--danger)}
-.audit-event.orange{background:#fff3e0;color:var(--warning)}
-.audit-event.blue{background:var(--primary-light);color:var(--primary)}
-.section-title{font-size:14px;font-weight:600;color:var(--text-light);text-transform:uppercase;letter-spacing:.5px;margin:20px 0 10px}
+.nav a{display:flex;align-items:center;gap:12px;padding:11px 20px;color:var(--side-txt);font-size:14px;border-left:3px solid transparent;transition:.15s}
+.nav a:hover{color:#fff;background:rgba(255,255,255,.04)}
+.nav a.on{color:#ccd6f6;background:rgba(67,97,238,.12);border-left-color:var(--pri)}
+.nav .ico{width:20px;text-align:center;font-size:15px}
+.side-user{padding:16px 20px;border-top:1px solid rgba(255,255,255,.06)}
+.side-user .role{font-size:11px;color:var(--side-txt)}
+.side-user .name{font-size:14px;color:#fff;margin-top:2px}
+.main{margin-left:230px;padding:28px 36px;min-height:100vh}
+.page{display:none}.page.on{display:block}
+h1{font-size:22px;margin-bottom:4px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:24px}
+h2{font-size:15px;font-weight:600;margin:0 0 12px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat{background:#fff;border-radius:var(--r);padding:18px 20px;border:1px solid var(--bd);cursor:pointer;transition:.15s}
+.stat:hover{border-color:var(--pri)}
+.stat .n{font-size:30px;font-weight:700;line-height:1.1}
+.stat .l{font-size:12px;color:var(--mut);margin-top:4px}
+.card{background:#fff;border:1px solid var(--bd);border-radius:var(--r);padding:20px;margin-bottom:20px}
+.card>h2{margin:0 0 14px}
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{text-align:left;padding:8px 12px;font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--bd)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--bd);font-size:13px;vertical-align:middle}
+.tbl tr:hover td{background:#f8f9fd}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.dot.g{background:var(--green)}.dot.r{background:var(--red)}.dot.o{background:var(--orange)}.dot.gr{background:#cbd5e0}
+.bdg{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.bdg.g{background:#e6f9f0;color:#0a8f5c}.bdg.r{background:#feecea;color:var(--red)}.bdg.o{background:#fff8e1;color:#b8860b}.bdg.gr{background:#f1f5f9;color:var(--mut)}
+.chip{display:inline-block;padding:1px 8px;border-radius:12px;font-size:11px;background:var(--pri-bg);color:var(--pri);margin:1px 2px}
+.btn{padding:7px 16px;border-radius:6px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+.btn-p{background:var(--pri);color:#fff}.btn-p:hover{background:#3a50c4}
+.btn-o{background:#fff;border:1px solid var(--bd);color:var(--text)}.btn-o:hover{border-color:var(--pri)}
+.btn-d{background:var(--red);color:#fff}
+.btn-s{padding:4px 10px;font-size:12px}
+.fg{margin-bottom:16px}
+.fg label{display:block;font-size:12px;font-weight:600;color:var(--mut);margin-bottom:5px;text-transform:uppercase}
+.fg input,.fg select{width:100%;padding:8px 12px;border:1px solid var(--bd);border-radius:6px;font-size:14px}
+.fg input[readonly]{background:var(--bg);color:var(--mut)}
+.ovl{display:none;position:fixed;inset:0;background:rgba(15,23,42,.6);z-index:200;align-items:center;justify-content:center}
+.ovl.show{display:flex}
+.modal{background:#fff;border-radius:12px;padding:28px;width:440px;max-width:92%;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.modal h3{margin:0 0 14px;font-size:16px}
+.modal p{color:var(--mut);font-size:13px;margin-bottom:20px;line-height:1.6}
+.modal .row{display:flex;gap:10px;justify-content:flex-end}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--side);color:#fff;padding:12px 20px;border-radius:var(--r);font-size:13px;z-index:300;display:none;box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.toast.show{display:block;animation:slideIn .3s}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.mono{font-family:"SF Mono","Fira Code",monospace;font-size:12px}
+.mut{color:var(--mut)}.sm{font-size:12px}
+.toolbar{display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap}
+.toolbar input[type=text],.toolbar select{padding:7px 12px;border:1px solid var(--bd);border-radius:6px;font-size:13px}
+.toolbar input[type=text]{width:240px}
+.flex{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.cd{font-weight:700;font-size:13px}
+.cd-warn{color:var(--red)}
+.ev{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.ev-red{background:#feecea;color:var(--red)}.ev-org{background:#fff8e1;color:#b8860b}.ev-blu{background:var(--pri-bg);color:var(--pri)}.ev-grn{background:#e6f9f0;color:#0a8f5c}
+.kv{display:grid;grid-template-columns:140px 1fr;gap:6px 16px;font-size:13px}
+.kv dt{color:var(--mut);font-weight:500}.kv dd{margin:0}
+.tl{border-left:2px solid var(--bd);padding-left:20px;margin-left:10px}
+.tl-item{position:relative;padding:8px 0}
+.tl-item::before{content:"";position:absolute;left:-26px;top:14px;width:10px;height:10px;border-radius:50%;background:var(--pri);border:2px solid #fff}
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--side)}
+.login-box{background:#fff;border-radius:12px;padding:40px;width:380px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.login-box h1{font-size:20px;text-align:center;margin-bottom:24px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.detail-grid .card{margin-bottom:0}
+.back{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:13px;margin-bottom:16px;cursor:pointer}
+.back:hover{color:var(--pri)}
+.token-display{background:var(--side);color:var(--green);padding:14px 18px;border-radius:var(--r);font-family:monospace;font-size:15px;word-break:break-all;position:relative}
+.token-display .copy{position:absolute;right:10px;top:10px;background:rgba(255,255,255,.1);border:none;color:#fff;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+.dgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.dcard{background:#fff;border-radius:var(--r);padding:18px 20px;border:1px solid var(--bd);cursor:pointer;transition:.15s}
+.dcard:hover{border-color:var(--pri)}
+.dcard .n{font-size:30px;font-weight:700;line-height:1.1}
+.dcard .l{font-size:12px;color:var(--mut);margin-top:4px}
 </style>
 </head>
 <body>
+<div id="pg-login" class="login-wrap">
+<div class="login-box">
+<div style="text-align:center;font-size:28px;font-weight:700;margin-bottom:8px">🐉 群龙<em style="color:var(--pri);font-style:normal">Console</em></div>
+<p style="text-align:center;color:var(--mut);margin-bottom:24px;font-size:13px">分布式 AI Agent 协作平台</p>
+<div class="fg"><label>邮箱</label><input type="email" value="owner@qlong.io"></div>
+<div class="fg"><label>密码</label><input type="password" value="password123"></div>
+<button class="btn btn-p" style="width:100%;padding:10px;margin-top:8px" onclick="doLogin()">登录控制台</button>
+<p style="text-align:center;margin-top:16px;font-size:12px;color:var(--mut)">登录由产品侧提供;控制台仅使用会话 cookie</p>
+</div>
+</div>
+<div id="pg-main" style="display:none">
 <nav class="sidebar">
-<div class="logo">🐉 群龙<span>Console</span></div>
+<div class="logo">🐉 群龙<em>Console</em></div>
 <div class="nav">
-<div class="nav-item active" data-page="overview"><span class="icon">📊</span> 团队概览</div>
-<div class="nav-item" data-page="nodes"><span class="icon">🖥</span> 节点管理</div>
-<div class="nav-item" data-page="tokens"><span class="icon">🎫</span> Enroll Token</div>
-<div class="nav-item" data-page="grants"><span class="icon">🔗</span> 跨队授权</div>
-<div class="nav-item" data-page="audit"><span class="icon">📋</span> 审计事件</div>
-<div class="nav-item" data-page="settings"><span class="icon">⚙</span> 团队设置</div>
+<a href="#" class="on" data-p="overview" onclick="nav(this.dataset.p)"><span class="ico">📊</span> 团队概览</a>
+<a href="#" data-p="nodes" onclick="nav(this.dataset.p)"><span class="ico">🖥️</span> 节点管理</a>
+<a href="#" data-p="tokens" onclick="nav(this.dataset.p)"><span class="ico">🎫</span> Enroll Token</a>
+<a href="#" data-p="grants" onclick="nav(this.dataset.p)"><span class="ico">🔗</span> 跨队授权</a>
+<a href="#" data-p="audit" onclick="nav(this.dataset.p)"><span class="ico">📋</span> 审计事件</a>
+<a href="#" data-p="settings" onclick="nav(this.dataset.p)"><span class="ico">⚙️</span> 团队设置</a>
 </div>
-<div style="padding:20px;border-top:1px solid rgba(255,255,255,.1)">
-<div style="font-size:12px;color:var(--sidebar-text)">登录用户</div>
-<div style="font-size:14px;color:#fff;margin-top:4px">owner@qlong.io</div>
-</div>
+<div class="side-user"><div class="role">Owner</div><div class="name">owner@qlong.io</div></div>
 </nav>
 <main class="main">
-<div id="page-overview" class="page active">
-<h1>团队概览</h1>
-<div class="stat-grid">
-<div class="stat-card" onclick="nav('nodes')"><div class="num">5</div><div class="label">总节点</div></div>
-<div class="stat-card" onclick="nav('nodes')"><div class="num" style="color:var(--success)">3</div><div class="label">在线</div></div>
-<div class="stat-card" onclick="nav('audit')"><div class="num">47</div><div class="label">近24h审计事件</div></div>
-<div class="stat-card"><div class="num">2</div><div class="label">活跃任务</div></div>
+<div id="pg-overview" class="page on">
+<h1>团队概览</h1><div class="sub">team-x · 研发团队 · 5 个节点</div>
+<div class="dgrid">
+<div class="dcard" onclick="nav('nodes')"><div class="n">5</div><div class="l">总节点</div></div>
+<div class="dcard"><div class="n" style="color:var(--green)">3</div><div class="l">在线</div></div>
+<div class="dcard" onclick="nav('audit')"><div class="n">47</div><div class="l">近 24h 审计事件</div></div>
+<div class="dcard"><div class="n">2</div><div class="l">活跃任务</div></div>
 </div>
-<div class="card"><h2>节点状态</h2><table><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>版本</th><th>最近活跃</th></tr></thead><tbody>
-<tr><td><span class="dot on"></span>在线</td><td>dev-machine</td><td>windows</td><td>0.1.0</td><td>刚刚</td></tr>
-<tr><td><span class="dot on"></span>在线</td><td>build-server</td><td>linux</td><td>0.1.0</td><td>2 分钟前</td></tr>
-<tr><td><span class="dot on"></span>在线</td><td>gpu-node</td><td>linux</td><td>0.1.0</td><td>5 分钟前</td></tr>
-<tr><td><span class="dot off"></span>offline</td><td>macbook-pro</td><td>darwin</td><td>0.1.0</td><td>2 小时前</td></tr>
-<tr><td><span class="dot sus"></span>suspended</td><td>old-laptop</td><td>linux</td><td>0.1.0</td><td>3 天前</td></tr>
+<div class="card"><h2>节点状态</h2><table class="tbl"><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>key_epoch</th><th>最近活跃</th><th>caps</th></tr></thead><tbody>
+<tr><td><span class="dot g"></span></td><td><strong>dev-machine</strong></td><td>windows</td><td>1</td><td>刚刚</td><td><span class="chip">tool:node@20</span><span class="chip">env:windows</span></td></tr>
+<tr><td><span class="dot g"></span></td><td><strong>build-server</strong></td><td>linux</td><td>2</td><td>2 分钟前</td><td><span class="chip">tool:node@20</span><span class="chip">env:linux</span><span class="chip">net:office-vpn</span></td></tr>
+<tr><td><span class="dot g"></span></td><td><strong>gpu-node</strong></td><td>linux</td><td>1</td><td>5 分钟前</td><td><span class="chip">hw:gpu-cuda</span><span class="chip">env:linux</span></td></tr>
+<tr><td><span class="dot gr"></span></td><td>macbook-pro</td><td>darwin</td><td>1</td><td>2 小时前</td><td><span class="chip">env:darwin</span></td></tr>
+<tr><td><span class="dot o"></span></td><td>old-laptop</td><td>linux</td><td>1</td><td>3 天前</td><td>—</td></tr>
 </tbody></table></div>
-<div class="card"><h2>最近审计事件</h2><table><thead><tr><th>时间</th><th>事件</th><th>原因</th></tr></thead><tbody>
-<tr><td>21:18:32</td><td><span class="audit-event blue">stale_attempt_rejected</span></td><td>inbound attempt 1 &lt; current 2</td></tr>
-<tr><td>21:17:15</td><td><span class="audit-event orange">reclaim</span></td><td>lease lost</td></tr>
-<tr><td>21:15:03</td><td><span class="audit-event red">sig_verify_failed</span></td><td>验签失败</td></tr>
-</tbody></table></div>
-</div>
-<div id="page-nodes" class="page">
-<h1>节点管理</h1>
-<div style="margin-bottom:16px;display:flex;gap:10px"><input placeholder="搜索别名或 ID..." style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;width:260px"><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>全部状态</option><option>在线</option><option>离线</option><option>suspended</option></select></div>
-<div class="card"><table><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>版本</th><th>key_epoch</th><th>最近活跃</th><th>操作</th></tr></thead><tbody>
-<tr><td><span class="dot on"></span>在线</td><td>dev-machine</td><td>windows</td><td>0.1.0</td><td>1</td><td>刚刚</td><td><button class="btn btn-sm btn-outline" onclick="showModal('确认暂停 dev-machine?')">暂停</button> <button class="btn btn-sm btn-danger" onclick="showModal('确认永久吊销 dev-machine? 此操作不可逆。')">吊销</button></td></tr>
-<tr><td><span class="dot on"></span>在线</td><td>build-server</td><td>linux</td><td>0.1.0</td><td>2</td><td>2 分钟前</td><td><button class="btn btn-sm btn-outline" onclick="showModal('确认暂停 build-server?')">暂停</button> <button class="btn btn-sm btn-danger" onclick="showModal('确认永久吊销 build-server?')">吊销</button></td></tr>
-<tr><td><span class="dot off"></span>离线</td><td>macbook-pro</td><td>darwin</td><td>0.1.0</td><td>1</td><td>2 小时前</td><td><button class="btn btn-sm btn-outline">暂停</button> <button class="btn btn-sm btn-danger">吊销</button></td></tr>
-<tr><td><span class="dot sus"></span>suspended</td><td>old-laptop</td><td>linux</td><td>0.1.0</td><td>1</td><td>3 天前</td><td><button class="btn btn-sm btn-primary">恢复</button> <button class="btn btn-sm btn-danger">吊销</button></td></tr>
+<div class="card"><h2>最近审计事件</h2><table class="tbl"><thead><tr><th>时间</th><th>事件</th><th>原因</th></tr></thead><tbody>
+<tr><td class="mono">21:18:32</td><td><span class="ev ev-blu">stale_attempt_rejected</span></td><td>inbound attempt 1 &lt; current 2</td></tr>
+<tr><td class="mono">21:17:15</td><td><span class="ev ev-org">reclaim</span></td><td>lease lost</td></tr>
+<tr><td class="mono">21:15:03</td><td><span class="ev ev-red">sig_verify_failed</span></td><td>验签失败</td></tr>
+<tr><td class="mono">21:12:40</td><td><span class="ev ev-grn">cap_tag_removed</span></td><td>确定性检查失败,已硬摘</td></tr>
 </tbody></table></div>
 </div>
-<div id="page-tokens" class="page">
-<h1>Enrollment Token 管理</h1>
-<div class="card"><h2>签发新 Token</h2><div style="display:flex;gap:12px;align-items:flex-end"><div class="form-group" style="flex:1"><label>TTL</label><select><option>30 分钟(默认)</option><option>1 小时</option><option>24 小时</option></select></div><button class="btn btn-primary" onclick="showModal('签发新 Token? 明文只显示一次。')" style="margin-bottom:16px">签发</button></div></div>
-<div class="card"><h2>活跃 Token</h2><table><thead><tr><th>Token</th><th>创建时间</th><th>过期倒计时</th><th>操作</th></tr></thead><tbody>
-<tr><td class="mono">a7f3...9e2b</td><td>2026-09-06 21:00</td><td style="color:var(--danger);font-weight:600">12:34</td><td><button class="btn btn-sm btn-outline">复制</button> <button class="btn btn-sm btn-danger">作废</button></td></tr>
-<tr><td class="mono">c2d8...7f1a</td><td>2026-09-06 20:30</td><td style="color:var(--text-light)">已过期</td><td>—</td></tr>
+<div id="pg-nodes" class="page">
+<h1>节点管理</h1><div class="sub">管理团队内全部节点</div>
+<div class="toolbar">
+<input type="text" placeholder="🔍 搜索别名或 node_id..." oninput="filterNodes(this.value)">
+<select onchange="filterNodes(document.getElementById('node-search').value)"><option>全部状态</option><option>在线</option><option>离线</option><option>suspended</option></select>
+</div>
+<div class="card"><table class="tbl"><thead><tr><th>状态</th><th>别名</th><th>node_id</th><th>平台</th><th>key_epoch</th><th>caps_rev</th><th>最近活跃</th><th style="text-align:right">操作</th></tr></thead><tbody id="nodes-body"></tbody></table></div>
+</div>
+<div id="pg-node-detail" class="page">
+<a class="back" onclick="nav('nodes')">← 返回节点列表</a>
+<h1 id="nd-name"></h1><div class="sub" id="nd-id"></div>
+<div class="detail-grid">
+<div class="card"><h2>基本信息</h2><dl class="kv">
+<dt>node_id</dt><dd class="mono" id="nd-full-id"></dd>
+<dt>team_id</dt><dd class="mono" id="nd-team"></dd>
+<dt>平台</dt><dd id="nd-platform"></dd>
+<dt>版本</dt><dd id="nd-version"></dd>
+<dt>状态</dt><dd id="nd-status"></dd>
+<dt>加入时间</dt><dd id="nd-joined"></dd>
+<dt>最近活跃</dt><dd id="nd-lastseen"></dd>
+</dl></div>
+<div class="card"><h2>密钥信息</h2><dl class="kv">
+<dt>当前纪元</dt><dd class="mono" id="nd-epoch"></dd>
+<dt>公钥指纹</dt><dd class="mono" id="nd-pubkey"></dd>
+<dt>历史纪元</dt><dd id="nd-history"></dd>
+</dl></div>
+</div>
+<div class="card"><h2>能力标签 <span class="mut sm">(caps_rev: <span id="nd-capsrev"></span>)</span></h2><div id="nd-caps"></div></div>
+<div class="card"><h2>负载快照</h2><dl class="kv">
+<dt>queue_depth</dt><dd id="nd-queue"></dd>
+<dt>running</dt><dd id="nd-running"></dd>
+<dt>accepting</dt><dd id="nd-accepting"></dd>
+</dl></div>
+<div class="card"><h2>审计事件</h2><div class="tl" id="nd-audit"></div></div>
+<div style="margin-top:16px;display:flex;gap:10px">
+<button class="btn btn-o" onclick="showModal('确认恢复该节点?','恢复后节点可正常收发消息。')">恢复</button>
+<button class="btn btn-o" onclick="showModal('确认暂停该节点?','暂停后该节点将无法收发消息。可随时恢复。')">暂停</button>
+<button class="btn btn-d" onclick="showModal('确认永久吊销该节点?','此操作不可逆。该节点将立即断连且无法恢复。')">吊销</button>
+</div>
+</div>
+<div id="pg-tokens" class="page">
+<h1>Enroll Token 管理</h1><div class="sub">签发一次性邀请码,新节点凭此入网</div>
+<div class="card"><h2>签发新 Token</h2>
+<div class="flex">
+<div class="fg" style="width:200px"><label>TTL</label><select><option>30 分钟(默认)</option><option>1 小时</option><option>24 小时</option></select></div>
+<button class="btn btn-p" style="margin-bottom:14px" onclick="issueToken()">签发</button>
+</div>
+<div id="new-token-area" style="display:none">
+<div class="section-title" style="color:var(--orange);font-weight:600;margin:12px 0">⚠️ 明文只显示一次,请立即复制</div>
+<div class="token-display" id="new-token-val"></div>
+</div>
+</div>
+<div class="card"><h2>活跃 Token</h2><table class="tbl"><thead><tr><th>Token(截断)</th><th>签发时间</th><th>过期倒计时</th><th>操作</th></tr></thead><tbody>
+<tr><td class="mono">a7f3...9e2b</td><td>2026-09-06 21:00</td><td class="cd cd-warn">12:34</td><td><button class="btn btn-s btn-o">复制</button> <button class="btn btn-s btn-d">作废</button></td></tr>
+<tr><td class="mono">c2d8...7f1a</td><td>2026-09-06 20:30</td><td class="mut">已过期</td><td>—</td></tr>
 </tbody></table></div>
-<div class="card"><h2>已消费 Token</h2><table><thead><tr><th>Token</th><th>消费时间</th><th>使用节点</th></tr></thead><tbody>
+<div class="card"><h2>已消费 Token</h2><table class="tbl"><thead><tr><th>Token(截断)</th><th>消费时间</th><th>使用节点</th></tr></thead><tbody>
 <tr><td class="mono">e5a1...3c8d</td><td>2026-09-06 20:15</td><td>dev-machine</td></tr>
 <tr><td class="mono">f7b2...1a4e</td><td>2026-09-06 19:00</td><td>build-server</td></tr>
 </tbody></table></div>
 </div>
-<div id="page-grants" class="page">
-<h1>跨队授权</h1>
-<div class="card"><h2>创建 Grant</h2><div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap"><div class="form-group"><label>目标 Team</label><select style="padding:8px;border:1px solid var(--border);border-radius:6px;width:200px"><option>选择 team...</option><option>team-y (research)</option></select></div><div class="form-group"><label>TTL</label><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>永久</option><option>7 天</option><option>24 小时</option></select></div><button class="btn btn-primary" style="margin-bottom:16px">创建</button></div></div>
-<div class="card"><table><thead><tr><th>方向</th><th>目标 Team</th><th>caps_visible</th><th>过期时间</th><th>操作</th></tr></thead><tbody>
-<tr><td>X → Y</td><td>team-y (research)</td><td><span class="chip">tool:node@20</span><span class="chip">env:linux</span></td><td>2026-09-13</td><td><button class="btn btn-sm btn-danger">撤销</button></td></tr>
+<div id="pg-grants" class="page">
+<h1>跨队授权</h1><div class="sub">显式授权其他 team 与本 team 通信(D27 扩展)</div>
+<div class="card"><h2>创建 Grant</h2>
+<div class="flex">
+<div class="fg" style="width:220px"><label>目标 Team</label><select><option>team-y (research)</option><option>team-z (ops)</option></select></div>
+<div class="fg" style="width:180px"><label>TTL</label><select><option>永久</option><option>7 天</option><option>24 小时</option></select></div>
+<button class="btn btn-p" style="margin-bottom:14px" onclick="showToast('Grant 已创建')">创建</button>
+</div>
+</div>
+<div class="card"><table class="tbl"><thead><tr><th>方向</th><th>目标 Team</th><th>caps_visible</th><th>过期时间</th><th>状态</th><th>操作</th></tr></thead><tbody>
+<tr><td>X → Y</td><td>team-y (research)</td><td><span class="chip">tool:node@20</span> <span class="chip">env:linux</span></td><td>2026-09-13</td><td><span class="bdg g">活跃</span></td><td><button class="btn btn-s btn-d">撤销</button></td></tr>
+<tr><td>X → Z</td><td>team-z (ops)</td><td>—(全部)</td><td>—</td><td><span class="bdg o">已过期</span></td><td><button class="btn btn-s btn-d">删除</button></td></tr>
 </tbody></table></div>
 </div>
-<div id="page-audit" class="page">
-<h1>审计事件</h1>
-<div style="margin-bottom:16px;display:flex;gap:10px;flex-wrap:wrap"><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>全部事件</option><option>sig_verify_failed</option><option>reclaim</option><option>escalate</option><option>stale_attempt_rejected</option></select><input type="date" style="padding:8px;border:1px solid var(--border);border-radius:6px"></div>
-<div class="card"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>原因</th><th>头摘要</th></tr></thead><tbody>
-<tr><td>2026-09-06 21:18:32</td><td><span class="audit-event blue">stale_attempt_rejected</span></td><td class="mono">2c0f...37fa</td><td>inbound attempt 1 &lt; current 2</td><td class="mono">a3f0e2...b7c1</td></tr>
-<tr><td>2026-09-06 21:17:15</td><td><span class="audit-event orange">reclaim</span></td><td class="mono">2c0f...37fa</td><td>lease lost</td><td class="mono">d4e5f6...a8b9</td></tr>
-<tr><td>2026-09-06 21:15:03</td><td><span class="audit-event red">sig_verify_failed</span></td><td class="mono">8a1b...2c3d</td><td>验签失败</td><td class="mono">e7f8a9...b0c1</td></tr>
-<tr><td>2026-09-06 21:10:00</td><td><span class="audit-event blue">dedup_mismatch</span></td><td class="mono">2c0f...37fa</td><td>同键异体</td><td class="mono">f1a2b3...c4d5</td></tr>
-<tr><td>2026-09-06 21:05:44</td><td><span class="audit-event red">escalate</span></td><td class="mono">2c0f...37fa</td><td>预算耗尽(3/3)</td><td class="mono">a1b2c3...d4e5</td></tr>
-</tbody></table></div>
+<div id="pg-audit" class="page">
+<h1>审计事件</h1><div class="sub">安全与操作审计(只读;P3:不记录 body)</div>
+<div class="toolbar">
+<select><option>全部事件</option><option>sig_verify_failed</option><option>reclaim</option><option>escalate</option><option>stale_attempt_rejected</option><option>dedup_mismatch</option></select>
+<input type="date" value="2026-09-06">
+<input type="text" placeholder="搜索 node_id..." style="width:180px">
 </div>
-<div id="page-settings" class="page">
+<div class="card"><table class="tbl"><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>原因</th><th>trace_id</th><th>task_id</th><th>头摘要</th></tr></thead><tbody id="audit-body"></tbody></table></div>
+</div>
+<div id="pg-settings" class="page">
 <h1>团队设置</h1>
-<div class="card"><h2>基本信息</h2><div class="form-group"><label>Team ID</label><input value="33333333-3333-4333-8333-333333333333" readonly class="mono" style="background:var(--bg)"></div><div class="form-group"><label>团队名称</label><input value="研发团队"></div><div class="form-group"><label>Owner</label><input value="u1 (owner@qlong.io)" readonly style="background:var(--bg)"></div><button class="btn btn-primary">保存</button></div>
-<div class="card" style="border:1px solid var(--danger)"><h2 style="color:var(--danger)">Danger Zone</h2><p class="muted">以下操作不可逆,请谨慎操作。</p><br><button class="btn btn-danger">删除团队</button></div>
+<div class="card"><h2>基本信息</h2>
+<div class="fg"><label>Team ID</label><input value="33333333-3333-4333-8333-333333333333" readonly class="mono"></div>
+<div class="fg"><label>团队名称</label><input value="研发团队"></div>
+<div class="fg"><label>Owner</label><input value="u1" readonly style="background:var(--bg);color:var(--mut)"></div>
+<button class="btn btn-p" onclick="showToast('已保存')">保存</button>
 </div>
-</main>
-<div class="modal-overlay" id="modal"><div class="modal"><h3 id="modal-text"></h3><div class="btn-group"><button class="btn btn-outline" onclick="hideModal()">取消</button><button class="btn btn-danger" onclick="hideModal();showToast('已执行')">确认</button></div></div></div>
+<div class="card" style="border:1px solid var(--red)"><h2 style="color:var(--red)">Danger Zone</h2><p class="mut">以下操作不可逆,请谨慎操作。v0.3 排期。</p><br><button class="btn btn-d" disabled style="opacity:.5">删除团队</button></div>
+</div>
+</main></div>
+<div class="ovl" id="modal" onclick="if(event.target===this)hideModal()">
+<div class="modal"><h3 id="modal-title"></h3><p id="modal-body" class="mut"></p><div class="row"><button class="btn btn-o" onclick="hideModal()">取消</button><button class="btn btn-d" onclick="hideModal();showToast('已执行')">确认</button></div></div>
+</div>
 <div class="toast" id="toast"></div>
 <script>
-function nav(page){document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page));document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id==='page-'+page))}
-function showModal(text){document.getElementById('modal-text').textContent=text;document.getElementById('modal').classList.add('show')}
-function hideModal(){document.getElementById('modal').classList.remove('show')}
-function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
-document.querySelectorAll('.nav-item').forEach(n=>n.addEventListener('click',()=>nav(n.dataset.page)));
-document.getElementById('modal').addEventListener('click',e=>{if(e.target===e.currentTarget)hideModal()});
+var NODES=[
+{id:"a4763d9c",name:"dev-machine",status:"active",online:true,platform:"windows",version:"0.1.0",epoch:1,capsRev:3,caps:["tool:node@20","env:windows"],lastSeen:"刚刚",joined:"2026-08-01",pubkey:"a3f0e2b7c1d8e9f4",queue:0,running:0,accepting:true},
+{id:"2c0fb067",name:"build-server",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:2,capsRev:5,caps:["tool:node@20","env:linux","net:office-vpn"],lastSeen:"2 分钟前",joined:"2026-08-15",pubkey:"b4c5d6e7f8a9b0c1",queue:1,running:1,accepting:true},
+{id:"8a1b2c3d",name:"gpu-node",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:1,capsRev:2,caps:["hw:gpu-cuda","env:linux"],lastSeen:"5 分钟前",joined:"2026-09-01",pubkey:"c5d6e7f8a9b0c1d2",queue:0,running:0,accepting:true},
+{id:"9f8e7d6c",name:"macbook-pro",status:"active",online:false,platform:"darwin",version:"0.1.0",epoch:1,capsRev:1,caps:["env:darwin"],lastSeen:"2 小时前",joined:"2026-08-20",pubkey:"d6e7f8a9b0c1d2e3",queue:0,running:0,accepting:true},
+{id:"0a1b2c3d",name:"old-laptop",team:"team-x",status:"suspended",online:false,platform:"linux",version:"0.1.0",epoch:1,capsRev:1,caps:[],lastSeen:"3 天前",joined:"2026-07-01",pubkey:"e7f8a9b0c1d2e3f4",queue:0,running:0,accepting:false}
+];
+var AUDITS=[
+{ts:"2026-09-06 21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
+{ts:"2026-09-06 21:17:15",event:"reclaim",cls:"ev-org",node:"2c0f...37fa",reason:"lease lost",trace:"7b0e...",task:"d41a..."},
+{ts:"2026-09-06 21:15:03",event:"sig_verify_failed",cls:"ev-red",node:"8a1b...2c3d",reason:"验签失败",trace:"",task:""},
+{ts:"2026-09-06 21:12:40",event:"dedup_mismatch",cls:"ev-blu",node:"2c0f...37fa",reason:"同键异体",trace:"",task:""},
+{ts:"2026-09-06 21:05:44",event:"escalate",cls:"ev-red",node:"2c0f...37fa",reason:"预算耗尽(3/3)",trace:"7b0e...",task:"d41a..."},
+{ts:"2026-09-06 20:58:22",event:"cap_tag_removed",cls:"ev-org",node:"8a1b...2c3d",reason:"确定性检查失败",trace:"",task:""}
+];
+var TOKENS=[
+{trunc:"a7f3...9e2b",created:"2026-09-06 21:00",ttl:720,used:false},
+{trunc:"c2d8...7f1a",created:"2026-09-06 20:30",ttl:0,used:true}
+];
+function nav(page){document.querySelectorAll(".nav a").forEach(function(a){a.classList.toggle("on",a.dataset.p===page)});document.querySelectorAll(".page").forEach(function(p){p.classList.toggle("on",p.id==="pg-"+page)})}
+function doLogin(){document.getElementById("pg-login").style.display="none";document.getElementById("pg-main").style.display="block";renderNodes();renderAudit()}
+function showModal(t,b){document.getElementById("modal-title").textContent=t;document.getElementById("modal-body").textContent=b||"";document.getElementById("modal").classList.add("show")}
+function hideModal(){document.getElementById("modal").classList.remove("show")}
+function showToast(msg){var t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");setTimeout(function(){t.classList.remove("show")},3000)}
+function statusDot(n){if(n.status==="suspended")return'<span class="dot o"></span><span class="bdg o">suspended</span>';if(n.online)return'<span class="dot g"></span><span class="bdg g">在线</span>';return'<span class="dot gr"></span><span class="bdg gr">离线</span>'}
+function renderNodes(filter){var tbody=document.getElementById("nodes-body");tbody.innerHTML="";NODES.filter(function(n){return !filter||n.name.indexOf(filter)>=0||n.id.indexOf(filter)>=0}).forEach(function(n,i){var tr=document.createElement("tr");tr.innerHTML=statusDot(n)+"<td><strong>"+n.name+"</strong></td><td class='mono'>"+n.id.slice(0,8)+"...</td><td>"+n.platform+"</td><td>"+n.epoch+"</td><td>"+n.capsRev+"</td><td>"+n.lastSeen+"</td><td style='text-align:right'><button class='btn btn-s btn-o' onclick='event.stopPropagation();showModal(\"确认暂停 "+n.name+"?\",\"暂停后该节点将无法收发消息。可随时恢复。\")'>暂停</button> <button class='btn btn-s btn-d' onclick='event.stopPropagation();showModal(\"确认永久吊销 "+n.name+"?\",\"此操作不可逆。该节点将立即断连。\")'>吊销</button></td>";tr.style.cursor="pointer";tr.onclick=function(){showDetail(i)};tbody.appendChild(tr)})}
+function filterNodes(v){renderNodes(v)}
+function showDetail(i){var n=NODES[i];nav("node-detail");document.getElementById("nd-name").textContent=n.name;document.getElementById("nd-id").textContent="node_id: "+n.id;document.getElementById("nd-full-id").textContent=n.id;document.getElementById("nd-team").textContent="team-x";document.getElementById("nd-platform").textContent=n.platform;document.getElementById("nd-version").textContent=n.version;document.getElementById("nd-status").innerHTML=statusDot(n);document.getElementById("nd-joined").textContent=n.joined;document.getElementById("nd-lastseen").textContent=n.lastSeen;document.getElementById("nd-epoch").textContent=n.epoch;document.getElementById("nd-pubkey").textContent=n.pubkey.slice(0,16)+"...";document.getElementById("nd-history").textContent="1, 2";document.getElementById("nd-capsrev").textContent=n.capsRev;document.getElementById("nd-caps").innerHTML=n.caps.map(function(c){return '<span class="chip">'+c+"</span>"}).join("")||'<span class="mut">无</span>';document.getElementById("nd-queue").textContent=n.queue;document.getElementById("nd-running").textContent=n.running;document.getElementById("nd-accepting").textContent=n.accepting?"✓ 是":"✗ 否";var auditHtml=AUDITS.slice(0,5).map(function(a){return '<div class="tl-item"><span class="ev '+a.cls+'">'+a.event+'</span> <span class="mut sm">'+a.ts+"</span><br><span class='sm'>"+a.reason+"</span></div>"}).join("");document.getElementById("nd-audit").innerHTML=auditHtml}
+function issueToken(){var tok="[[SECRET_19]]".toString("base64url");document.getElementById("new-token-area").style.display="block";document.getElementById("new-token-val").textContent=tok;showToast("Token 已签发,TTL 见上方选择")}
+function renderAudit(){var tbody=document.getElementById("audit-body");tbody.innerHTML=AUDITS.map(function(a){return "<tr><td class='mono'>"+a.ts+'</td><td><span class="ev '+a.cls+'">'+a.event+"</span></td><td class='mono'>"+a.node+"</td><td>"+a.reason+'</td><td class="mono">'+(a.trace||"—")+'</td><td class="mono">'+(a.task||"—")+"</td></tr>"}).join("")}
+renderAudit();renderNodes();
 </script>
-</body>
-</html>
+</body></html>
