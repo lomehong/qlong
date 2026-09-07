@@ -14,9 +14,16 @@ export interface GatewayCoreOptions {
   inboxCapacity?: number;
 }
 
+export interface UplinkDeferred {
+  toNodeId: string;
+  envelope: EnvelopeV1;
+}
+
 export interface UplinkResult {
   /** 回执帧:发往发送方(诊断/改派触发;不参与可靠性)。A0/过期 = 无回执(A6 静默) */
   ack?: GatewayAck;
+  /** 集群模式(deferOffline):目标不在本网关 —— 交由集群路由(02 §12.1) */
+  deferred?: UplinkDeferred;
   routingDenied?: RoutingDenied;
   audits: AuditRecord[];
   /** 在线投递(目标已连接) */
@@ -78,10 +85,6 @@ export class GatewayCore {
     this.connections.delete(nodeId);
   }
 
-  isConnected(nodeId: string): boolean {
-    return this.connections.has(nodeId);
-  }
-
   /** 注册中心管理事件:suspend/revoke → 语义 close code 主动断连(A6,评审 I-14) */
   applyAdminEvent(nodeId: string, status: 'suspended' | 'revoked'): AdminClose[] {
     const conn = this.connections.get(nodeId);
@@ -94,7 +97,7 @@ export class GatewayCore {
    * 上行信封:ACL(A0/A1/A2)→ 在线投递 / 离线暂存(aid 不暂存,评审 I-11)/ 拒绝。
    * A0 与过期 = A6 静默(无回执);A1/A2 = 回执 rejected + routing.denied(仅发往发送方本人)。
    */
-  uplink(fromNodeId: string, envelope: EnvelopeV1, now: number): UplinkResult {
+  uplink(fromNodeId: string, envelope: EnvelopeV1, now: number, opts?: { deferOffline?: boolean }): UplinkResult {
     const audits: AuditRecord[] = [];
     const result: UplinkResult = { audits, deliveries: [], queued: [] };
 
@@ -149,6 +152,12 @@ export class GatewayCore {
       return result;
     }
 
+    // 集群(02 §12.1):deferOffline 时本网关不落箱,交由上层集群路由
+    // —— 直投到他网关在线节点,或入 home 分片网关收件箱
+    if (opts?.deferOffline) {
+      return { ...result, deferred: { toNodeId, envelope } };
+    }
+
     // 离线:aid 不暂存(01 §9/评审 I-11);project 暂存
     const kind = envelope.body.kind;
     if (kind === 'aid') {
@@ -159,6 +168,16 @@ export class GatewayCore {
     result.queued.push({ toNodeId, envelope });
     result.ack = { ack_type: 'queued', msg_id: envelope.msg_id };
     return result;
+  }
+
+  /** 集群/管理:直接入收件箱(home 分片网关落箱用) */
+  queueInbox(envelope: EnvelopeV1, now: number): void {
+    this.inbox.offer(envelope.to.node_id, envelope, now);
+  }
+
+  /** 集群:本网关是否持有该节点连接 */
+  isConnected(nodeId: string): boolean {
+    return this.connections.has(nodeId);
   }
 
   /** 重连补投(02 §8):返回到期可投条目;过期剔除 + 审计 exp_rejected */

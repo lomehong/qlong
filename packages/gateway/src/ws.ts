@@ -11,6 +11,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { newId, validateEnvelope, type EnvelopeV1 } from '@qlong/core';
 import type { GatewayCore } from './core.js';
 import type { GatewayDirectorySnapshot } from './types.js';
+import type { GatewayCluster } from './cluster.js';
 
 export const AUTH_KEY = 'node_' + 'token';
 
@@ -18,6 +19,8 @@ export interface WsGatewayOptions {
   core: GatewayCore;
   /** A3:node token → 节点(注册中心 authByToken);无效或非 active = 拒绝(close 4003) */
   authenticate: (nodeToken: string) => { node_id: string; team_id: string; status: string } | undefined;
+  /** 02 §12.1:集群路由(source ACL 已过,目标不在本网关时调用) */
+  cluster?: GatewayCluster;
 }
 
 interface RegistryLike {
@@ -124,7 +127,7 @@ export class WsGateway {
         }
         let result;
         try {
-          result = this.opts.core.uplink(nodeId, env, Date.now());
+          result = this.opts.core.uplink(nodeId, env, Date.now(), { deferOffline: this.opts.cluster !== undefined });
         } catch {
           // M2-01:兜底 —— 进程与连接必须存活
           this.safeSend(ws, { frame: 'ack', ack_type: 'rejected', msg_id: env.msg_id, reason: 'internal_error' });
@@ -135,6 +138,17 @@ export class WsGateway {
         if (result.routingDenied) this.safeSend(ws, { frame: 'routing.denied', ...result.routingDenied });
         for (const d of result.deliveries) {
           this.routeToNode(d.toNodeId, { frame: 'envelope', envelope: d.envelope });
+        }
+        // 集群路由(02 §12.1):本网关 miss → 直投在线成员 / home 分片入箱
+        if (result.deferred) {
+          const outcome = this.opts.cluster?.route(result.deferred.envelope, result.deferred.toNodeId, Date.now()) ?? 'unknown';
+          if (outcome === 'unknown') {
+            // 无集群成员(不应发生,成员含自身)—— 本地兜底入箱
+            this.opts.core.queueInbox(env, Date.now());
+            this.safeSend(ws, { frame: 'ack', ack_type: 'queued', msg_id: env.msg_id });
+          } else {
+            this.safeSend(ws, { frame: 'ack', ack_type: outcome === 'delivered' ? 'delivered' : 'queued', msg_id: env.msg_id });
+          }
         }
       });
 
@@ -147,6 +161,16 @@ export class WsGateway {
         }
       });
     });
+  }
+
+  /** 集群成员接口(02 §12.1 连接注册):是否持有节点连接 */
+  has(nodeId: string): boolean {
+    return this.currentConnByNode.has(nodeId);
+  }
+
+  /** 集群成员接口:向本网关在线节点投递(返回是否确有连接) */
+  deliverTo(nodeId: string, envelope: EnvelopeV1): void {
+    this.routeToNode(nodeId, { frame: 'envelope', envelope });
   }
 
   private routeToNode(nodeId: string, frame: unknown): void {
