@@ -24,6 +24,6 @@ describe('审计日志存储(§11)', () => {
     expect(r.auditLog.length).toBeLessThanOrEqual(10_000);
     const events = r.getAuditEvents('team-x', 100);
     expect(events).toHaveLength(100);
-    expect(events[99].reason).toBe('event-10004');
+    expect(events[99]!.reason).toBe('event-10004');
   });
 });
