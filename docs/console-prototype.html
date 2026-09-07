@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>群龙控制台</title>
+<style>
+:root{--bg:#f5f6fa;--card:#fff;--sidebar:#1a1a2e;--sidebar-text:#a0a0b8;--sidebar-active:#fff;--primary:#4361ee;--primary-light:#e8edff;--success:#2dc76d;--warning:#f5a623;--danger:#e74c3c;--text:#2d3436;--text-light:#8395a7;--border:#e8ecf1;--radius:8px;--shadow:0 2px 8px rgba(0,0,0,.08)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
+.sidebar{width:220px;background:var(--sidebar);color:var(--sidebar-text);padding:20px 0;position:fixed;top:0;bottom:0;left:0;display:flex;flex-direction:column}
+.logo{padding:0 20px 20px;font-size:20px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
+.logo span{color:var(--primary)}
+.nav{flex:1}
+.nav-item{padding:10px 20px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:14px;transition:.2s;border-left:3px solid transparent}
+.nav-item:hover{color:#fff;background:rgba(255,255,255,.05)}
+.nav-item.active{color:var(--sidebar-active);background:rgba(67,97,238,.15);border-left-color:var(--primary)}
+.nav-item .icon{width:18px;text-align:center}
+.main{flex:1;margin-left:220px;padding:24px 32px;max-width:1200px}
+.page{display:none}.page.active{display:block}
+h1{font-size:22px;margin-bottom:20px}
+h2{font-size:16px;margin:16px 0 10px}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat-card{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);cursor:pointer;transition:.2s}
+.stat-card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.12)}
+.stat-card .num{font-size:28px;font-weight:700}
+.stat-card .label{font-size:13px;color:var(--text-light);margin-top:4px}
+.card{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);margin-bottom:20px}
+.card h2{margin-top:0}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 12px;font-size:12px;color:var(--text-light);border-bottom:2px solid var(--border);font-weight:600}
+td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:14px}
+tr:hover td{background:var(--primary-light)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot.on{background:var(--success)}.dot.off{background:#ccc}.dot.sus{background:var(--danger)}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:12px;font-weight:600}
+.badge.active{background:#e6f7ee;color:var(--success)}
+.badge.suspended{background:#fff3e0;color:var(--warning)}
+.badge.revoked{background:#fde8e8;color:var(--danger)}
+.badge.orphan{background:#f0f0f0;color:var(--text-light)}
+.btn{padding:6px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:#3a56d4}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-sm{padding:4px 10px;font-size:12px}
+.chip{display:inline-block;padding:2px 10px;border-radius:14px;font-size:12px;background:var(--primary-light);color:var(--primary);margin:2px}
+.mono{font-family:monospace;font-size:13px}
+.muted{color:var(--text-light);font-size:13px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--card);border-radius:var(--radius);padding:24px;width:420px;max-width:90%;box-shadow:0 8px 30px rgba(0,0,0,.2)}
+.modal h3{margin-bottom:16px}
+.modal .btn-group{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--text);color:#fff;padding:12px 20px;border-radius:var(--radius);font-size:14px;z-index:200;display:none}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;font-weight:600;margin-bottom:6px}
+.form-group input,.form-group select{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px}
+.audit-event{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600}
+.audit-event.red{background:#fde8e8;color:var(--danger)}
+.audit-event.orange{background:#fff3e0;color:var(--warning)}
+.audit-event.blue{background:var(--primary-light);color:var(--primary)}
+.section-title{font-size:14px;font-weight:600;color:var(--text-light);text-transform:uppercase;letter-spacing:.5px;margin:20px 0 10px}
+</style>
+</head>
+<body>
+<nav class="sidebar">
+<div class="logo">🐉 群龙<span>Console</span></div>
+<div class="nav">
+<div class="nav-item active" data-page="overview"><span class="icon">📊</span> 团队概览</div>
+<div class="nav-item" data-page="nodes"><span class="icon">🖥</span> 节点管理</div>
+<div class="nav-item" data-page="tokens"><span class="icon">🎫</span> Enroll Token</div>
+<div class="nav-item" data-page="grants"><span class="icon">🔗</span> 跨队授权</div>
+<div class="nav-item" data-page="audit"><span class="icon">📋</span> 审计事件</div>
+<div class="nav-item" data-page="settings"><span class="icon">⚙</span> 团队设置</div>
+</div>
+<div style="padding:20px;border-top:1px solid rgba(255,255,255,.1)">
+<div style="font-size:12px;color:var(--sidebar-text)">登录用户</div>
+<div style="font-size:14px;color:#fff;margin-top:4px">owner@qlong.io</div>
+</div>
+</nav>
+<main class="main">
+<div id="page-overview" class="page active">
+<h1>团队概览</h1>
+<div class="stat-grid">
+<div class="stat-card" onclick="nav('nodes')"><div class="num">5</div><div class="label">总节点</div></div>
+<div class="stat-card" onclick="nav('nodes')"><div class="num" style="color:var(--success)">3</div><div class="label">在线</div></div>
+<div class="stat-card" onclick="nav('audit')"><div class="num">47</div><div class="label">近24h审计事件</div></div>
+<div class="stat-card"><div class="num">2</div><div class="label">活跃任务</div></div>
+</div>
+<div class="card"><h2>节点状态</h2><table><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>版本</th><th>最近活跃</th></tr></thead><tbody>
+<tr><td><span class="dot on"></span>在线</td><td>dev-machine</td><td>windows</td><td>0.1.0</td><td>刚刚</td></tr>
+<tr><td><span class="dot on"></span>在线</td><td>build-server</td><td>linux</td><td>0.1.0</td><td>2 分钟前</td></tr>
+<tr><td><span class="dot on"></span>在线</td><td>gpu-node</td><td>linux</td><td>0.1.0</td><td>5 分钟前</td></tr>
+<tr><td><span class="dot off"></span>offline</td><td>macbook-pro</td><td>darwin</td><td>0.1.0</td><td>2 小时前</td></tr>
+<tr><td><span class="dot sus"></span>suspended</td><td>old-laptop</td><td>linux</td><td>0.1.0</td><td>3 天前</td></tr>
+</tbody></table></div>
+<div class="card"><h2>最近审计事件</h2><table><thead><tr><th>时间</th><th>事件</th><th>原因</th></tr></thead><tbody>
+<tr><td>21:18:32</td><td><span class="audit-event blue">stale_attempt_rejected</span></td><td>inbound attempt 1 &lt; current 2</td></tr>
+<tr><td>21:17:15</td><td><span class="audit-event orange">reclaim</span></td><td>lease lost</td></tr>
+<tr><td>21:15:03</td><td><span class="audit-event red">sig_verify_failed</span></td><td>验签失败</td></tr>
+</tbody></table></div>
+</div>
+<div id="page-nodes" class="page">
+<h1>节点管理</h1>
+<div style="margin-bottom:16px;display:flex;gap:10px"><input placeholder="搜索别名或 ID..." style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;width:260px"><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>全部状态</option><option>在线</option><option>离线</option><option>suspended</option></select></div>
+<div class="card"><table><thead><tr><th>状态</th><th>别名</th><th>平台</th><th>版本</th><th>key_epoch</th><th>最近活跃</th><th>操作</th></tr></thead><tbody>
+<tr><td><span class="dot on"></span>在线</td><td>dev-machine</td><td>windows</td><td>0.1.0</td><td>1</td><td>刚刚</td><td><button class="btn btn-sm btn-outline" onclick="showModal('确认暂停 dev-machine?')">暂停</button> <button class="btn btn-sm btn-danger" onclick="showModal('确认永久吊销 dev-machine? 此操作不可逆。')">吊销</button></td></tr>
+<tr><td><span class="dot on"></span>在线</td><td>build-server</td><td>linux</td><td>0.1.0</td><td>2</td><td>2 分钟前</td><td><button class="btn btn-sm btn-outline" onclick="showModal('确认暂停 build-server?')">暂停</button> <button class="btn btn-sm btn-danger" onclick="showModal('确认永久吊销 build-server?')">吊销</button></td></tr>
+<tr><td><span class="dot off"></span>离线</td><td>macbook-pro</td><td>darwin</td><td>0.1.0</td><td>1</td><td>2 小时前</td><td><button class="btn btn-sm btn-outline">暂停</button> <button class="btn btn-sm btn-danger">吊销</button></td></tr>
+<tr><td><span class="dot sus"></span>suspended</td><td>old-laptop</td><td>linux</td><td>0.1.0</td><td>1</td><td>3 天前</td><td><button class="btn btn-sm btn-primary">恢复</button> <button class="btn btn-sm btn-danger">吊销</button></td></tr>
+</tbody></table></div>
+</div>
+<div id="page-tokens" class="page">
+<h1>Enrollment Token 管理</h1>
+<div class="card"><h2>签发新 Token</h2><div style="display:flex;gap:12px;align-items:flex-end"><div class="form-group" style="flex:1"><label>TTL</label><select><option>30 分钟(默认)</option><option>1 小时</option><option>24 小时</option></select></div><button class="btn btn-primary" onclick="showModal('签发新 Token? 明文只显示一次。')" style="margin-bottom:16px">签发</button></div></div>
+<div class="card"><h2>活跃 Token</h2><table><thead><tr><th>Token</th><th>创建时间</th><th>过期倒计时</th><th>操作</th></tr></thead><tbody>
+<tr><td class="mono">a7f3...9e2b</td><td>2026-09-06 21:00</td><td style="color:var(--danger);font-weight:600">12:34</td><td><button class="btn btn-sm btn-outline">复制</button> <button class="btn btn-sm btn-danger">作废</button></td></tr>
+<tr><td class="mono">c2d8...7f1a</td><td>2026-09-06 20:30</td><td style="color:var(--text-light)">已过期</td><td>—</td></tr>
+</tbody></table></div>
+<div class="card"><h2>已消费 Token</h2><table><thead><tr><th>Token</th><th>消费时间</th><th>使用节点</th></tr></thead><tbody>
+<tr><td class="mono">e5a1...3c8d</td><td>2026-09-06 20:15</td><td>dev-machine</td></tr>
+<tr><td class="mono">f7b2...1a4e</td><td>2026-09-06 19:00</td><td>build-server</td></tr>
+</tbody></table></div>
+</div>
+<div id="page-grants" class="page">
+<h1>跨队授权</h1>
+<div class="card"><h2>创建 Grant</h2><div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap"><div class="form-group"><label>目标 Team</label><select style="padding:8px;border:1px solid var(--border);border-radius:6px;width:200px"><option>选择 team...</option><option>team-y (research)</option></select></div><div class="form-group"><label>TTL</label><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>永久</option><option>7 天</option><option>24 小时</option></select></div><button class="btn btn-primary" style="margin-bottom:16px">创建</button></div></div>
+<div class="card"><table><thead><tr><th>方向</th><th>目标 Team</th><th>caps_visible</th><th>过期时间</th><th>操作</th></tr></thead><tbody>
+<tr><td>X → Y</td><td>team-y (research)</td><td><span class="chip">tool:node@20</span><span class="chip">env:linux</span></td><td>2026-09-13</td><td><button class="btn btn-sm btn-danger">撤销</button></td></tr>
+</tbody></table></div>
+</div>
+<div id="page-audit" class="page">
+<h1>审计事件</h1>
+<div style="margin-bottom:16px;display:flex;gap:10px;flex-wrap:wrap"><select style="padding:8px;border:1px solid var(--border);border-radius:6px"><option>全部事件</option><option>sig_verify_failed</option><option>reclaim</option><option>escalate</option><option>stale_attempt_rejected</option></select><input type="date" style="padding:8px;border:1px solid var(--border);border-radius:6px"></div>
+<div class="card"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>原因</th><th>头摘要</th></tr></thead><tbody>
+<tr><td>2026-09-06 21:18:32</td><td><span class="audit-event blue">stale_attempt_rejected</span></td><td class="mono">2c0f...37fa</td><td>inbound attempt 1 &lt; current 2</td><td class="mono">a3f0e2...b7c1</td></tr>
+<tr><td>2026-09-06 21:17:15</td><td><span class="audit-event orange">reclaim</span></td><td class="mono">2c0f...37fa</td><td>lease lost</td><td class="mono">d4e5f6...a8b9</td></tr>
+<tr><td>2026-09-06 21:15:03</td><td><span class="audit-event red">sig_verify_failed</span></td><td class="mono">8a1b...2c3d</td><td>验签失败</td><td class="mono">e7f8a9...b0c1</td></tr>
+<tr><td>2026-09-06 21:10:00</td><td><span class="audit-event blue">dedup_mismatch</span></td><td class="mono">2c0f...37fa</td><td>同键异体</td><td class="mono">f1a2b3...c4d5</td></tr>
+<tr><td>2026-09-06 21:05:44</td><td><span class="audit-event red">escalate</span></td><td class="mono">2c0f...37fa</td><td>预算耗尽(3/3)</td><td class="mono">a1b2c3...d4e5</td></tr>
+</tbody></table></div>
+</div>
+<div id="page-settings" class="page">
+<h1>团队设置</h1>
+<div class="card"><h2>基本信息</h2><div class="form-group"><label>Team ID</label><input value="33333333-3333-4333-8333-333333333333" readonly class="mono" style="background:var(--bg)"></div><div class="form-group"><label>团队名称</label><input value="研发团队"></div><div class="form-group"><label>Owner</label><input value="u1 (owner@qlong.io)" readonly style="background:var(--bg)"></div><button class="btn btn-primary">保存</button></div>
+<div class="card" style="border:1px solid var(--danger)"><h2 style="color:var(--danger)">Danger Zone</h2><p class="muted">以下操作不可逆,请谨慎操作。</p><br><button class="btn btn-danger">删除团队</button></div>
+</div>
+</main>
+<div class="modal-overlay" id="modal"><div class="modal"><h3 id="modal-text"></h3><div class="btn-group"><button class="btn btn-outline" onclick="hideModal()">取消</button><button class="btn btn-danger" onclick="hideModal();showToast('已执行')">确认</button></div></div></div>
+<div class="toast" id="toast"></div>
+<script>
+function nav(page){document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page));document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id==='page-'+page))}
+function showModal(text){document.getElementById('modal-text').textContent=text;document.getElementById('modal').classList.add('show')}
+function hideModal(){document.getElementById('modal').classList.remove('show')}
+function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',3000)}
+document.querySelectorAll('.nav-item').forEach(n=>n.addEventListener('click',()=>nav(n.dataset.page)));
+document.getElementById('modal').addEventListener('click',e=>{if(e.target===e.currentTarget)hideModal()});
+</script>
+</body>
+</html>
