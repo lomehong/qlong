@@ -317,38 +317,122 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 </div>
 <div class="toast" id="toast"></div>
 
-<script>
-var NODES=[
-{id:"a4763d9c",name:"dev-machine",status:"active",online:true,platform:"windows",version:"0.1.0",epoch:1,capsRev:3,caps:["tool:node@20","env:windows"],lastSeen:"刚刚",joined:"2026-08-01",pubkey:"a3f0e2b7c1d8e9f4",queue:0,running:0,accepting:true},
-{id:"2c0fb067",name:"build-server",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:2,capsRev:5,caps:["tool:node@20","env:linux","net:office-vpn"],lastSeen:"2 分钟前",joined:"2026-08-15",pubkey:"b4c5d6e7f8a9b0c1",queue:1,running:1,accepting:true},
-{id:"8a1b2c3d",name:"gpu-node",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:1,capsRev:2,caps:["hw:gpu-cuda","env:linux"],lastSeen:"5 分钟前",joined:"2026-09-01",pubkey:"c5d6e7f8a9b0c1d2",queue:0,running:0,accepting:true},
-{id:"9f8e7d6c",name:"macbook-pro",status:"active",online:false,platform:"darwin",version:"0.1.0",epoch:1,capsRev:1,caps:["env:darwin"],lastSeen:"2 小时前",joined:"2026-08-20",pubkey:"d6e7f8a9b0c1d2e3",queue:0,running:0,accepting:true},
-{id:"0a1b2c3d",name:"old-laptop",status:"suspended",online:false,platform:"linux",version:"0.1.0",epoch:1,capsRev:1,caps:[],lastSeen:"3 天前",joined:"2026-07-01",pubkey:"e7f8a9b0c1d2e3f4",queue:0,running:0,accepting:false}
-];
-var AUDITS=[
-{ts:"2026-09-06 21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
-{ts:"2026-09-06 21:17:15",event:"reclaim",cls:"ev-org",node:"2c0f...37fa",reason:"lease lost",trace:"7b0e...",task:"d41a..."},
-{ts:"2026-09-06 21:15:03",event:"sig_verify_failed",cls:"ev-red",node:"8a1b...2c3d",reason:"验签失败",trace:"",task:""},
-{ts:"2026-09-06 21:12:40",event:"dedup_mismatch",cls:"ev-blu",node:"2c0f...37fa",reason:"同键异体",trace:"",task:""},
-{ts:"2026-09-06 21:05:44",event:"escalate",cls:"ev-red",node:"2c0f...37fa",reason:"预算耗尽(3/3)",trace:"7b0e...",task:"d41a..."},
-{ts:"2026-09-06 20:58:22",event:"cap_tag_removed",cls:"ev-org",node:"8a1b...2c3d",reason:"确定性检查失败",trace:"",task:""}
-];
-var currentTeam='';
-var currentTeamName='';
-function doLogin(){document.getElementById("pg-login").style.display="none";document.getElementById("pg-app").style.display="block";showPage("pg-teams");initSidebar()}
-function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.classList.toggle("on",p.id===id)});document.querySelectorAll(".nav a").forEach(function(a){a.classList.toggle("on",a.dataset.p===id)});if(id==="pg-teams"){initSidebar()}}
-function initSidebar(){document.getElementById("nav-team-list").style.display="block";document.getElementById("nav-team-ctx").style.display="none";document.getElementById("back-to-teams").style.display="none"}
-function selectTeam(id){currentTeam=id;currentTeamName=id==="team-x"?"研发团队":"研究团队";document.getElementById("nav-team-list").style.display="none";document.getElementById("nav-team-ctx").style.display="block";document.getElementById("nav-team-name").textContent=currentTeamName;document.getElementById("back-to-teams").style.display="block";document.getElementById("back-to-teams").onclick=function(){showPage("pg-teams");initSidebar()};showPage("pg-t-overview");renderNodes();renderAudit();/* breadcrumb links rendered inline */
-function nav(p){showPage(p)}
-function filterNodes(v){renderNodes(v)}
-function showModal(t,b){document.getElementById("modal-title").textContent=t;document.getElementById("modal-body").textContent=b||"";document.getElementById("modal").classList.add("show")}
-function hideModal(){document.getElementById("modal").classList.remove("show")}
-function showToast(msg){var t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");setTimeout(function(){t.classList.remove("show")},3000)}
-function statusDot(n){if(n.status==="suspended")return'<span class="dot o"></span><span class="bdg o">suspended</span>';if(n.online)return'<span class="dot g"></span><span class="bdg g">在线</span>';return'<span class="dot gr"></span><span class="bdg gr">离线</span>'}
-function renderNodes(filter){var tbody=document.getElementById("nodes-body");tbody.innerHTML="";NODES.forEach(function(n,i){if(filter&&n.name.indexOf(filter)<0&&n.id.indexOf(filter)<0)return;var tr=document.createElement("tr");tr.innerHTML=statusDot(n)+"<td><strong>"+n.name+"</strong></td><td class='mono'>"+n.id+"</td><td>"+n.platform+"</td><td>"+n.epoch+"</td><td>"+n.capsRev+"</td><td>"+n.lastSeen+"</td><td style='text-align:right'><button class='btn btn-s btn-o' onclick='event.stopPropagation();showModal(\"确认暂停 "+n.name+"?\",\"暂停后该节点将无法收发消息。\")'>暂停</button> <button class='btn btn-s btn-d' onclick='event.stopPropagation();showModal(\"确认永久吊销 "+n.name+"?\",\"此操作不可逆。\")'>吊销</button></td>";tr.style.cursor="pointer";tr.onclick=function(){showDetail(i)};tbody.appendChild(tr)})}
-function showDetail(i){var n=NODES[i];showPage("pg-node-detail");document.getElementById("nd-name").textContent=n.name;document.getElementById("nd-id").textContent="node_id: "+n.id;document.getElementById("nd-full-id").textContent=n.id;document.getElementById("nd-team").textContent="team-x";document.getElementById("nd-platform").textContent=n.platform;document.getElementById("nd-version").textContent=n.version;document.getElementById("nd-status").innerHTML=statusDot(n);document.getElementById("nd-joined").textContent=n.joined;document.getElementById("nd-lastseen").textContent=n.lastSeen;document.getElementById("nd-epoch").textContent=n.epoch;document.getElementById("nd-pubkey").textContent=n.pubkey.slice(0,16)+"...";document.getElementById("nd-history").textContent="1, 2";document.getElementById("nd-capsrev").textContent=n.capsRev;document.getElementById("nd-caps").innerHTML=n.caps.map(function(c){return '<span class="chip">'+c+"</span>"}).join("")||'<span class="mut">无</span>';document.getElementById("nd-queue").textContent=n.queue;document.getElementById("nd-running").textContent=n.running;document.getElementById("nd-accepting").textContent=n.accepting?"✓ 是":"✗ 否";var ah=AUDITS.slice(0,5).map(function(a){return '<div class="tl-item"><span class="ev '+a.cls+'">'+a.event+"</span> <span class='mut sm'>"+a.ts+"</span><br><span class='sm'>"+a.reason+"</span></div>"}).join("");document.getElementById("nd-audit").innerHTML=ah}
-function issueToken(){var tok="qlt_"+Math.random().toString(36).slice(2)+"_"+Math.random().toString(36).slice(2);document.getElementById("new-token-area").style.display="block";document.getElementById("new-token-val").textContent=tok;showToast("Token 已签发,TTL 见上方选择")}
-function renderAudit(){var tbody=document.getElementById("audit-body");tbody.innerHTML=AUDITS.map(function(a){return "<tr><td class='mono'>"+a.ts+'</td><td><span class="ev '+a.cls+'">'+a.event+"</span></td><td class='mono'>"+a.node+"</td><td>"+a.reason+'</td><td class="mono">'+(a.trace||"—")+'</td><td class="mono">'+(a.task||"—")+"</td></tr>"}).join("")}
 
-}</script>
-</body></html>
+
+<!-- ===== 硬编码导航兜底 ===== -->
+<script>
+// === 页面切换 ===
+function _pg(id) {
+  var pages = ["pg-login","pg-app","pg-teams","pg-t-overview","pg-t-nodes","pg-node-detail","pg-t-tokens","pg-t-grants","pg-t-audit","pg-t-settings"];
+  for (var i = 0; i < pages.length; i++) {
+    var el = document.getElementById(pages[i]);
+    if (el) el.style.display = (pages[i] === id) ? "block" : "none";
+  }
+  if (id === "pg-login") {
+    var lg = document.getElementById("pg-login");
+    if (lg) lg.style.display = "flex";
+  }
+}
+function _side(mode) {
+  var list = document.getElementById("nav-team-list");
+  var ctx = document.getElementById("nav-team-ctx");
+  var back = document.getElementById("back-to-teams");
+  if (!list || !ctx || !back) return;
+  list.style.display = mode === "list" ? "block" : "none";
+  ctx.style.display = mode === "ctx" ? "block" : "none";
+  back.style.display = mode === "ctx" ? "block" : "none";
+}
+// === 登录 ===
+var loginBtn = document.querySelector(".login-box button");
+if (loginBtn) loginBtn.onclick = function() {
+  _pg("pg-app");
+  _side("list");
+  _pg("pg-teams");
+};
+// === 团队卡片 ===
+var cards = document.querySelectorAll(".tcard");
+for (var i = 0; i < cards.length; i++) {
+  (function(card) {
+    card.onclick = function() {
+      _side("ctx");
+      _pg("pg-t-overview");
+      // 设置面包屑
+      var name = card.querySelector(".name");
+      var bcs = document.querySelectorAll(".breadcrumb");
+      for (var j = 0; j < bcs.length; j++) {
+        var links = bcs[j].querySelectorAll("a");
+        for (var k = 0; k < links.length; k++) {
+          links[k].textContent = currentTeamName || "我的团队";
+        }
+      }
+    };
+  })(cards[i]);
+}
+// === 侧边栏子导航 ===
+var subNav = { "概览": "pg-t-overview", "节点管理": "pg-t-nodes", "Token 管理": "pg-t-tokens", "跨队授权": "pg-t-grants", "审计事件": "pg-t-audit", "团队设置": "pg-t-settings" };
+var subLinks = document.querySelectorAll("#nav-team-ctx a");
+for (var i = 0; i < subLinks.length; i++) {
+  (function(a) {
+    a.onclick = function(e) {
+      e.preventDefault();
+      var txt = a.textContent.trim();
+      if (subNav[txt]) _pg(subNav[txt]);
+    };
+  })(subLinks[i]);
+}
+// === 返回团队列表 ===
+var backBtn = document.getElementById("back-to-teams");
+if (backBtn) backBtn.onclick = function() { _side("list"); _pg("pg-teams"); };
+// === 节点表渲染 ===
+var NODES = [
+  {id:"a4763d9c",name:"dev-machine",st:"active",on:true,plat:"windows",ep:1,cr:3,caps:["tool:node@20","env:windows"],ls:"刚刚"},
+  {id:"2c0fb067",name:"build-server",st:"active",on:true,plat:"linux",ep:2,cr:5,caps:["tool:node@20","env:linux","net:office-vpn"],ls:"2 分钟前"},
+  {id:"8a1b2c3d",name:"gpu-node",st:"active",on:true,plat:"linux",ep:1,cr:2,caps:["hw:gpu-cuda","env:linux"],ls:"5 分钟前"},
+  {id:"9f8e7d6c",name:"macbook-pro",st:"active",on:false,plat:"darwin",ep:1,cr:1,caps:["env:darwin"],ls:"2 小时前"},
+  {id:"0a1b2c3d",name:"old-laptop",st:"suspended",on:false,plat:"linux",ep:1,cr:1,caps:[],ls:"3 天前"}
+];
+var tbody = document.getElementById("nodes-body");
+if (tbody) {
+  for (var i = 0; i < NODES.length; i++) {
+    var n = NODES[i];
+    var dotCls = n.st === "suspended" ? "dot o" : (n.on ? "dot g" : "dot gr");
+    var stTxt = n.st === "suspended" ? "suspended" : (n.on ? "在线" : "离线");
+    var capsHtml = "";
+    for (var j = 0; j < n.caps.length; j++) capsHtml += '<span class="chip">' + n.caps[j] + "</span>";
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td><span class="' + dotCls + '"></span>' + stTxt + "</td><td><strong>" + n.name + "</strong></td><td class='mono'>" + n.id + "</td><td>" + n.plat + "</td><td>" + n.ep + "</td><td>" + n.cr + "</td><td>" + n.ls + "</td>";
+    tr.style.cursor = "pointer";
+    tr.onclick = function() { _pg("pg-node-detail"); };
+    tbody.appendChild(tr);
+  }
+}
+// === 审计表渲染 ===
+var AUDITS = [
+  {ts:"21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
+  {ts:"21:17:15",event:"reclaim",cls:"ev-org",node:"2c0f...37fa",reason:"lease lost",trace:"7b0e...",task:"d41a..."},
+  {ts:"21:15:03",event:"sig_verify_failed",cls:"ev-red",node:"8a1b...2c3d",reason:"验签失败",trace:"",task:""},
+  {ts:"21:12:40",event:"dedup_mismatch",cls:"ev-blu",node:"2c0f...37fa",reason:"同键异体",trace:"",task:""},
+  {ts:"21:05:44",event:"escalate",cls:"ev-red",node:"2c0f...37fa",reason:"预算耗尽(3/3)",trace:"7b0e...",task:"d41a..."}
+];
+var auditBody = document.getElementById("audit-body");
+if (auditBody) {
+  for (var i = 0; i < AUDITS.length; i++) {
+    var a = AUDITS[i];
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td class='mono'>" + a.ts + '</td><td><span class="ev ' + a.cls + '">' + a.event + "</span></td><td class='mono'>" + a.node + "</td><td>" + a.reason + '</td><td class="mono">' + a.trace + '</td><td class="mono">' + a.task + "</td>";
+    auditBody.appendChild(tr);
+  }
+}
+// === Token 签发 ===
+var issueBtn = document.querySelector("#pg-t-tokens .btn-p");
+if (issueBtn) issueBtn.onclick = function() {
+  var area = document.getElementById("new-token-area");
+  var val = document.getElementById("new-token-val");
+  if (area && val) {
+    area.style.display = "block";
+    val.textContent = "qlt_" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    showToast("Token 已签发");
+  }
+};
+</script>
+`n</body></html>
