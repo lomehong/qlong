@@ -166,7 +166,7 @@ h2{font-size:15px;font-weight:600;margin:0 0 12px}
 <div class="meta"><span>🖥 2 节点</span><span style="color:var(--green)">● 1 在线</span></div>
 <div class="meta" style="margin-top:6px"><span class="mono">34444444-...</span></div>
 </div>
-<div class="tcard" style="opacity:.5;cursor:default">
+<div class="tcard" onclick="enterTeam(''研发团队'',''team-x'')" style="opacity:.5;cursor:default">
 <div class="name">个人设备</div>
 <div style="display:flex;gap:6px;margin:4px 0"><span class="bdg gr">self-owned</span></div>
 <div class="meta"><span>🖥 1 节点</span><span>offline</span></div>
@@ -344,6 +344,138 @@ function showPage(id) {
   if (ctxNav) ctxNav.style.display = isTeamCtx ? "block" : "none";
   if (backBtn) backBtn.style.display = isTeamCtx ? "block" : "none";
 }
+
+function doLogin() {
+  document.getElementById("pg-login").style.display = "none";
+  document.getElementById("pg-app").style.display = "block";
+  showPage("pg-teams");
+}
+
+function selectTeam(name, id) {
+  document.getElementById("pg-app").style.display = "block";
+  document.getElementById("pg-login").style.display = "none";
+  var list = document.getElementById("nav-team-list");
+  var ctx = document.getElementById("nav-team-ctx");
+  var back = document.getElementById("back-to-teams");
+  if (list) list.style.display = "none";
+  if (ctx) ctx.style.display = "block";
+  if (back) back.style.display = "block";
+  var nameEl = document.getElementById("nav-team-name");
+  if (nameEl) nameEl.textContent = name;
+  showPage("pg-t-overview");
+}
+
+function initSidebar() {
+  var list = document.getElementById("nav-team-list");
+  var ctx = document.getElementById("nav-team-ctx");
+  var back = document.getElementById("back-to-teams");
+  if (list) list.style.display = "block";
+  if (ctx) ctx.style.display = "none";
+  if (back) back.style.display = "none";
+}
+
+function nav(p) { showPage(p); }
+
+function showModal(title, body) {
+  var m = document.getElementById("modal-title");
+  var mb = document.getElementById("modal-body");
+  var ov = document.getElementById("modal");
+  if (m) m.textContent = title;
+  if (mb) mb.textContent = body || "";
+  if (ov) ov.classList.add("show");
+}
+
+function hideModal() {
+  var ov = document.getElementById("modal");
+  if (ov) ov.classList.remove("show");
+}
+
+function showToast(msg) {
+  var t = document.getElementById("toast");
+  if (t) { t.textContent = msg; t.classList.add("show"); setTimeout(function(){ t.classList.remove("show"); }, 3000); }
+}
+
+var NODES = [
+  {id:"a4763d9c",name:"dev-machine",status:"active",online:true,platform:"windows",version:"0.1.0",epoch:1,capsRev:3,caps:["tool:node@20","env:windows"],lastSeen:"刚刚",joined:"2026-08-01",pubkey:"a3f0e2b7c1d8e9f4",queue:0,running:0,accepting:true},
+  {id:"2c0fb067",name:"build-server",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:2,capsRev:5,caps:["tool:node@20","env:linux","net:office-vpn"],lastSeen:"2 分钟前",joined:"2026-08-15",pubkey:"b4c5d6e7f8a9b0c1",queue:1,running:1,accepting:true},
+  {id:"8a1b2c3d",name:"gpu-node",status:"active",online:true,platform:"linux",version:"0.1.0",epoch:1,capsRev:2,caps:["hw:gpu-cuda","env:linux"],lastSeen:"5 分钟前",joined:"2026-09-01",pubkey:"c5d6e7f8a9b0c1d2",queue:0,running:0,accepting:true},
+  {id:"9f8e7d6c",name:"macbook-pro",status:"active",online:false,platform:"darwin",version:"0.1.0",epoch:1,capsRev:1,caps:["env:darwin"],lastSeen:"2 小时前",joined:"2026-08-20",pubkey:"d6e7f8a9b0c1d2e3",queue:0,running:0,accepting:true},
+  {id:"0a1b2c3d",name:"old-laptop",status:"suspended",online:false,platform:"linux",version:"0.1.0",epoch:1,capsRev:1,caps:[],lastSeen:"3 天前",joined:"2026-07-01",pubkey:"e7f8a9b0c1d2e3f4",queue:0,running:0,accepting:false}
+];
+
+var AUDITS = [
+  {ts:"2026-09-06 21:18:32",event:"stale_attempt_rejected",cls:"ev-blu",node:"2c0f...37fa",reason:"inbound attempt 1 < current 2",trace:"7b0e...",task:"d41a..."},
+  {ts:"2026-09-06 21:17:15",event:"reclaim",cls:"ev-org",node:"2c0f...37fa",reason:"lease lost",trace:"7b0e...",task:"d41a..."},
+  {ts:"2026-09-06 21:15:03",event:"sig_verify_failed",cls:"ev-red",node:"8a1b...2c3d",reason:"验签失败",trace:"",task:""},
+  {ts:"2026-09-06 21:12:40",event:"dedup_mismatch",cls:"ev-blu",node:"2c0f...37fa",reason:"同键异体",trace:"",task:""},
+  {ts:"2026-09-06 21:05:44",event:"escalate",cls:"ev-red",node:"2c0f...37fa",reason:"预算耗尽(3/3)",trace:"7b0e...",task:"d41a..."},
+  {ts:"2026-09-06 20:58:22",event:"cap_tag_removed",cls:"ev-org",node:"8a1b...2c3d",reason:"确定性检查失败",trace:"",task:""}
+];
+
+function statusDot(n) {
+  if (n.status === "suspended") return '<span class="dot o"></span><span class="bdg o">suspended</span>';
+  if (n.online) return '<span class="dot g"></span><span class="bdg g">在线</span>';
+  return '<span class="dot gr"></span><span class="bdg gr">离线</span>';
+}
+
+function filterNodes(v) {
+  var tbody = document.getElementById("nodes-body");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  NODES.filter(function(n) { return !v || n.name.indexOf(v) >= 0 || n.id.indexOf(v) >= 0; }).forEach(function(n, i) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = statusDot(n) + "<td><strong>" + n.name + "</strong></td><td class='mono'>" + n.id + "</td><td>" + n.platform + "</td><td>" + n.epoch + "</td><td>" + n.capsRev + "</td><td>" + n.lastSeen + "</td>";
+    tr.style.cursor = "pointer";
+    tr.onclick = function() { showDetail(i); };
+    tbody.appendChild(tr);
+  });
+}
+
+function showDetail(i) {
+  var n = NODES[i];
+  if (!n) return;
+  showPage("pg-node-detail");
+  var set = function(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; };
+  set("nd-name", n.name); set("nd-id", "node_id: " + n.id);
+  set("nd-full-id", n.id); set("nd-team", "team-x");
+  set("nd-platform", n.platform); set("nd-version", n.version);
+  set("nd-epoch", n.epoch); set("nd-joined", n.joined); set("nd-lastseen", n.lastSeen);
+  var sdEl = document.getElementById("nd-status");
+  if (sdEl) sdEl.innerHTML = statusDot(n);
+  set("nd-pubkey", n.pubkey.slice(0, 16) + "...");
+  set("nd-history", "1, 2"); set("nd-capsrev", n.capsRev);
+  set("nd-queue", n.queue); set("nd-running", n.running);
+  set("nd-accepting", n.accepting ? "✓ 是" : "✗ 否");
+  var capsEl = document.getElementById("nd-caps");
+  if (capsEl) capsEl.innerHTML = n.caps.map(function(c) { return '<span class="chip">' + c + "</span>"; }).join("") || '<span class="mut">无</span>';
+  var auditEl = document.getElementById("nd-audit");
+  if (auditEl) auditEl.innerHTML = AUDITS.slice(0, 5).map(function(a) {
+    return '<div class="tl-item"><span class="ev ' + a.cls + '">' + a.event + '</span> <span class="mut sm">' + a.ts + "</span><br><span class='sm'>" + a.reason + "</span></div>";
+  }).join("");
+}
+
+function issueToken() {
+  var tok = "qlt_" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  var area = document.getElementById("new-token-area");
+  var val = document.getElementById("new-token-val");
+  if (area) area.style.display = "block";
+  if (val) val.textContent = tok;
+  showToast("Token 已签发");
+}
+
+function renderAudit() {
+  var tbody = document.getElementById("audit-body");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  AUDITS.forEach(function(a) {
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td class='mono'>" + a.ts + '</td><td><span class="ev ' + a.cls + '">' + a.event + "</span></td><td class='mono'>" + a.node + "</td><td>" + a.reason + '</td><td class="mono">' + (a.trace || "—") + '</td><td class="mono">' + (a.task || "—") + "</td></tr>";
+    tbody.appendChild(tr);
+  });
+}
+
+renderNodes();
+renderAudit();
 // === 登录 ===
 var loginBtn = document.querySelector(".login-box button");
 if (loginBtn) loginBtn.onclick = function() { showPage("pg-teams"); };
