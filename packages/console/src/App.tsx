@@ -18,7 +18,7 @@ const NAV = [
   { key: 'audit', icon: '📜', label: '审计日志' },
   { key: 'settings', icon: '⚙️', label: '系统设置' },
 ] as const;
-type PageKey = (typeof NAV)[number]['key'] | 'agent-detail' | 'team-detail';
+type PageKey = string;
 
 export default function App() {
   const [page, setPage] = useState<PageKey>('dashboard');
