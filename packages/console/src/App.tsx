@@ -22,6 +22,7 @@ type PageKey = string;
 
 export default function App() {
   const [page, setPage] = useState<PageKey>('dashboard');
+  const [teamId, setTeamId] = useState('33333333-3333-4333-8333-333333333333');
   useEffect(() => { document.title = '群龙控制台 - ' + (NAV.find(n => n.key === page)?.label ?? '详情'); }, [page]);
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -46,12 +47,12 @@ export default function App() {
       </nav>
       <main style={{ marginLeft: 230, padding: '28px 36px', flex: 1, maxWidth: 1200 }}>
         {page === 'dashboard' && <Dashboard onNav={setPage} />}
-        {page === 'agents' && <Agents onNav={setPage} />}
+        {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
         {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
         {page === 'tasks' && <Tasks />}
         {page === 'teams' && <Teams onNav={setPage} />}
-        {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} />}
-        {page === 'grants' && <Grants />}
+        {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
+        {page === 'grants' && <Grants teamId={teamId} />}
         {page === 'audit' && <Audit />}
         {page === 'settings' && <Settings />}
       </main>
