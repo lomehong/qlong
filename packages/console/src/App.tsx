@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { useStore } from './store/useStore';
+import { initOwnerToken } from './api/client';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
 import AgentDetail from './pages/AgentDetail';
@@ -24,7 +26,14 @@ type PageKey = string;
 
 export default function App() {
   const [page, setPage] = useState<PageKey>('dashboard');
-  const [teamId, setTeamId] = useState('33333333-3333-4333-8333-333333333333');
+  const [teamId, setTeamId] = useState('');
+  const loadTeams = useStore((s) => s.loadTeams);
+  const teams = useStore((s) => s.teams);
+  useEffect(() => {
+    initOwnerToken();
+    loadTeams().then((ts) => { if (ts.length > 0) setTeamId((cur) => cur || ts[0].team_id); })
+      .catch(() => { /* 未配置 owner 凭证时保持空,页面内提示 */ });
+  }, []);
   useEffect(() => { document.title = '群龙控制台 - ' + (NAV.find(n => n.key === page)?.label ?? '详情'); }, [page]);
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>

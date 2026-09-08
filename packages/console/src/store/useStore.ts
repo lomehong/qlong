@@ -4,6 +4,7 @@ import { api } from '../api/client';
 export interface AgentRecord { node_id: string; name: string; team_id: string; status: string; online: boolean; platform: string; version: string; key_epoch: number; caps_rev: number; last_seen: string; }
 export interface GrantRecord { grant_id: string; from_team: string; to_team: string; caps_visible: string[]; expires_at?: number; }
 export interface AuditRecord { ts: string; event: string; node: string; team: string; reason: string; trace_id?: string; }
+export interface TeamSummary { team_id: string; name: string; owner_user_id: string | null; nodes: number; online: number }
 export interface TeamOverview { team_id: string; nodes: AgentRecord[]; grants: GrantRecord[]; stats: { total: number; online: number }; }
 
 interface Store {
@@ -13,6 +14,8 @@ interface Store {
   agents: AgentRecord[];
   grants: GrantRecord[];
   audits: AuditRecord[];
+  teams: TeamSummary[];
+  loadTeams: () => Promise<TeamSummary[]>;
   fetchOverview: (teamId: string) => Promise<void>;
   fetchGrants: (teamId: string) => Promise<void>;
   suspendAgent: (teamId: string, nodeId: string) => Promise<void>;
@@ -24,6 +27,7 @@ interface Store {
   setError: (e: string | null) => void;
 }
 export const useStore = create<Store>()((set, get) => ({
+  teams: [] as TeamSummary[],
   loading: false, error: null, overview: null, agents: [], grants: [], audits: [],
   setError: (e) => set({ error: e }),
   fetchOverview: async (teamId) => {
@@ -56,6 +60,11 @@ export const useStore = create<Store>()((set, get) => ({
   revokeGrant: async (teamId, gid) => {
     await api.del(`/v1/teams/${teamId}/grants/${gid}`);
     await get().fetchGrants(teamId);
+  },
+  loadTeams: async () => {
+    const r = await api.get<{ teams: TeamSummary[] }>('/v1/teams');
+    set({ teams: r.teams });
+    return r.teams;
   },
   issueToken: async (teamId, ttlMs) => {
     return api.post<{ node_token: string; expires_at: string }>(`/v1/teams/${teamId}/enroll-tokens`, { ttl_ms: ttlMs });

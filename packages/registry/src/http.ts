@@ -267,6 +267,13 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       }
 
       // ---- team 面 ----
+      // ---- owner:团队列表(控制台动态发现,替代硬编码 team_id)----
+      if (seg[1] === 'teams' && seg.length === 2 && method === 'GET') {
+        await assertOwner(opts, req, '*');
+        sendJson(res, 200, { teams: registry.listTeams() });
+        return;
+      }
+
       if (seg[1] === 'teams' && seg.length >= 3) {
         const teamId = seg[2] as string;
 
