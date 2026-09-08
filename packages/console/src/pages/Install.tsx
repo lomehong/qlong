@@ -3,7 +3,7 @@ import { useStore } from '../store/useStore';
 
 /**
  * 节点安装页(纪要 §4 入网体验的页面侧):
- * 生成一次性邀请码 → 按平台给出可复制的安装命令(https://qlong.qianji.io/install 的控制台版)。
+ * 生成一次性邀请码 → 按平台给出可复制的安装命令(https://lomehong-qlong.ms.show/install 的控制台版)。
  */
 export default function Install({ teamId }: { teamId: string }) {
   const issueToken = useStore((s) => s.issueToken);
@@ -13,10 +13,10 @@ export default function Install({ teamId }: { teamId: string }) {
   const [busy, setBusy] = useState(false);
 
   const unixCmd = token
-    ? `curl -fsSL https://qlong.qianji.io/install.sh -o /tmp/qlong-install.sh && echo "${token}" | sh /tmp/qlong-install.sh --enroll-stdin${version !== 'latest' ? ` --version ${version}` : ''}`
+    ? `curl -fsSL https://lomehong-qlong.ms.show/install.sh -o /tmp/qlong-install.sh && echo "${token}" | sh /tmp/qlong-install.sh --enroll-stdin${version !== 'latest' ? ` --version ${version}` : ''}`
     : '# 先生成邀请码';
   const winCmd = token
-    ? `irm https://qlong.qianji.io/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; Install-Qlong -EnrollToken "${token}"${version !== 'latest' ? ` -Version ${version}` : ''}`
+    ? `irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qlong-install.ps1" -EnrollToken "${token}"${version !== 'latest' ? ` -Version ${version}` : ''}`
     : '# 先生成邀请码';
 
   const copy = (text: string): void => {

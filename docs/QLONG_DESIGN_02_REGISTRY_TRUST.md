@@ -2,7 +2,7 @@
 
 > 状态:**v2,已整合评审委员会修订**(行内以「评审 I-xx」标注来源,见 `QUNLONG_DESIGN_REVIEW_REPORT.md`)。
 > 本文承接纪要 §8 第 2 项,并兑现 01 篇留下的接口:信封 `from`/`to` 的钉扎与锚定(01 §9、本文 §7)、公钥目录(01 §3.3)。
-> 账号体系(人如何登录 qlong.qianji.io)属产品侧——其**最小操作面**已列入纪要 §8.7(评审 I-21);分发安装器的平台脚本属纪要 §8.5,本文只定义 enrollment 协议侧。
+> 账号体系(人如何登录 lomehong-qlong.ms.show)属产品侧——其**最小操作面**已列入纪要 §8.7(评审 I-21);分发安装器的平台脚本属纪要 §8.5,本文只定义 enrollment 协议侧。
 
 ## 1. 范围
 
@@ -50,10 +50,10 @@ token 是**通行证**(可随时吊销重发),密钥是**身份**(不可抵赖�
 ### 4.1 常规路径(登录状态,/install 即入队)
 
 ```
-浏览器打开 qlong.qianji.io/install
+浏览器打开 lomehong-qlong.ms.show/install
   → 用户(可选)登录 → 页面生成一次性 enrollment token(绑定其 team,TTL 见 §4.3)
   → 安装命令携带该 token(经 stdin/env 传递,不进命令行,评审 I-16②):
-      Unix:   curl -fsSL https://qlong.qianji.io/install.sh | sh -s -- --enroll-stdin
+      Unix:   curl -fsSL https://lomehong-qlong.ms.show/install.sh | sh -s -- --enroll-stdin
       Windows:[PowerShell 等效形态占位——平台矩阵见纪要 §8.5,评审 I-22③]
   → 群龙安装完成,本地生成 Ed25519 密钥对
   → POST /v1/enroll(请求体:enrollment token + pubkey + platform + qlong_version,评审 I-60)

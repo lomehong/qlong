@@ -8,7 +8,7 @@ param(
   [switch]$Uninstall
 )
 if (-not $Version) { $Version = 'latest' }
-if (-not $DistBase) { $DistBase = 'https://qlong.qianji.io' }
+if (-not $DistBase) { $DistBase = 'https://lomehong-qlong.ms.show' }
 
 $ErrorActionPreference = 'Stop'
 
