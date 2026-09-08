@@ -1,5 +1,9 @@
-// 部署态默认同源(控制台与 API 由同一服务承载);本地开发经 VITE_QLONG_API 指向后端
-const BASE = (import.meta.env.VITE_QLONG_API as string | undefined) ?? '';
+// 部署态默认同源(控制台与 API 由同一服务承载);本地开发经 VITE_QLONG_API 指向后端。
+// 注意:本仓库用裸 esbuild 打包,不注入 import.meta.env(vite 专属)——必须可选链兜底,
+// 否则 bundle 初始化即 TypeError(本次创空间白屏的最终根因)。
+const envObj: Record<string, string | undefined> =
+  (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
+const BASE = envObj.VITE_QLONG_API ?? '';
 let csrfToken = '';
 export function setCsrf(t: string) { csrfToken = t; }
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
