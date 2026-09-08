@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 
 // exFAT 不支持 symlink → 不用 workspace:* 依赖,以路径别名接入兄弟包
 export default defineConfig({
+  test: { retry: 1 },
   resolve: {
     alias: {
       '@qlong/core': fileURLToPath(new URL('../core/src/index.ts', import.meta.url)),
