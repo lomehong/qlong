@@ -5,7 +5,6 @@
  * 安装脚本经 /releases/<版本>/<文件> 下载,默认 latest。
  * 用法: node scripts/package.mjs
  */
-import { execSync } from 'node:child_process';
 import { mkdirSync, copyFileSync, writeFileSync, readFileSync, readdirSync, statSync, chmodSync, rmSync, cpSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,17 +20,29 @@ async function writeRelease(dir) {
   mkdirSync(dir, { recursive: true });
   const rel = (p) => join(dir, p);
 
-  console.log('  >>> 构建 CLI bundle...');
-  // createRequire banner:ESM bundle 内 CJS 依赖(如 ws)的动态 require 需要它,
-  // 否则 server/run 路径(加载网关 ws)一启动即崩(现场冒烟发现的真 bug)
-  const banner = "import { createRequire } from 'module'; const require = createRequire(import.meta.url);";
-  execSync(`node ../../node_modules/esbuild/bin/esbuild src/main.ts --bundle --outfile=${JSON.stringify(rel('qlong-cli.mjs'))} --format=esm --platform=node --banner:js=${JSON.stringify(banner)} --alias:@qlong/core=../core/src/index.ts`, {
-    cwd: join(ROOT, 'packages/cli'), stdio: 'inherit',
+  // esbuild 走 JS API:postinstall 批准后 bin/esbuild 会被替换为原生二进制,
+  // `node bin/esbuild` 会炸(SyntaxError: ELF);JS API 与平台二进制解耦
+  console.log('  >>> 构建 CLI bundle(esbuild API)...');
+  const { build } = await import('esbuild');
+  const bannerJs = "import { createRequire } from 'module'; const require = createRequire(import.meta.url);";
+  await build({
+    entryPoints: [join(ROOT, 'packages/cli/src/main.ts')],
+    outfile: rel('qlong-cli.mjs'),
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    banner: { js: bannerJs },
+    alias: { '@qlong/core': join(ROOT, 'packages/core/src/index.ts') },
   });
 
-  console.log('  >>> 构建 Console bundle...');
-  execSync(`node ../../node_modules/esbuild/bin/esbuild src/main.tsx --bundle --outfile=${JSON.stringify(rel('console-bundle.js'))} --format=esm --jsx=automatic --loader:.css=empty`, {
-    cwd: join(ROOT, 'packages/console'), stdio: 'inherit',
+  console.log('  >>> 构建 Console bundle(esbuild API)...');
+  await build({
+    entryPoints: [join(ROOT, 'packages/console/src/main.tsx')],
+    outfile: rel('console-bundle.js'),
+    bundle: true,
+    format: 'esm',
+    jsx: 'automatic',
+    loader: { '.css': 'empty' },
   });
   copyFileSync(join(ROOT, 'packages/console/index.html'), rel('console.html'));
   {
