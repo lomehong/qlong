@@ -1,6 +1,8 @@
 packages:
   - "packages/*"
-allowBuilds:
-  esbuild: set this to true or false
 nodeLinker: hoisted
 verifyDepsBeforeRun: false
+# pnpm 10+ 构建脚本白名单:esbuild 的 postinstall 被批准执行
+# (CI 非交互环境下未批准的构建脚本会以 ERR_PNPM_IGNORED_BUILDS 硬失败)
+onlyBuiltDependencies:
+  - esbuild
