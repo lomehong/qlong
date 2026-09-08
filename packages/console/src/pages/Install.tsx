@@ -16,7 +16,7 @@ export default function Install({ teamId }: { teamId: string }) {
     ? `curl -fsSL https://lomehong-qlong.ms.show/install.sh -o /tmp/qlong-install.sh && echo "${token}" | sh /tmp/qlong-install.sh --enroll-stdin${version !== 'latest' ? ` --version ${version}` : ''}`
     : '# 先生成邀请码';
   const winCmd = token
-    ? `irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qlong-install.ps1" -EnrollToken "${token}"${version !== 'latest' ? ` -Version ${version}` : ''}`
+    ? `irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP/qlong-install.ps1" -EnrollToken "${token}"${version !== 'latest' ? ` -Version ${version}` : ''}`
     : '# 先生成邀请码';
 
   const copy = (text: string): void => {
