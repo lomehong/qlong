@@ -16,15 +16,15 @@ export default function Grants({ teamId }: { teamId: string }) {
       </div>
       <div className="card">
         <h2 className="card-title">创建 Grant</h2>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div><label className="field-label" htmlFor="grant-to">目标 Team ID</label>
-            <input id="grant-to" className="input" value={toTeam} onChange={e => setToTeam(e.target.value)} placeholder="team-uuid" style={{ width: 240 }} /></div>
-          <div><label className="field-label" htmlFor="grant-caps">caps_visible(逗号分隔,空=全部)</label>
-            <input id="grant-caps" className="input" value={caps} onChange={e => setCaps(e.target.value)} placeholder="tool:node@20,env:linux" style={{ width: 300 }} /></div>
+        <div className="form-grid">
+          <div className="field"><label className="field-label" htmlFor="grant-to">目标 Team ID</label>
+            <input id="grant-to" className="input" value={toTeam} onChange={e => setToTeam(e.target.value)} placeholder="team-uuid" /></div>
+          <div className="field" style={{ flexGrow: 2 }}><label className="field-label" htmlFor="grant-caps">caps_visible(逗号分隔,空=全部)</label>
+            <input id="grant-caps" className="input" value={caps} onChange={e => setCaps(e.target.value)} placeholder="tool:node@20,env:linux" /></div>
           <button className="btn btn-primary" onClick={async () => { try { await createGrant(teamId, toTeam, caps ? caps.split(',').map(s => s.trim()) : []); setToTeam(''); setCaps(''); } catch (e) { useStore.getState().setError((e as Error).message); } }}>创建</button>
         </div>
       </div>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card card-flush">
         <div className="table-wrap">
           <table className="table">
             <thead><tr>{['grant_id', 'from', 'to', 'caps_visible', '过期', '操作'].map(h => <th key={h}>{h}</th>)}</tr></thead>

@@ -51,11 +51,33 @@
 3. B 完成:`pushArtifacts` 提交 `qlong/<task>` 分支 → result.artifacts 携带引用;
 4. A 校验 acceptance_results → `collectArtifacts` 收取 → done。
 
+## 三b、剧本 4:双网关集群(v0.8 跨进程总线,02 §12.1)
+
+> 前置:v0.8 起 `qlong server` 支持集群环境变量。两台机器(或同机两进程)各起一个中心,
+> 节点就近接入;任一网关收到非本实例目标的信封 → HTTP 总线转投目标 home 网关
+> (在线直投 / 离线落彼收件箱);总线不可达 → 本地兜底入箱(端上 R1/R2 兜底正确性)。
+
+| 步骤 | 设备 | 命令 | 预期 |
+|------|------|------|------|
+| 4.1 | A | `QLONG_CLUSTER_SECRET=<共享密钥> QLONG_CLUSTER_NAME=gw1 QLONG_CLUSTER_PEERS=https://<B地址>:7860 QLONG_MAILBOX_FILE=./mailbox-a.json qlong server` | 启动日志出现"网关集群:密钥已启用,成员 1" |
+| 4.2 | B | `QLONG_CLUSTER_SECRET=<同一密钥> QLONG_CLUSTER_NAME=gw2 QLONG_CLUSTER_PEERS=https://<A地址>:7860 QLONG_MAILBOX_FILE=./mailbox-b.json qlong server` | 同上;两实例共用同一注册中心目录(共享 registry 存储/或同库) |
+| 4.3 | A、B | 各 enroll 一个节点(a_node 连 A,b_node 连 B) | 控制台两节点均 online |
+| 4.4 | b_node | 给 a_node 发 project 单(离线场景:a_node 先不入网) | ack=queued;`mailbox-b.json`(或 a 侧 home 分片)出现该信封 |
+| 4.5 | a_node | 连上 A 网关 | 认证即补投,收到 4.4 的信封 |
+| 4.6 | 运维 | 停掉 B → b_node 期间收到 project 单 → 重启 B | 总线对 B 不可达 → 落本实例兜底;重启后 `QLONG_MAILBOX_FILE` 恢复,补投不丢 |
+| 4.7 | 渗透 | `curl -X POST https://<B>:7860/internal/envelope -d '{}'`(无密钥头) | 403 forbidden;畸形信封 400 |
+
+注意:
+- 共享密钥只走环境变量/密管,不进 URL 不进日志(评审 I-16 同源原则);
+- 扩缩容成员前约定成员序列(分片 = FNV-1a(nodeId) % 成员序);
+- Redis pub/sub 等传输按 `ClusterBus` 接口替换,剧本步骤不变。
+
 ## 四、走查产出(执行后回填本节)
 
 - [ ] 剧本 1 通过(记录消息时间线);
 - [ ] 剧本 2a/2b/2c 通过;
 - [ ] 剧本 3 通过(记录 git 分支与产物校验);
+- [ ] 剧本 4 通过(记录总线转投日志与收件箱落盘文件);
 - [ ] 仅凭双方日志 + trace_id 离线还原一次派单全生命周期(可观测性验收,评审 I-34⑤);
 - [ ] 发现的隐藏决策/偏差回填:`(状态×消息×定时器)矩阵` 与本剧本。
 

@@ -23,7 +23,7 @@ export default function Audit({ teamId }: { teamId: string }) {
         <h1 className="page-title">审计日志</h1>
         <p className="page-sub">安全与操作审计(只读;P3:不记录 body)</p>
       </div>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card card-flush">
         <div className="table-wrap">
           <table className="table">
             <thead><tr>{['时间', '事件', '节点', '原因', 'trace_id'].map(h => <th key={h}>{h}</th>)}</tr></thead>

@@ -27,6 +27,12 @@ const NAV = [
 ] as const;
 type PageKey = string;
 
+/** v0.8 URL 路由化:hash ↔ 页面双向同步(#/install 直达节点安装页;非法/缺失 hash → 总览) */
+function pageFromHash(): PageKey {
+  const h = location.hash.replace(/^#\//, '').split('?')[0] ?? '';
+  return NAV.some((n) => n.key === h) ? h : 'dashboard';
+}
+
 /** 由页面 key 推导高亮的导航项(详情页归入其列表页) */
 function navOf(page: PageKey): PageKey {
   if (page === 'agent-detail') return 'agents';
@@ -35,16 +41,32 @@ function navOf(page: PageKey): PageKey {
 }
 
 export default function App() {
-  const [page, setPage] = useState<PageKey>('dashboard');
+  const [page, setPageState] = useState<PageKey>(() => pageFromHash());
   const [teamId, setTeamId] = useState('');
   const [authState, setAuthState] = useState<'checking' | 'login' | 'ready'>('checking');
   const [username, setUsername] = useState('');
   const loadTeams = useStore((s) => s.loadTeams);
 
+  /** 页面切换写回 hash(深链接/刷新可恢复);hashchange 再回灌同值,无环 */
+  const setPage = (p: PageKey): void => {
+    setPageState(p);
+    const want = '#/' + p;
+    if (location.hash !== want) location.hash = want;
+  };
+
   const refreshAfterLogin = (u: string): void => {
     setUsername(u);
     setAuthState('ready');
-    if (location.hash === '#/login') location.hash = '';
+    // 登录前想去的页面(如 /console#/install 直达被 401 打断)→ 登录后回续
+    const returnHash = sessionStorage.getItem('qlong_return_hash');
+    sessionStorage.removeItem('qlong_return_hash');
+    if (returnHash && returnHash !== '#/login') {
+      location.hash = returnHash;
+      setPageState(pageFromHash());
+    } else if (location.hash === '#/login') {
+      location.hash = '';
+      setPageState('dashboard');
+    }
     loadTeams().then((ts) => { if (ts.length > 0) setTeamId((cur) => cur || ts[0].team_id); })
       .catch(() => { /* 未配置 owner 凭证时保持空,页面内提示 */ });
   };
@@ -53,17 +75,13 @@ export default function App() {
     // 会话探测(Cookie):有效 → 进入控制台;无效 → 登录页(设计:未登录一律跳登录)
     authApi.me()
       .then((r) => { setCsrf(r.csrf); refreshAfterLogin(r.username); })
-      .catch(() => { setAuthState('login'); location.hash = '#/login'; });
-    const onHash = (): void => { void check(); };
-    async function check(): Promise<void> {
-      try {
-        const r = await authApi.me();
-        setCsrf(r.csrf);
-        refreshAfterLogin(r.username);
-      } catch {
+      .catch(() => {
+        if (location.hash && location.hash !== '#/login') sessionStorage.setItem('qlong_return_hash', location.hash);
         setAuthState('login');
-      }
-    }
+        location.hash = '#/login';
+      });
+    // v0.8:hashchange 只同步页面状态(会话探测只在挂载时做一次,导航不重发请求)
+    const onHash = (): void => { setPageState(pageFromHash()); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -99,7 +117,7 @@ export default function App() {
           <div className="owner-label">OWNER</div>
           <div className="owner-name">{username || 'owner'}</div>
           <button className="btn-logout" onClick={() => { void authApi.logout().then(() => { setAuthState('login'); location.hash = '#/login'; }); }}>
-            退出登录
+            <span aria-hidden>⏻</span><span className="logout-label">退出登录</span>
           </button>
         </div>
       </nav>

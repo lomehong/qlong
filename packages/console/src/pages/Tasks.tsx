@@ -23,7 +23,7 @@ export default function Tasks({ teamId }: { teamId: string }) {
         <h1 className="page-title">任务管理</h1>
         <p className="page-sub">全部任务(跨团队)</p>
       </div>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card card-flush">
         <div className="table-wrap">
           <table className="table">
             <thead><tr>{['task_id', '类型', '牵头方', '执行方', 'attempt', '状态', '更新时间'].map(h => <th key={h}>{h}</th>)}</tr></thead>

@@ -25,7 +25,7 @@ export default function Agents({ onNav, teamId }: { onNav: (p: string) => void; 
         <p className="page-sub">全部 Agent(跨团队,可按团队筛选)</p>
       </div>
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-        <input className="input" placeholder="🔍 搜索名称或 ID…" value={search} onChange={e => setSearch(e.target.value)} style={{ width: 240 }} aria-label="搜索 Agent" />
+        <input className="input" placeholder="🔍 搜索名称或 ID…" value={search} onChange={e => setSearch(e.target.value)} style={{ width: 240, maxWidth: '100%', flex: '0 1 auto' }} aria-label="搜索 Agent" />
         <select className="select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} aria-label="状态筛选">
           {['全部状态', '在线', '离线', 'suspended'].map(s => <option key={s}>{s}</option>)}
         </select>
@@ -33,7 +33,7 @@ export default function Agents({ onNav, teamId }: { onNav: (p: string) => void; 
           {filtered.length} / {agents.length} 个 Agent
         </span>
       </div>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card card-flush">
         <div className="table-wrap">
           <table className="table">
             <thead><tr>{['状态', '名称', '平台', '版本', 'key_epoch', 'caps_rev', '最近活跃', '操作'].map(h => <th key={h}>{h}</th>)}</tr></thead>

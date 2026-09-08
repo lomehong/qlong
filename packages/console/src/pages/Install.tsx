@@ -60,8 +60,8 @@ export default function Install({ teamId }: { teamId: string }) {
       </div>
 
       <div className="card">
-        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div>
+        <div className="form-grid">
+          <div className="field">
             <label className="field-label" htmlFor="install-version">安装版本</label>
             <select id="install-version" className="select" value={version} onChange={(e) => setVersion(e.target.value)}>
               <option value="latest">latest(最新)</option>
@@ -72,7 +72,7 @@ export default function Install({ teamId }: { teamId: string }) {
             {busy ? '生成中…' : '生成邀请码'}
           </button>
           {token && (
-            <div style={{ fontSize: 12.5, color: 'var(--success)', alignSelf: 'center' }}>
+            <div style={{ fontSize: 12.5, color: 'var(--success)', alignSelf: 'center', flexBasis: '100%' }}>
               ✓ 邀请码已生成,有效期 30 分钟(单次使用,请尽快在目标设备完成安装)
             </div>
           )}

@@ -15,13 +15,13 @@ export default function Settings() {
       </div>
       <div className="card">
         <h2 className="card-title">全局参数</h2>
-        <dl className="dl" style={{ gridTemplateColumns: '200px 1fr' }}>
+        <dl className="dl dl-wide">
           {PARAMS.map(([k, v]) => <div key={k} style={{ display: 'contents' }}><dt>{k}</dt><dd className="mono">{v}</dd></div>)}
         </dl>
       </div>
       <div className="card">
         <h2 className="card-title">Owner</h2>
-        <dl className="dl" style={{ gridTemplateColumns: '200px 1fr' }}>
+        <dl className="dl dl-wide">
           <dt>owner_user_id</dt><dd className="mono">u1</dd>
           <dt>邮箱</dt><dd>owner@qlong.io</dd>
         </dl>

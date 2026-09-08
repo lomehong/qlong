@@ -24,12 +24,50 @@ export interface ClusterMember {
 
 export type ClusterRouteOutcome = 'delivered' | 'queued' | 'unknown';
 
+/** 跨进程总线抽象:v0.8 内置 HTTP 中继(HttpClusterBus);Redis pub/sub 按同接口替换 */
+export interface ClusterBus {
+  /** 返回 'delivered'/'queued' = 远端已接管;'false' = 无人接管(调用方本地兜底) */
+  publish(toNodeId: string, envelope: EnvelopeV1): Promise<'delivered' | 'queued' | false>;
+}
+
 export class GatewayCluster {
   private readonly members: ClusterMember[] = [];
+  private bus?: ClusterBus;
 
   register(member: ClusterMember): number {
     this.members.push(member);
     return this.members.length - 1;
+  }
+
+  /** 挂载跨进程总线(v0.8):in-process 未命中时经总线转投远端实例 */
+  attachBus(bus: ClusterBus): void {
+    this.bus = bus;
+  }
+
+  /**
+   * 异步全量路由:v0.8 推荐入口。
+   * ① in-process 成员持有连接 → 直投;
+   * ② 总线(跨进程)delivered/queued;
+   * ③ home 分片(本进程)入箱;
+   * ④ 无人接管 → 'unknown'(调用方本地兜底)。
+   */
+  async routeAsync(envelope: EnvelopeV1, toNodeId: string, now: number): Promise<ClusterRouteOutcome> {
+    for (const m of this.members) {
+      if (m.has(toNodeId)) {
+        m.deliver(toNodeId, envelope);
+        return 'delivered';
+      }
+    }
+    if (this.bus) {
+      const r = await this.bus.publish(toNodeId, envelope);
+      if (r !== false) return r;
+    }
+    const home = this.shardOf(toNodeId);
+    if (home) {
+      home.core.queueInbox(envelope, now);
+      return 'queued';
+    }
+    return 'unknown';
   }
 
   get size(): number {

@@ -5,7 +5,12 @@
 import { Registry, createRegistryServer } from '../../registry/src/index.js';
 import { AuthService } from '../../registry/src/auth.js';
 import { GatewayCore } from '../../gateway/src/core.js';
+import { InboxStore } from '../../gateway/src/mailbox.js';
+import type { EnvelopeV1 } from '@qlong/core';
+import { validateEnvelope } from '@qlong/core';
 import { WsGateway } from '../../gateway/src/ws.js';
+import { GatewayCluster, type ClusterMember } from '../../gateway/src/cluster.js';
+import { HttpClusterBus } from '../../gateway/src/bus.js';
 
 export interface ServerHandles {
   close(): Promise<void>;
@@ -16,6 +21,8 @@ export interface ServerHandles {
   gatewayPath?: string;
   /** 账号/会话服务(登录、登出、me) */
   auth: import('../../registry/src/auth.js').AuthService;
+  /** 集群路由器(设置 clusterSecret 后存在;02 §12.1) */
+  readonly cluster?: GatewayCluster;
   /** 最近一次 GC 结果(运营观测) */
   readonly lastGc: { removedOrphanTeams: number; revokedOfflineNodes: number };
 }
@@ -32,6 +39,8 @@ export async function startQlongServer(
     distDir?: string;
     /** 账号持久化目录(设置后重启不丢账号);缺省内存态 */
     authPersistDir?: string;
+    /** 网关收件箱落盘文件(v0.8 FileMailboxStore:重启收件箱不丢);缺省内存态 */
+    inboxPersistFile?: string;
     /**
      * 单端口部署(创空间/容器):网关挂到 HTTP 服务的该路径(ws upgrade),
      * registry/书坊/控制台/网关共用 registryPort。设置后忽略 gatewayPort。
@@ -40,6 +49,15 @@ export async function startQlongServer(
     /** 种子团队:目录为空时自动创建(创空间首启体验) */
     seedTeam?: { name?: string } | false;
     ownerAuth?: (req: import('node:http').IncomingMessage, teamId: string) => boolean | Promise<boolean>;
+    /**
+     * 网关集群(02 §12.1,v0.8):设置后开启集群路由 + POST /internal/envelope 中继端点。
+     * peers 非空时跨进程转投(HTTP 总线);空 = 单实例集群形态(仅收件箱 deferOffline 语义)。
+     */
+    clusterSecret?: string;
+    /** 集群成员名(默认 gw1;分片按成员序列稳定哈希,扩缩容前成员序列须一致) */
+    clusterName?: string;
+    /** 远端网关基地址列表(如 ['https://gw2:3100']) */
+    clusterPeers?: string[];
   } = {},
 ): Promise<ServerHandles> {
   const host = opts.host ?? '0.0.0.0';
@@ -50,9 +68,31 @@ export async function startQlongServer(
     const t = registry.createTeam({ name: opts.seedTeam?.name ?? '默认团队', owner_user_id: 'owner' });
     console.log('种子团队已创建: team_id =', t.team_id);
   }
-  const core = new GatewayCore();
+  const core = new GatewayCore({
+    inbox: opts.inboxPersistFile
+      ? new InboxStore<EnvelopeV1>({ capacity: 200, persistFile: opts.inboxPersistFile })
+      : undefined,
+  });
+  // 集群形态(02 §12.1):clusterSecret 存在即注册自身成员;peers 存在再挂跨进程总线。
+  // 顺序约束:member 闭包引用 gw,故 cluster 先建、gw 携带 cluster 构造、随后 register。
+  const clusterSecret = opts.clusterSecret;
+  let cluster: GatewayCluster | undefined;
+  if (clusterSecret) {
+    cluster = new GatewayCluster();
+    const peers = (opts.clusterPeers ?? []).filter((u) => u.length > 0);
+    if (peers.length > 0) {
+      cluster.attachBus(
+        new HttpClusterBus({
+          secret: clusterSecret,
+          peers: peers.map((url, i) => ({ name: `peer${i + 1}`, url })),
+        }),
+      );
+    }
+  }
   const gw = new WsGateway({
     core,
+    cluster,
+    clusterSecret,
     authenticate: (tok: string) => {
       try {
         const n = registry.authByToken(tok);
@@ -62,11 +102,29 @@ export async function startQlongServer(
       }
     },
   });
+  if (cluster) {
+    const self: ClusterMember = {
+      name: opts.clusterName ?? 'gw1',
+      core,
+      has: (nodeId) => gw.has(nodeId),
+      deliver: (nodeId, envelope) => gw.deliverTo(nodeId, envelope),
+    };
+    cluster.register(self);
+  }
   const httpServer = createRegistryServer({
     registry,
     auth,
     enrollRatePerMinPerIp: opts.enrollRatePerMinPerIp ?? 60,
     distDir: opts.distDir,
+    // 单端口形态的集群中继(02 §12.1):与 ws.ts 独立端口中继语义一致
+    clusterSecret,
+    onInternalEnvelope: clusterSecret
+      ? (toNodeId, envelope) => {
+          // 信任域内仍校验结构(与 ws.ts 中继同源原则):畸形信封不入箱、不上连接
+          if (!validateEnvelope(envelope).ok) throw new Error('bad envelope');
+          return gw.internalDeliver(toNodeId, envelope as EnvelopeV1, Date.now());
+        }
+      : undefined,
   });
 
   // 单端口 vs 双端口:gatewayPath 设置 → 网关挂到 HTTP 同端口(/gateway upgrade)
@@ -98,6 +156,7 @@ export async function startQlongServer(
     gatewayPort,
     gatewayPath: opts.gatewayPath,
     auth,
+    cluster,
     get lastGc(): { removedOrphanTeams: number; revokedOfflineNodes: number } {
       return gcResult;
     },

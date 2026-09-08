@@ -11,7 +11,7 @@ export default function Teams({ onNav }: { onNav: (p: string) => void }) {
         <h1 className="page-title">团队管理</h1>
         <p className="page-sub">管理全部团队</p>
       </div>
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card card-flush">
         <div className="table-wrap">
           <table className="table">
             <thead><tr>{['团队名称', 'team_id', '节点数', '在线', '状态', '创建时间', ''].map(h => <th key={h}>{h}</th>)}</tr></thead>

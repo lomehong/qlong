@@ -21,6 +21,8 @@ export interface WsGatewayOptions {
   authenticate: (nodeToken: string) => { node_id: string; team_id: string; status: string } | undefined;
   /** 02 §12.1:集群路由(source ACL 已过,目标不在本网关时调用) */
   cluster?: GatewayCluster;
+  /** 02 §12.1 总线:集群共享密钥(设置后本 server 暴露 POST /internal/envelope 中继端点) */
+  clusterSecret?: string;
 }
 
 interface RegistryLike {
@@ -34,7 +36,11 @@ interface ConnState {
 }
 
 export class WsGateway {
-  readonly server = createServer((_req, res) => {
+  readonly server = createServer((req, res) => {
+    // 中继端点(registerInternalRelay)认领的请求不在回 426(中继等 body 异步应答)
+    if (this.opts.clusterSecret && req.method === 'POST' && (req.url ?? '').split('?')[0] === '/internal/envelope') {
+      return;
+    }
     res.writeHead(426);
     res.end();
   });
@@ -71,6 +77,7 @@ export class WsGateway {
   }
 
   start(): void {
+    this.registerInternalRelay();
     this.wss.on('connection', (ws) => {
       let connId: string | null = null;
       let nodeId = '';
@@ -165,14 +172,22 @@ export class WsGateway {
         }
         // 集群路由(02 §12.1):本网关 miss → 直投在线成员 / home 分片入箱
         if (result.deferred) {
-          const outcome = this.opts.cluster?.route(result.deferred.envelope, result.deferred.toNodeId, Date.now()) ?? 'unknown';
-          if (outcome === 'unknown') {
-            // 无集群成员(不应发生,成员含自身)—— 本地兜底入箱
-            this.opts.core.queueInbox(env, Date.now());
-            this.safeSend(ws, { frame: 'ack', ack_type: 'queued', msg_id: env.msg_id });
-          } else {
-            this.safeSend(ws, { frame: 'ack', ack_type: outcome === 'delivered' ? 'delivered' : 'queued', msg_id: env.msg_id });
-          }
+          // v0.8:集群 routeAsync —— in-process 成员 → 总线(跨进程)→ home 分片入箱
+          void this.opts.cluster
+            ?.routeAsync(result.deferred.envelope, result.deferred.toNodeId, Date.now())
+            .then((outcome) => {
+              if (outcome === 'unknown') {
+                this.opts.core.queueInbox(env, Date.now());
+              }
+              this.safeSend(ws, {
+                frame: 'ack',
+                ack_type: outcome === 'delivered' ? 'delivered' : 'queued',
+                msg_id: env.msg_id,
+              });
+            })
+            .catch(() => {
+              this.safeSend(ws, { frame: 'ack', ack_type: 'rejected', msg_id: env.msg_id, reason: 'cluster_error' });
+            });
         }
       });
 
@@ -195,6 +210,52 @@ export class WsGateway {
   /** 集群成员接口:向本网关在线节点投递(返回是否确有连接) */
   deliverTo(nodeId: string, envelope: EnvelopeV1): void {
     this.routeToNode(nodeId, { frame: 'envelope', envelope });
+  }
+
+  /**
+   * 集群总线中继端点(02 §12.1):已过 source 网关 ACL 的信封转投本实例。
+   * 在线 → 直投(delivered);离线 project → 入本实例收件箱(queued);aid 离线 → not_here。
+   */
+  internalDeliver(toNodeId: string, envelope: EnvelopeV1, now: number): 'delivered' | 'queued' | 'not_here' {
+    if (this.has(toNodeId)) {
+      this.deliverTo(toNodeId, envelope);
+      return 'delivered';
+    }
+    const kind = (envelope.body as { kind?: string } | undefined)?.kind;
+    if (kind === 'aid') return 'not_here';
+    this.opts.core.queueInbox(envelope, now);
+    return 'queued';
+  }
+
+  private registerInternalRelay(): void {
+    if (!this.opts.clusterSecret) return;
+    const secret = this.opts.clusterSecret;
+    // prepend:先于默认 426 处理器执行(独立端口形态;单端口形态走 registry http.ts 的同名路由)
+    this.server.prependListener('request', (req, res) => {
+      const p = (req.url ?? '').split('?')[0];
+      if (p !== '/internal/envelope' || req.method !== 'POST') return;
+      let raw = '';
+      req.on('data', (c: Buffer) => (raw += c.toString()));
+      req.on('end', () => {
+        if (req.headers['x-qlong-cluster-secret'] !== secret) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw) as { to_node_id?: string; envelope?: EnvelopeV1 };
+          if (!parsed.to_node_id || !parsed.envelope) throw new Error('bad body');
+          // 信任域内仍校验结构(M2-01 同源原则):畸形信封不入收件箱、不上连接
+          if (!validateEnvelope(parsed.envelope).ok) throw new Error('bad envelope');
+          const result = this.internalDeliver(parsed.to_node_id, parsed.envelope as EnvelopeV1, Date.now());
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ result }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+        }
+      });
+    });
   }
 
   private routeToNode(nodeId: string, frame: unknown): void {

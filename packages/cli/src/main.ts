@@ -176,8 +176,20 @@ if (cmd === 'server') {
     gatewayPath: process.argv.includes('--gateway-port') ? undefined : '/gateway',
     distDir: sflag('--dist-dir', process.env.QLONG_DIST_DIR),
     seedTeam: process.argv.includes('--no-seed-team') ? false : {},
+    // v0.8:收件箱落盘 + 网关集群(02 §12.1)——环境变量驱动,容器编排友好
+    authPersistDir: process.env.QLONG_AUTH_DIR,
+    inboxPersistFile: process.env.QLONG_MAILBOX_FILE,
+    clusterSecret: sflag('--cluster-secret', process.env.QLONG_CLUSTER_SECRET),
+    clusterName: sflag('--cluster-name', process.env.QLONG_CLUSTER_NAME),
+    clusterPeers: (process.env.QLONG_CLUSTER_PEERS ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean),
   });
   console.log('qlong server:http://0.0.0.0:' + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
+  if (handles.cluster) {
+    console.log('网关集群:密钥已启用' + (handles.cluster.size > 1 ? ',成员 ' + handles.cluster.size : '(单实例形态)'));
+  }
   if (sflag('--dist-dir', process.env.QLONG_DIST_DIR)) {
     console.log('书坊分发 → /install /install.sh /install.ps1 /releases/<版本>/ | 控制台 → /');
   }

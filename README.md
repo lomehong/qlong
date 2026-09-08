@@ -138,6 +138,26 @@ short_description: 分布式 AI Agent 协作系统——每台设备一条自治
   安装脚本支持 `--version vX.Y.Z` / 环境变量 `QLONG_VERSION`;携带脚本与产物严格同源
 - **Console 节点安装页**:生成一次性邀请码 → 按平台给出可复制安装命令,支持选择版本
 
+## v0.8 新增(收件箱落盘 · 网关跨进程总线 · 控制台 URL 路由 · 双机演练支撑)
+
+- **FileMailboxStore(网关收件箱落盘,v0.8-1)**:InboxStore 可选 `persistFile` ——
+  每次变更原子写(tmp+rename),构造时自动恢复;网关重启离线 project 单不丢。
+  CLI/服务器经 `QLONG_MAILBOX_FILE` 启用;落盘失败不阻断投递(端上 R1/R2 兜底正确性)。
+- **网关跨进程总线(02 §12.1,v0.8-2)**:`GatewayCluster.routeAsync` 三级路由 ——
+  ①in-process 成员直投 → ②总线转投远端实例(在线 delivered / 离线 queued)→ ③home 分片兜底入箱;
+  内置 `HttpClusterBus`(POST /internal/envelope,`x-qlong-cluster-secret` 共享密钥,
+  信任域内仍过 validateEnvelope;Redis pub/sub 按同接口替换)。
+  双端口形态由网关自暴露中继;单端口形态由 registry http 承载同名路由。
+  服务器环境变量:`QLONG_CLUSTER_SECRET` / `QLONG_CLUSTER_PEERS` / `QLONG_CLUSTER_NAME`。
+  集成测试:双网关实例跨总线在线直投全任务闭环、离线落彼收件箱补投、错密钥 403 → 本地兜底。
+- **控制台 URL 路由化(v0.8-3)**:hash ↔ 页面双向同步 —— `#/install` 等深链接直达对应页,
+  刷新/分享可恢复;401 → `#/login`,登录后回续登录前想去的页面;导航不再重发会话探测。
+- **双机演练支撑(v0.8-4)**:走查剧本新增"剧本 4:双网关集群"——
+  集群环境变量起双实例、跨实例派单/补投、收件箱落盘重启恢复、中继端点渗透自检,七步命令级清单。
+- 全量 **240 测试全绿**(新增总线端点鉴权/跨进程直投/落箱补投/兜底、服务器集群接线 8 用例),5 包 typecheck 干净。
+
+**待办(v0.9)**:双机实物演练执行与走查产出回填、Redis 总线传输替换验证、真单文件二进制(Node SEA)评估、控制台 E2E 自动化。
+
 ## v0.7 新增(v0.6 待办五件全部兑现)
 
 - **真实 deepseek-harness 联调 ✅**:上游事实经仓库核实(npm `@deepseek-ai/dsh`,latest 0.1.2-rc.1;
@@ -162,6 +182,7 @@ short_description: 分布式 AI Agent 协作系统——每台设备一条自治
 
 **待办(v0.8)**:网关跨进程总线(Redis pub/sub,route 接口已可替换)、双机实物演练执行(剧本已备)、
 控制台 URL 路由化(/install 直达 React 页)、FileMailboxStore(收件箱重启存活)。
+—— **v0.8 已兑现,见上**;Redis 传输替换验证移入 v0.9。
 
 ## v0.5 新增(安装器完整化:真实联调前置件)
 

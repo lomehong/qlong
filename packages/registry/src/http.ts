@@ -21,6 +21,9 @@ export interface RegistryServerOptions {
   distDir?: string;
   /** 人类账号与会话(02 §3.1):配置后 owner 端点走会话 Cookie 鉴权(未登录 → 401 → 控制台跳登录页) */
   auth?: import('./auth.js').AuthService;
+  /** v0.8 网关集群中继(02 §12.1):两者齐备时暴露 POST /internal/envelope(单端口部署形态) */
+  clusterSecret?: string;
+  onInternalEnvelope?: (toNodeId: string, envelope: unknown) => 'delivered' | 'queued' | 'not_here';
 }
 
 const MAX_BODY = 1 << 20;
@@ -168,6 +171,24 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
       if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install' || url.pathname === '/' || url.pathname === '/console' || url.pathname === '/console-bundle.js' || url.pathname === '/console-bundle.css')) {
         await serveDist(res, opts.distDir, url.pathname);
+        return;
+      }
+
+      // ---- 网关集群中继(02 §12.1,v0.8):集群内部信任域,共享密钥头鉴权 ----
+      if (url.pathname === '/internal/envelope' && method === 'POST' && opts.clusterSecret && opts.onInternalEnvelope) {
+        if (req.headers['x-qlong-cluster-secret'] !== opts.clusterSecret) {
+          sendJson(res, 403, { error: { code: 'forbidden', message: 'cluster secret mismatch' } });
+          return;
+        }
+        try {
+          const body = await readJson(req);
+          const toNodeId = typeof body.to_node_id === 'string' ? body.to_node_id : '';
+          if (!toNodeId || !body.envelope) throw new Error('bad body');
+          const result = opts.onInternalEnvelope(toNodeId, body.envelope);
+          sendJson(res, 200, { result });
+        } catch {
+          sendJson(res, 400, { error: { code: 'bad_request', message: 'malformed relay body' } });
+        }
         return;
       }
 

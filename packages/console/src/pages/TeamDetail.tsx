@@ -28,7 +28,7 @@ export default function TeamDetail({ onBack, teamId }: { onBack: () => void; tea
         ))}
       </div>
       {tab === 'members' && (
-        <div className="card" style={{ padding: 0 }}>
+        <div className="card card-flush">
           <h2 className="card-title" style={{ padding: '18px 20px 0' }}>团队成员({nodes.length})</h2>
           <div className="table-wrap">
             <table className="table">

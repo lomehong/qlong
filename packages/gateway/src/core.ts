@@ -12,6 +12,8 @@ import type { GatewayAck, GatewayConnection, GatewayDirectorySnapshot, RoutingDe
 export interface GatewayCoreOptions {
   params?: QlongParams;
   inboxCapacity?: number;
+  /** 注入收件箱(支持落盘持久化:InboxStore({persistFile}));缺省内存实例 */
+  inbox?: InboxStore<EnvelopeV1>;
 }
 
 export interface UplinkDeferred {
@@ -45,7 +47,7 @@ export interface TakeInboxResult<E extends EnvelopeV1> {
 
 export class GatewayCore {
   readonly connections = new Map<string, GatewayConnection>();
-  readonly inbox = new InboxStore<EnvelopeV1>(0);
+  readonly inbox: InboxStore<EnvelopeV1>;
   private directory: GatewayDirectorySnapshot = { epoch: 0, nodes: [] };
   /** 逐节点目录缓存:条目携带快照 epoch,落后即重查(§7.1) */
   private dirCache = new Map<string, { epoch: number; entry?: import('./types.js').GatewayDirectoryEntry }>();
@@ -54,7 +56,7 @@ export class GatewayCore {
 
   constructor(opts: GatewayCoreOptions = {}) {
     this.params = opts.params ?? DEFAULT_PARAMS;
-    this.inbox = new InboxStore<EnvelopeV1>(opts.inboxCapacity ?? 200);
+    this.inbox = opts.inbox ?? new InboxStore<EnvelopeV1>(opts.inboxCapacity ?? 200);
   }
 
   /** 订阅目录快照(注册中心推送,§7.1);epoch 单调才接受 */
