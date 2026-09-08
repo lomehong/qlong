@@ -1,0 +1,600 @@
+// src/main.tsx
+import { createRoot } from "react-dom/client";
+
+// src/App.tsx
+import { useState as useState5, useEffect as useEffect7 } from "react";
+
+// src/pages/Dashboard.tsx
+import { useEffect } from "react";
+
+// src/store/useStore.ts
+import { create } from "zustand";
+
+// src/api/client.ts
+var BASE = import.meta.env.VITE_QLONG_API ?? "http://127.0.0.1:3200";
+var csrfToken = "";
+async function request(method, path, body) {
+  const headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : void 0, credentials: "include" });
+  if (res.status === 401) {
+    window.location.hash = "#/login";
+    throw new Error("\u672A\u8BA4\u8BC1");
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message ?? `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+var api = {
+  get: (p) => request("GET", p),
+  post: (p, b) => request("POST", p, b),
+  del: (p) => request("DELETE", p),
+  patch: (p, b) => request("PATCH", p, b)
+};
+
+// src/store/useStore.ts
+var useStore = create()((set, get) => ({
+  loading: false,
+  error: null,
+  overview: null,
+  agents: [],
+  grants: [],
+  audits: [],
+  setError: (e) => set({ error: e }),
+  fetchOverview: async (teamId) => {
+    set({ loading: true, error: null });
+    try {
+      const data = await api.get(`/v1/teams/${teamId}/overview`);
+      set({ overview: data, agents: data.nodes ?? [], loading: false });
+    } catch (e) {
+      set({ error: e.message, loading: false });
+    }
+  },
+  fetchGrants: async (teamId) => {
+    try {
+      const d = await api.get(`/v1/teams/${teamId}/grants`);
+      set({ grants: d.grants });
+    } catch (e) {
+      set({ error: e.message });
+    }
+  },
+  suspendAgent: async (teamId, nodeId) => {
+    await api.post(`/v1/teams/${teamId}/nodes/${nodeId}/suspend`);
+    await get().fetchOverview(teamId);
+  },
+  resumeAgent: async (teamId, nodeId) => {
+    await api.post(`/v1/teams/${teamId}/nodes/${nodeId}/resume`);
+    await get().fetchOverview(teamId);
+  },
+  revokeAgent: async (teamId, nodeId) => {
+    await api.del(`/v1/teams/${teamId}/nodes/${nodeId}`);
+    await get().fetchOverview(teamId);
+  },
+  createGrant: async (teamId, to, caps, ttlMs) => {
+    await api.post(`/v1/teams/${teamId}/grants`, { to_team: to, caps_visible: caps, ttl_ms: ttlMs });
+    await get().fetchGrants(teamId);
+  },
+  revokeGrant: async (teamId, gid) => {
+    await api.del(`/v1/teams/${teamId}/grants/${gid}`);
+    await get().fetchGrants(teamId);
+  },
+  issueToken: async (teamId, ttlMs) => {
+    return api.post(`/v1/teams/${teamId}/enroll-tokens`, { ttl_ms: ttlMs });
+  }
+}));
+
+// src/pages/Dashboard.tsx
+import { jsx, jsxs } from "react/jsx-runtime";
+function Dashboard({ onNav, teamId }) {
+  const { overview, fetchOverview, audits } = useStore();
+  useEffect(() => {
+    if (teamId) fetchOverview(teamId);
+  }, [teamId]);
+  const total = overview?.stats?.total ?? 0;
+  const online = overview?.stats?.online ?? 0;
+  const grantCount = overview?.grants?.length ?? 0;
+  const stats = [
+    { n: total, label: "Agent \u603B\u6570", target: "agents" },
+    { n: online, label: "\u5728\u7EBF", target: "agents" },
+    { n: grantCount, label: "\u8DE8\u961F Grant", target: "grants" },
+    { n: audits.length, label: "\u5BA1\u8BA1\u4E8B\u4EF6", target: "audit" }
+  ];
+  return /* @__PURE__ */ jsxs("div", { children: [
+    /* @__PURE__ */ jsx("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u603B\u89C8" }),
+    /* @__PURE__ */ jsx("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24 }, children: "\u5168\u5E73\u53F0\u805A\u5408\u6570\u636E" }),
+    /* @__PURE__ */ jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }, children: stats.map((s) => /* @__PURE__ */ jsxs("div", { onClick: () => onNav(s.target), style: { background: "#fff", borderRadius: 8, padding: 18, border: "1px solid #e2e8f0", cursor: "pointer" }, children: [
+      /* @__PURE__ */ jsx("div", { style: { fontSize: 30, fontWeight: 700 }, children: s.n }),
+      /* @__PURE__ */ jsx("div", { style: { fontSize: 12, color: "#718096", marginTop: 4 }, children: s.label })
+    ] }, s.label)) }),
+    /* @__PURE__ */ jsxs("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsx("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "Agent \u6982\u51B5" }),
+      overview ? /* @__PURE__ */ jsxs("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+        /* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: ["\u540D\u79F0", "\u72B6\u6001", "\u5E73\u53F0", "key_epoch", "\u6700\u8FD1\u6D3B\u8DC3"].map((h) => /* @__PURE__ */ jsx("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+        /* @__PURE__ */ jsx("tbody", { children: (overview.nodes ?? []).map((n) => /* @__PURE__ */ jsxs("tr", { children: [
+          /* @__PURE__ */ jsx("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx("strong", { children: n.name || n.node_id.slice(0, 8) }) }),
+          /* @__PURE__ */ jsx("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 6 }, children: [
+            /* @__PURE__ */ jsx("span", { style: { width: 9, height: 9, borderRadius: "50%", background: n.status === "suspended" ? "#f5a623" : n.online ? "#16c784" : "#cbd5e0" } }),
+            n.status === "suspended" ? "suspended" : n.online ? "\u5728\u7EBF" : "\u79BB\u7EBF"
+          ] }) }),
+          /* @__PURE__ */ jsx("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: n.platform || "\u2014" }),
+          /* @__PURE__ */ jsx("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: n.key_epoch }),
+          /* @__PURE__ */ jsx("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: n.last_seen })
+        ] }, n.node_id)) })
+      ] }) : /* @__PURE__ */ jsx("p", { style: { color: "#718096", fontSize: 13 }, children: "\u52A0\u8F7D\u4E2D..." })
+    ] })
+  ] });
+}
+
+// src/pages/Agents.tsx
+import { useEffect as useEffect2, useState } from "react";
+
+// src/components/StatusDot.tsx
+import { jsx as jsx2, jsxs as jsxs2 } from "react/jsx-runtime";
+function StatusDot({ online, status }) {
+  const color = status === "suspended" ? "#f5a623" : online ? "#16c784" : "#cbd5e0";
+  const label = status === "suspended" ? "suspended" : online ? "\u5728\u7EBF" : "\u79BB\u7EBF";
+  return /* @__PURE__ */ jsxs2("span", { style: { display: "inline-flex", alignItems: "center", gap: 6 }, children: [
+    /* @__PURE__ */ jsx2("span", { style: { width: 9, height: 9, borderRadius: "50%", background: color } }),
+    label
+  ] });
+}
+
+// src/pages/Agents.tsx
+import { jsx as jsx3, jsxs as jsxs3 } from "react/jsx-runtime";
+function Agents({ onNav, teamId }) {
+  const { agents, loading, error, fetchOverview, suspendAgent, resumeAgent, revokeAgent } = useStore();
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("\u5168\u90E8\u72B6\u6001");
+  useEffect2(() => {
+    if (teamId) fetchOverview(teamId);
+  }, [teamId]);
+  const filtered = agents.filter(
+    (a) => (statusFilter === "\u5168\u90E8\u72B6\u6001" || statusFilter === "\u5728\u7EBF" && a.online || statusFilter === "\u79BB\u7EBF" && !a.online || statusFilter === "suspended" && a.status === "suspended") && (a.name?.includes(search) || a.node_id.includes(search))
+  );
+  const act = async (fn, nid) => {
+    try {
+      await fn(teamId, nid);
+    } catch (e) {
+      useStore.getState().setError(e.message);
+    }
+  };
+  if (loading) return /* @__PURE__ */ jsx3("div", { style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u52A0\u8F7D\u4E2D..." });
+  return /* @__PURE__ */ jsxs3("div", { children: [
+    error && /* @__PURE__ */ jsx3("div", { style: { background: "#feecea", color: "#ea3943", padding: 12, borderRadius: 6, marginBottom: 16 }, children: error }),
+    /* @__PURE__ */ jsx3("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "Agent \u7BA1\u7406" }),
+    /* @__PURE__ */ jsx3("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24 }, children: "\u5168\u90E8 Agent(\u8DE8\u56E2\u961F,\u53EF\u6309\u56E2\u961F\u7B5B\u9009)" }),
+    /* @__PURE__ */ jsxs3("div", { style: { display: "flex", gap: 10, marginBottom: 16 }, children: [
+      /* @__PURE__ */ jsx3("input", { placeholder: "\u{1F50D} \u641C\u7D22\u540D\u79F0\u6216 ID...", value: search, onChange: (e) => setSearch(e.target.value), style: { padding: "7px 12px", border: "1px solid #e2e8f0", borderRadius: 6, width: 240 } }),
+      /* @__PURE__ */ jsx3("select", { value: statusFilter, onChange: (e) => setStatusFilter(e.target.value), style: { padding: "7px 12px", border: "1px solid #e2e8f0", borderRadius: 6 }, children: ["\u5168\u90E8\u72B6\u6001", "\u5728\u7EBF", "\u79BB\u7EBF", "suspended"].map((s) => /* @__PURE__ */ jsx3("option", { children: s }, s)) })
+    ] }),
+    /* @__PURE__ */ jsx3("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: /* @__PURE__ */ jsxs3("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ jsx3("thead", { children: /* @__PURE__ */ jsx3("tr", { children: ["\u72B6\u6001", "\u540D\u79F0", "\u5E73\u53F0", "\u7248\u672C", "key_epoch", "caps_rev", "\u6700\u8FD1\u6D3B\u8DC3", "\u64CD\u4F5C"].map((h) => /* @__PURE__ */ jsx3("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+      /* @__PURE__ */ jsxs3("tbody", { children: [
+        filtered.map((a) => /* @__PURE__ */ jsxs3("tr", { onClick: () => onNav("agent-detail"), style: { cursor: "pointer" }, children: [
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx3(StatusDot, { online: a.online, status: a.status }) }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx3("strong", { children: a.name || a.node_id.slice(0, 8) }) }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: a.platform || "\u2014" }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: a.version || "\u2014" }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: a.key_epoch }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: a.caps_rev }),
+          /* @__PURE__ */ jsx3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: a.last_seen }),
+          /* @__PURE__ */ jsxs3("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0", whiteSpace: "nowrap" }, children: [
+            a.status === "active" && /* @__PURE__ */ jsx3("button", { onClick: (e) => {
+              e.stopPropagation();
+              act(suspendAgent, a.node_id);
+            }, style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "1px solid #e2e8f0", background: "#fff", cursor: "pointer", marginRight: 6 }, children: "\u6682\u505C" }),
+            a.status === "suspended" && /* @__PURE__ */ jsx3("button", { onClick: (e) => {
+              e.stopPropagation();
+              act(resumeAgent, a.node_id);
+            }, style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "none", background: "#4361ee", color: "#fff", cursor: "pointer", marginRight: 6 }, children: "\u6062\u590D" }),
+            /* @__PURE__ */ jsx3("button", { onClick: (e) => {
+              e.stopPropagation();
+              if (window.confirm("\u786E\u8BA4\u6C38\u4E45\u540A\u9500? \u6B64\u64CD\u4F5C\u4E0D\u53EF\u9006\u3002")) act(revokeAgent, a.node_id);
+            }, style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "none", background: "#ea3943", color: "#fff", cursor: "pointer" }, children: "\u540A\u9500" })
+          ] })
+        ] }, a.node_id)),
+        filtered.length === 0 && !loading && /* @__PURE__ */ jsx3("tr", { children: /* @__PURE__ */ jsx3("td", { colSpan: 8, style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u6682\u65E0 Agent" }) })
+      ] })
+    ] }) })
+  ] });
+}
+
+// src/pages/AgentDetail.tsx
+import { jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
+function AgentDetail({ onBack }) {
+  const { agents, suspendAgent, resumeAgent, revokeAgent } = useStore();
+  const agent = agents[0];
+  if (!agent) return /* @__PURE__ */ jsx4("div", { style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u52A0\u8F7D\u4E2D..." });
+  return /* @__PURE__ */ jsxs4("div", { children: [
+    /* @__PURE__ */ jsx4("a", { onClick: onBack, style: { color: "#718096", fontSize: 13, cursor: "pointer", display: "inline-flex", marginBottom: 16 }, children: "\u2190 \u8FD4\u56DE Agent \u5217\u8868" }),
+    /* @__PURE__ */ jsx4("h1", { style: { fontSize: 22, marginBottom: 4 }, children: agent.name || agent.node_id.slice(0, 8) }),
+    /* @__PURE__ */ jsx4("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24, fontFamily: "monospace" }, children: agent.node_id }),
+    /* @__PURE__ */ jsxs4("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }, children: [
+      /* @__PURE__ */ jsxs4("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+        /* @__PURE__ */ jsx4("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "\u57FA\u672C\u4FE1\u606F" }),
+        /* @__PURE__ */ jsxs4("dl", { style: { display: "grid", gridTemplateColumns: "120px 1fr", gap: 6, fontSize: 13 }, children: [
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "\u72B6\u6001" }),
+          /* @__PURE__ */ jsx4("dd", { children: /* @__PURE__ */ jsx4(StatusDot, { online: agent.online, status: agent.status }) }),
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "\u5E73\u53F0" }),
+          /* @__PURE__ */ jsx4("dd", { children: agent.platform || "\u2014" }),
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "\u7248\u672C" }),
+          /* @__PURE__ */ jsx4("dd", { children: agent.version || "\u2014" }),
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "key_epoch" }),
+          /* @__PURE__ */ jsx4("dd", { style: { fontFamily: "monospace" }, children: agent.key_epoch }),
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "\u6700\u8FD1\u6D3B\u8DC3" }),
+          /* @__PURE__ */ jsx4("dd", { children: agent.last_seen })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxs4("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+        /* @__PURE__ */ jsx4("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "\u5BC6\u94A5\u4FE1\u606F" }),
+        /* @__PURE__ */ jsxs4("dl", { style: { display: "grid", gridTemplateColumns: "120px 1fr", gap: 6, fontSize: 13 }, children: [
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "\u5F53\u524D\u7EAA\u5143" }),
+          /* @__PURE__ */ jsx4("dd", { style: { fontFamily: "monospace" }, children: agent.key_epoch }),
+          /* @__PURE__ */ jsx4("dt", { style: { color: "#718096" }, children: "caps_rev" }),
+          /* @__PURE__ */ jsx4("dd", { children: agent.caps_rev })
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs4("div", { style: { display: "flex", gap: 10, marginTop: 16 }, children: [
+      agent.status === "suspended" && /* @__PURE__ */ jsx4("button", { onClick: () => resumeAgent("33333333-3333-4333-8333-333333333333", agent.node_id).catch((e) => useStore.getState().setError(e.message)), style: { padding: "7px 16px", borderRadius: 6, border: "1px solid #e2e8f0", background: "#fff", cursor: "pointer" }, children: "\u6062\u590D" }),
+      agent.status === "active" && /* @__PURE__ */ jsx4("button", { onClick: () => suspendAgent("33333333-3333-4333-8333-333333333333", agent.node_id).catch((e) => useStore.getState().setError(e.message)), style: { padding: "7px 16px", borderRadius: 6, border: "1px solid #e2e8f0", background: "#fff", cursor: "pointer" }, children: "\u6682\u505C" }),
+      /* @__PURE__ */ jsx4("button", { onClick: () => {
+        if (window.confirm("\u786E\u8BA4\u6C38\u4E45\u540A\u9500? \u6B64\u64CD\u4F5C\u4E0D\u53EF\u9006\u3002")) revokeAgent("33333333-3333-4333-8333-333333333333", agent.node_id).catch((e) => useStore.getState().setError(e.message));
+      }, style: { padding: "7px 16px", borderRadius: 6, border: "none", background: "#ea3943", color: "#fff", cursor: "pointer" }, children: "\u540A\u9500" })
+    ] })
+  ] });
+}
+
+// src/pages/Tasks.tsx
+import { useEffect as useEffect3, useState as useState2 } from "react";
+import { jsx as jsx5, jsxs as jsxs5 } from "react/jsx-runtime";
+var statusColors = {
+  running: { bg: "#eef2ff", fg: "#4361ee" },
+  done: { bg: "#e6f9f0", fg: "#0a8f5c" },
+  escalated: { bg: "#feecea", fg: "#ea3943" },
+  cancelled: { bg: "#fff8e1", fg: "#b8860b" },
+  failed: { bg: "#feecea", fg: "#ea3943" }
+};
+function Tasks({ teamId }) {
+  const [tasks, setTasks] = useState2([]);
+  const [loading, setLoading] = useState2(true);
+  useEffect3(() => {
+    if (!teamId) return;
+    api.get(`/v1/teams/${teamId}/tasks`).then((d) => setTasks(d.tasks)).catch(() => {
+    }).finally(() => setLoading(false));
+  }, [teamId]);
+  if (loading) return /* @__PURE__ */ jsx5("div", { style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u52A0\u8F7D\u4E2D..." });
+  return /* @__PURE__ */ jsxs5("div", { children: [
+    /* @__PURE__ */ jsx5("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u4EFB\u52A1\u7BA1\u7406" }),
+    /* @__PURE__ */ jsx5("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24 }, children: "\u5168\u90E8\u4EFB\u52A1(\u8DE8\u56E2\u961F)" }),
+    /* @__PURE__ */ jsx5("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: /* @__PURE__ */ jsxs5("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ jsx5("thead", { children: /* @__PURE__ */ jsx5("tr", { children: ["task_id", "\u7C7B\u578B", "\u7275\u5934\u65B9", "\u6267\u884C\u65B9", "attempt", "\u72B6\u6001", "\u66F4\u65B0\u65F6\u95F4"].map((h) => /* @__PURE__ */ jsx5("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+      /* @__PURE__ */ jsxs5("tbody", { children: [
+        tasks.map((t) => {
+          const sc = statusColors[t.status] ?? statusColors.running;
+          return /* @__PURE__ */ jsxs5("tr", { children: [
+            /* @__PURE__ */ jsxs5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0", fontFamily: "monospace", fontSize: 12 }, children: [
+              t.task_id.slice(0, 12),
+              "..."
+            ] }),
+            /* @__PURE__ */ jsx5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: t.type }),
+            /* @__PURE__ */ jsx5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: t.lead }),
+            /* @__PURE__ */ jsx5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: t.exec }),
+            /* @__PURE__ */ jsxs5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: [
+              t.attempt,
+              "/3"
+            ] }),
+            /* @__PURE__ */ jsx5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx5("span", { style: { padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600, background: sc.bg, color: sc.fg }, children: t.status }) }),
+            /* @__PURE__ */ jsx5("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: new Date(t.updated_at).toLocaleString() })
+          ] }, t.task_id);
+        }),
+        tasks.length === 0 && /* @__PURE__ */ jsx5("tr", { children: /* @__PURE__ */ jsx5("td", { colSpan: 7, style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u6682\u65E0\u4EFB\u52A1" }) })
+      ] })
+    ] }) })
+  ] });
+}
+
+// src/pages/Teams.tsx
+import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
+var TEAMS = [
+  { name: "\u7814\u53D1\u56E2\u961F", id: "33333333-...", nodes: 5, online: 3, status: "active", created: "2026-08-01" },
+  { name: "\u7814\u7A76\u56E2\u961F", id: "34444444-...", nodes: 2, online: 1, status: "active", created: "2026-08-10" }
+];
+function Teams({ onNav }) {
+  return /* @__PURE__ */ jsxs6("div", { children: [
+    /* @__PURE__ */ jsx6("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u56E2\u961F\u7BA1\u7406" }),
+    /* @__PURE__ */ jsx6("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24 }, children: "\u7BA1\u7406\u5168\u90E8\u56E2\u961F" }),
+    /* @__PURE__ */ jsx6("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: /* @__PURE__ */ jsxs6("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ jsx6("thead", { children: /* @__PURE__ */ jsx6("tr", { children: ["\u56E2\u961F\u540D\u79F0", "team_id", "\u8282\u70B9\u6570", "\u5728\u7EBF", "\u72B6\u6001", "\u521B\u5EFA\u65F6\u95F4", ""].map((h) => /* @__PURE__ */ jsx6("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+      /* @__PURE__ */ jsx6("tbody", { children: TEAMS.map((t) => /* @__PURE__ */ jsxs6("tr", { style: { cursor: "pointer" }, onClick: () => onNav("team-detail"), children: [
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx6("strong", { children: t.name }) }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0", fontFamily: "monospace", fontSize: 12 }, children: t.id }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: t.nodes }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: t.online }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx6("span", { style: { padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600, background: "#e6f9f0", color: "#0a8f5c" }, children: t.status }) }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: t.created }),
+        /* @__PURE__ */ jsx6("td", { style: { padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx6("a", { onClick: (e) => {
+          e.stopPropagation();
+          onNav("team-detail");
+        }, children: "\u8BE6\u60C5 \u2192" }) })
+      ] }, t.id)) })
+    ] }) })
+  ] });
+}
+
+// src/pages/TeamDetail.tsx
+import { useState as useState3, useEffect as useEffect4 } from "react";
+import { jsx as jsx7, jsxs as jsxs7 } from "react/jsx-runtime";
+function TeamDetail({ onBack, teamId }) {
+  const [tab, setTab] = useState3("members");
+  const { overview, fetchOverview, suspendAgent, resumeAgent, revokeAgent, issueToken } = useStore();
+  const [newToken, setNewToken] = useState3(null);
+  useEffect4(() => {
+    if (teamId) fetchOverview(teamId);
+  }, [teamId]);
+  const tabs = [
+    { key: "members", label: "\u6210\u5458" },
+    { key: "tokens", label: "Enroll Token" },
+    { key: "grants", label: "\u8DE8\u961F\u6388\u6743" },
+    { key: "settings", label: "\u8BBE\u7F6E" }
+  ];
+  const nodes = overview?.nodes ?? [];
+  return /* @__PURE__ */ jsxs7("div", { children: [
+    /* @__PURE__ */ jsx7("a", { onClick: onBack, style: { color: "#718096", fontSize: 13, cursor: "pointer", display: "inline-flex", marginBottom: 16 }, children: "\u2190 \u8FD4\u56DE\u56E2\u961F\u5217\u8868" }),
+    /* @__PURE__ */ jsx7("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u56E2\u961F\u8BE6\u60C5" }),
+    /* @__PURE__ */ jsxs7("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24, fontFamily: "monospace" }, children: [
+      "team_id: ",
+      teamId
+    ] }),
+    /* @__PURE__ */ jsx7("div", { style: { display: "flex", borderBottom: "2px solid #e2e8f0", marginBottom: 20 }, children: tabs.map((t) => /* @__PURE__ */ jsx7("a", { onClick: () => setTab(t.key), style: { padding: "10px 20px", fontSize: 13, fontWeight: 600, cursor: "pointer", color: tab === t.key ? "#4361ee" : "#718096", borderBottom: tab === t.key ? "2px solid #4361ee" : "2px solid transparent", marginBottom: -2 }, children: t.label }, t.key)) }),
+    tab === "members" && /* @__PURE__ */ jsxs7("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsxs7("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: [
+        "\u56E2\u961F\u6210\u5458(",
+        nodes.length,
+        ")"
+      ] }),
+      /* @__PURE__ */ jsxs7("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+        /* @__PURE__ */ jsx7("thead", { children: /* @__PURE__ */ jsx7("tr", { children: ["\u72B6\u6001", "\u540D\u79F0", "\u5E73\u53F0", "epoch", "\u6700\u8FD1\u6D3B\u8DC3", "\u64CD\u4F5C"].map((h) => /* @__PURE__ */ jsx7("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+        /* @__PURE__ */ jsxs7("tbody", { children: [
+          nodes.map((n) => /* @__PURE__ */ jsxs7("tr", { children: [
+            /* @__PURE__ */ jsx7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx7(StatusDot, { online: n.online, status: n.status }) }),
+            /* @__PURE__ */ jsx7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: /* @__PURE__ */ jsx7("strong", { children: n.name || n.node_id.slice(0, 8) }) }),
+            /* @__PURE__ */ jsx7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: n.platform || "\u2014" }),
+            /* @__PURE__ */ jsx7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: n.key_epoch }),
+            /* @__PURE__ */ jsx7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: n.last_seen }),
+            /* @__PURE__ */ jsxs7("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: [
+              n.status === "active" && /* @__PURE__ */ jsx7("button", { onClick: () => suspendAgent(teamId, n.node_id).catch((e) => useStore.getState().setError(e.message)), style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "1px solid #e2e8f0", background: "#fff", cursor: "pointer", marginRight: 6 }, children: "\u6682\u505C" }),
+              n.status === "suspended" && /* @__PURE__ */ jsx7("button", { onClick: () => resumeAgent(teamId, n.node_id).catch((e) => useStore.getState().setError(e.message)), style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "none", background: "#4361ee", color: "#fff", cursor: "pointer", marginRight: 6 }, children: "\u6062\u590D" }),
+              /* @__PURE__ */ jsx7("button", { onClick: () => {
+                if (window.confirm("\u786E\u8BA4\u6C38\u4E45\u540A\u9500?")) revokeAgent(teamId, n.node_id).catch((e) => useStore.getState().setError(e.message));
+              }, style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "none", background: "#ea3943", color: "#fff", cursor: "pointer" }, children: "\u540A\u9500" })
+            ] })
+          ] }, n.node_id)),
+          nodes.length === 0 && /* @__PURE__ */ jsx7("tr", { children: /* @__PURE__ */ jsx7("td", { colSpan: 6, style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u6682\u65E0\u6210\u5458" }) })
+        ] })
+      ] })
+    ] }),
+    tab === "tokens" && /* @__PURE__ */ jsxs7("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsx7("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "\u7B7E\u53D1\u65B0 Token" }),
+      /* @__PURE__ */ jsx7(
+        "button",
+        {
+          onClick: async () => {
+            try {
+              const r = await issueToken(teamId);
+              setNewToken(r.node_token);
+            } catch (e) {
+              useStore.getState().setError(e.message);
+            }
+          },
+          style: { padding: "8px 16px", borderRadius: 6, border: "none", background: "#4361ee", color: "#fff", cursor: "pointer" },
+          children: "\u7B7E\u53D1(30 \u5206\u949F)"
+        }
+      ),
+      newToken && /* @__PURE__ */ jsxs7("div", { style: { marginTop: 16 }, children: [
+        /* @__PURE__ */ jsx7("p", { style: { color: "#f5a623", fontWeight: 600, fontSize: 13, marginBottom: 8 }, children: "\u26A0\uFE0F \u660E\u6587\u53EA\u663E\u793A\u4E00\u6B21,\u8BF7\u7ACB\u5373\u590D\u5236" }),
+        /* @__PURE__ */ jsx7("div", { style: { background: "#151b2e", color: "#16c784", padding: 14, borderRadius: 8, fontFamily: "monospace", fontSize: 15, wordBreak: "break-all" }, children: newToken })
+      ] })
+    ] }),
+    tab === "grants" && /* @__PURE__ */ jsxs7("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsx7("h2", { children: "\u8DE8\u961F\u6388\u6743" }),
+      /* @__PURE__ */ jsx7("p", { style: { color: "#718096", fontSize: 13 }, children: "\u5728\u5168\u5C40\u8DE8\u961F\u6388\u6743\u9875\u7BA1\u7406\u3002" })
+    ] }),
+    tab === "settings" && /* @__PURE__ */ jsxs7("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsx7("h2", { children: "\u8BBE\u7F6E" }),
+      /* @__PURE__ */ jsxs7("dl", { style: { display: "grid", gridTemplateColumns: "120px 1fr", gap: 6, fontSize: 13 }, children: [
+        /* @__PURE__ */ jsx7("dt", { style: { color: "#718096" }, children: "team_id" }),
+        /* @__PURE__ */ jsx7("dd", { style: { fontFamily: "monospace" }, children: teamId }),
+        /* @__PURE__ */ jsx7("dt", { style: { color: "#718096" }, children: "\u72B6\u6001" }),
+        /* @__PURE__ */ jsx7("dd", { children: "active" })
+      ] })
+    ] })
+  ] });
+}
+
+// src/pages/Grants.tsx
+import { useEffect as useEffect5 } from "react";
+import { useState as useState4 } from "react";
+import { jsx as jsx8, jsxs as jsxs8 } from "react/jsx-runtime";
+function Grants({ teamId }) {
+  const { grants, fetchGrants, createGrant, revokeGrant } = useStore();
+  const [toTeam, setToTeam] = useState4("");
+  const [caps, setCaps] = useState4("");
+  useEffect5(() => {
+    if (teamId) fetchGrants(teamId);
+  }, [teamId]);
+  return /* @__PURE__ */ jsxs8("div", { children: [
+    /* @__PURE__ */ jsx8("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u8DE8\u961F\u6388\u6743" }),
+    /* @__PURE__ */ jsxs8("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20, marginBottom: 20 }, children: [
+      /* @__PURE__ */ jsx8("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "\u521B\u5EFA Grant" }),
+      /* @__PURE__ */ jsxs8("div", { style: { display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }, children: [
+        /* @__PURE__ */ jsxs8("div", { style: { marginBottom: 14 }, children: [
+          /* @__PURE__ */ jsx8("label", { style: { display: "block", fontSize: 12, fontWeight: 600, color: "#718096", marginBottom: 5 }, children: "\u76EE\u6807 Team ID" }),
+          /* @__PURE__ */ jsx8("input", { value: toTeam, onChange: (e) => setToTeam(e.target.value), placeholder: "team-uuid", style: { padding: 8, border: "1px solid #e2e8f0", borderRadius: 6, width: 220 } })
+        ] }),
+        /* @__PURE__ */ jsxs8("div", { style: { marginBottom: 14 }, children: [
+          /* @__PURE__ */ jsx8("label", { style: { display: "block", fontSize: 12, fontWeight: 600, color: "#718096", marginBottom: 5 }, children: "caps_visible(\u9017\u53F7\u5206\u9694,\u7A7A=\u5168\u90E8)" }),
+          /* @__PURE__ */ jsx8("input", { value: caps, onChange: (e) => setCaps(e.target.value), placeholder: "tool:node@20,env:linux", style: { padding: 8, border: "1px solid #e2e8f0", borderRadius: 6, width: 280 } })
+        ] }),
+        /* @__PURE__ */ jsx8(
+          "button",
+          {
+            onClick: async () => {
+              try {
+                await createGrant(teamId, toTeam, caps ? caps.split(",").map((s) => s.trim()) : []);
+                setToTeam("");
+                setCaps("");
+              } catch (e) {
+                useStore.getState().setError(e.message);
+              }
+            },
+            style: { padding: "8px 16px", borderRadius: 6, border: "none", background: "#4361ee", color: "#fff", cursor: "pointer", marginBottom: 14 },
+            children: "\u521B\u5EFA"
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ jsx8("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: /* @__PURE__ */ jsxs8("table", { style: { width: "100%", borderCollapse: "collapse" }, children: [
+      /* @__PURE__ */ jsx8("thead", { children: /* @__PURE__ */ jsx8("tr", { children: ["grant_id", "from", "to", "caps_visible", "\u8FC7\u671F", "\u64CD\u4F5C"].map((h) => /* @__PURE__ */ jsx8("th", { style: { textAlign: "left", padding: "8px 12px", fontSize: 11, color: "#718096", borderBottom: "1px solid #e2e8f0" }, children: h }, h)) }) }),
+      /* @__PURE__ */ jsxs8("tbody", { children: [
+        grants.map((g) => /* @__PURE__ */ jsxs8("tr", { children: [
+          /* @__PURE__ */ jsxs8("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0", fontFamily: "monospace", fontSize: 12 }, children: [
+            g.grant_id.slice(0, 8),
+            "..."
+          ] }),
+          /* @__PURE__ */ jsxs8("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0", fontFamily: "monospace", fontSize: 12 }, children: [
+            g.from_team.slice(0, 8),
+            "..."
+          ] }),
+          /* @__PURE__ */ jsxs8("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0", fontFamily: "monospace", fontSize: 12 }, children: [
+            g.to_team.slice(0, 8),
+            "..."
+          ] }),
+          /* @__PURE__ */ jsx8("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: g.caps_visible.length > 0 ? g.caps_visible.map((c) => /* @__PURE__ */ jsx8("span", { style: { padding: "1px 8px", borderRadius: 12, fontSize: 11, background: "#eef2ff", color: "#4361ee", margin: 1 }, children: c }, c)) : "\u2014(\u5168\u90E8)" }),
+          /* @__PURE__ */ jsx8("td", { style: { padding: 12, borderBottom: "1px solid #e2e8f0" }, children: g.expires_at ? new Date(g.expires_at).toLocaleDateString() : "\u6C38\u4E45" }),
+          /* @__PURE__ */ jsx8("td", { style: { padding: 12 }, children: /* @__PURE__ */ jsx8("button", { onClick: async () => {
+            if (window.confirm("\u786E\u8BA4\u64A4\u9500\u8BE5 Grant?")) {
+              try {
+                await revokeGrant(teamId, g.grant_id);
+              } catch (e) {
+                useStore.getState().setError(e.message);
+              }
+            }
+          }, style: { padding: "4px 10px", fontSize: 12, borderRadius: 6, border: "none", background: "#ea3943", color: "#fff", cursor: "pointer" }, children: "\u64A4\u9500" }) })
+        ] }, g.grant_id)),
+        grants.length === 0 && /* @__PURE__ */ jsx8("tr", { children: /* @__PURE__ */ jsx8("td", { colSpan: 6, style: { padding: 40, textAlign: "center", color: "#718096" }, children: "\u6682\u65E0 Grant" }) })
+      ] })
+    ] }) })
+  ] });
+}
+
+// src/pages/Audit.tsx
+import { useEffect as useEffect6 } from "react";
+import { jsx as jsx9, jsxs as jsxs9 } from "react/jsx-runtime";
+function Audit({ teamId }) {
+  const { fetchOverview, overview } = useStore();
+  useEffect6(() => {
+    if (teamId) fetchOverview(teamId);
+  }, [teamId]);
+  return /* @__PURE__ */ jsxs9("div", { children: [
+    /* @__PURE__ */ jsx9("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u5BA1\u8BA1\u65E5\u5FD7" }),
+    /* @__PURE__ */ jsx9("p", { style: { color: "#718096", fontSize: 13, marginBottom: 24 }, children: "\u5B89\u5168\u4E0E\u64CD\u4F5C\u5BA1\u8BA1(\u53EA\u8BFB)" }),
+    /* @__PURE__ */ jsx9("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: /* @__PURE__ */ jsxs9("p", { style: { color: "#718096", fontSize: 13 }, children: [
+      "\u5BA1\u8BA1\u4E8B\u4EF6\u901A\u8FC7 GET /v1/teams/",
+      "{",
+      "teamId",
+      "}",
+      "/audit \u83B7\u53D6;\u540E\u7AEF\u8DEF\u7531\u5DF2\u5C31\u7EEA(registry logAudit/getAuditEvents)\u3002"
+    ] }) })
+  ] });
+}
+
+// src/pages/Settings.tsx
+import { jsx as jsx10, jsxs as jsxs10 } from "react/jsx-runtime";
+function Settings() {
+  return /* @__PURE__ */ jsxs10("div", { children: [
+    /* @__PURE__ */ jsx10("h1", { style: { fontSize: 22, marginBottom: 4 }, children: "\u7CFB\u7EDF\u8BBE\u7F6E" }),
+    /* @__PURE__ */ jsxs10("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20, marginBottom: 20 }, children: [
+      /* @__PURE__ */ jsx10("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "\u5168\u5C40\u53C2\u6570" }),
+      /* @__PURE__ */ jsx10("dl", { style: { display: "grid", gridTemplateColumns: "180px 1fr", gap: 6, fontSize: 13 }, children: ["offer TTL(project):300s", "lease(project):400s", "max_attempts:3", "max_dispatch_rounds:3", "exp \u6F02\u79FB\u9884\u7B97:10 \u5206\u949F", "max_hops:8"].map((s) => {
+        const [k, v] = s.split(":");
+        return /* @__PURE__ */ jsxs10("div", { style: { display: "contents" }, children: [
+          /* @__PURE__ */ jsx10("dt", { style: { color: "#718096" }, children: k }),
+          /* @__PURE__ */ jsx10("dd", { style: { margin: 0 }, children: v })
+        ] }, k);
+      }) })
+    ] }),
+    /* @__PURE__ */ jsxs10("div", { style: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20 }, children: [
+      /* @__PURE__ */ jsx10("h2", { style: { fontSize: 15, fontWeight: 600, marginBottom: 12 }, children: "Owner" }),
+      /* @__PURE__ */ jsxs10("dl", { style: { display: "grid", gridTemplateColumns: "180px 1fr", gap: 6, fontSize: 13 }, children: [
+        /* @__PURE__ */ jsx10("dt", { style: { color: "#718096" }, children: "owner_user_id" }),
+        /* @__PURE__ */ jsx10("dd", { style: { margin: 0 }, children: "u1" }),
+        /* @__PURE__ */ jsx10("dt", { style: { color: "#718096" }, children: "\u90AE\u7BB1" }),
+        /* @__PURE__ */ jsx10("dd", { style: { margin: 0 }, children: "owner@qlong.io" })
+      ] })
+    ] })
+  ] });
+}
+
+// src/App.tsx
+import { jsx as jsx11, jsxs as jsxs11 } from "react/jsx-runtime";
+var NAV = [
+  { key: "dashboard", icon: "\u{1F4CA}", label: "\u603B\u89C8" },
+  { key: "agents", icon: "\u{1F5A5}\uFE0F", label: "Agent \u7BA1\u7406" },
+  { key: "tasks", icon: "\u{1F4CB}", label: "\u4EFB\u52A1\u7BA1\u7406" },
+  { key: "teams", icon: "\u{1F3E2}", label: "\u56E2\u961F\u7BA1\u7406" },
+  { key: "grants", icon: "\u{1F517}", label: "\u8DE8\u961F\u6388\u6743" },
+  { key: "audit", icon: "\u{1F4DC}", label: "\u5BA1\u8BA1\u65E5\u5FD7" },
+  { key: "settings", icon: "\u2699\uFE0F", label: "\u7CFB\u7EDF\u8BBE\u7F6E" }
+];
+function App() {
+  const [page, setPage] = useState5("dashboard");
+  const [teamId, setTeamId] = useState5("33333333-3333-4333-8333-333333333333");
+  useEffect7(() => {
+    document.title = "\u7FA4\u9F99\u63A7\u5236\u53F0 - " + (NAV.find((n) => n.key === page)?.label ?? "\u8BE6\u60C5");
+  }, [page]);
+  return /* @__PURE__ */ jsxs11("div", { style: { display: "flex", minHeight: "100vh" }, children: [
+    /* @__PURE__ */ jsxs11("nav", { style: { width: 230, background: "#151b2e", display: "flex", flexDirection: "column", position: "fixed", top: 0, bottom: 0 }, children: [
+      /* @__PURE__ */ jsxs11("div", { style: { padding: "24px 20px 16px", fontSize: 20, fontWeight: 700, color: "#fff" }, children: [
+        "\u{1F409} \u7FA4\u9F99",
+        /* @__PURE__ */ jsx11("span", { style: { color: "#4361ee" }, children: "Console" })
+      ] }),
+      /* @__PURE__ */ jsx11("div", { style: { flex: 1 }, children: NAV.map((n) => /* @__PURE__ */ jsxs11("a", { onClick: () => setPage(n.key), style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "11px 20px",
+        fontSize: 14,
+        cursor: "pointer",
+        color: page === n.key ? "#ccd6f6" : "#8892b0",
+        borderLeft: page === n.key ? "3px solid #4361ee" : "3px solid transparent",
+        background: page === n.key ? "rgba(67,97,238,.12)" : "transparent"
+      }, children: [
+        /* @__PURE__ */ jsx11("span", { style: { width: 20, textAlign: "center" }, children: n.icon }),
+        " ",
+        n.label
+      ] }, n.key)) }),
+      /* @__PURE__ */ jsxs11("div", { style: { padding: "16px 20px", borderTop: "1px solid rgba(255,255,255,.06)" }, children: [
+        /* @__PURE__ */ jsx11("div", { style: { fontSize: 11, color: "#8892b0" }, children: "Owner" }),
+        /* @__PURE__ */ jsx11("div", { style: { fontSize: 14, color: "#fff", marginTop: 2 }, children: "owner@qlong.io" })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs11("main", { style: { marginLeft: 230, padding: "28px 36px", flex: 1, maxWidth: 1200 }, children: [
+      page === "dashboard" && /* @__PURE__ */ jsx11(Dashboard, { onNav: setPage, teamId }),
+      page === "agents" && /* @__PURE__ */ jsx11(Agents, { onNav: setPage, teamId }),
+      page === "agent-detail" && /* @__PURE__ */ jsx11(AgentDetail, { onBack: () => setPage("agents") }),
+      page === "tasks" && /* @__PURE__ */ jsx11(Tasks, { teamId }),
+      page === "teams" && /* @__PURE__ */ jsx11(Teams, { onNav: setPage }),
+      page === "team-detail" && /* @__PURE__ */ jsx11(TeamDetail, { onBack: () => setPage("teams"), teamId }),
+      page === "grants" && /* @__PURE__ */ jsx11(Grants, { teamId }),
+      page === "audit" && /* @__PURE__ */ jsx11(Audit, { teamId }),
+      page === "settings" && /* @__PURE__ */ jsx11(Settings, {})
+    ] })
+  ] });
+}
+
+// src/main.tsx
+import { jsx as jsx12 } from "react/jsx-runtime";
+createRoot(document.getElementById("root")).render(/* @__PURE__ */ jsx12(App, {}));

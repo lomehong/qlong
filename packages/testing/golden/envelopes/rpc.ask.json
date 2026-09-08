@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "type": "rpc.ask",
+  "msg_id": "0c5ffab4-7cef-4243-b12c-1155c3b5e2ab",
+  "ts": "2026-09-06T12:00:00+08:00",
+  "from": {
+    "node_id": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256",
+    "key_epoch": 1
+  },
+  "to": {
+    "node_id": "3853e8c3-1631-46b8-b9c7-ceb21f9bc009",
+    "team_id": "8105ef32-9b68-447c-a420-4924e59e3256"
+  },
+  "trace": {
+    "trace_id": "5bd25a63-8914-49a2-82eb-436bf728d8cd",
+    "parent_span": null,
+    "origin_node": "9f484c0a-88fb-4dbd-ab3a-3d7bd5879a7a"
+  },
+  "body": {
+    "request_id": "272db02c-7227-4209-bbcd-facfd7b19c67",
+    "question": "当前分支名?",
+    "timeout_ms": 5000
+  }
+}
