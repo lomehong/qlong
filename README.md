@@ -1,3 +1,8 @@
+---
+title: 群龙 Qlong
+short_description: 分布式 AI Agent 协作系统——每台设备一条自治的"龙"
+---
+
 # 群龙 Qlong
 
 > 「见群龙无首,吉。」——《周易·乾·用九》
