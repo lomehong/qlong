@@ -339,8 +339,7 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
 
         // 控制台概览(评审 I-21,§8.7):GET /v1/teams/{id}/overview
         if (seg[3] === 'overview' && method === 'GET' && seg.length === 4) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          requireTeamAccess(opts, req, teamId);
           const nodes = registry.listTeamNodes(teamId);
           const grantList = registry.listGrants(teamId);
           sendJson(res, 200, {
@@ -352,40 +351,35 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           return;
         }
         if (seg[3] === 'nodes' && method === 'GET' && seg.length === 4) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          requireTeamAccess(opts, req, teamId);
           const caps = url.searchParams.getAll('caps');
           sendJson(res, 200, { nodes: registry.listTeamNodes(teamId, { caps }), next_cursor: null });
           return;
         }
         // 任务列表:v0.2 GET /v1/teams/{id}/tasks
         if (seg[3] === 'tasks' && method === 'GET' && seg.length === 4) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          requireTeamAccess(opts, req, teamId);
           const tasks = registry.listTasks(teamId, 100);
           sendJson(res, 200, { tasks });
           return;
         }
         // 节点恢复(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/resume
         if (seg[3] === 'nodes' && seg[5] === 'resume' && method === 'POST' && seg.length === 6) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可操作', 403);
+          requireTeamAccess(opts, req, teamId);
           registry.resume(seg[4] as string);
           sendJson(res, 200, { ok: true });
           return;
         }
         // 节点暂停(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/suspend
         if (seg[3] === 'nodes' && seg[5] === 'suspend' && method === 'POST' && seg.length === 6) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可操作', 403);
+          requireTeamAccess(opts, req, teamId);
           registry.suspend(seg[4] as string);
           sendJson(res, 200, { ok: true });
           return;
         }
         // 审计查询(§11):GET /v1/teams/{id}/audit
         if (seg[3] === 'audit' && method === 'GET' && seg.length === 4) {
-          const self = registry.authByToken(token ?? '');
-          if (self.team_id !== teamId) throw new ApiError('not_team_member', '仅本 team 成员可查', 403);
+          requireTeamAccess(opts, req, teamId);
           const events = registry.getAuditEvents ? registry.getAuditEvents(teamId, 1000) : [];
           sendJson(res, 200, { events });
           return;
@@ -434,6 +428,32 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
   });
 
   return server;
+
+  /**
+   * 团队级访问(读/成员操作):人类会话(02 §3.1)或 同队 active 节点 token 任一即可。
+   * 会话缺失且无有效节点 token → 401(控制台跳登录页)。
+   */
+  function requireTeamAccess(o: RegistryServerOptions, req: IncomingMessage, teamId: string): void {
+    // ① 人类会话(02 §3.1):有效登录会话即可(读/成员操作)
+    if (o.auth) {
+      const session = o.auth.sessionFromCookie(req.headers.cookie);
+      if (session) return;
+    }
+    // ② 节点 token:须 active 且属于该 team
+    const token = bearer(req);
+    if (token) {
+      const self = registry.authByToken(token);
+      if (self.team_id !== teamId) {
+        throw new ApiError('not_team_member', '仅本 team 成员可访问', 403);
+      }
+      if (self.status !== 'active') {
+        throw new ApiError('node_suspended', `节点状态 ${self.status}`, 403);
+      }
+      return;
+    }
+    // ③ 无任何凭证 → 401(控制台跳登录页;P12 失败关闭)
+    throw new ApiError('unauthorized', '未登录或无本 team 节点凭证', 401, false, { login: '#/login' });
+  }
 
   async function assertOwner(o: RegistryServerOptions, req: IncomingMessage, teamId: string): Promise<void> {
     // ① 人类会话(02 §3.1):有效登录会话即 owner(v1 单运营者);变更类请求须携带会话 CSRF
