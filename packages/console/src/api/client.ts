@@ -7,22 +7,9 @@ const BASE = envObj.VITE_QLONG_API ?? '';
 let csrfToken = '';
 export function setCsrf(t: string) { csrfToken = t; }
 
-/** owner 凭证(创空间部署:QLONG_OWNER_TOKEN 同值),经 Bearer 头访问 owner 端点 */
-let ownerToken = '';
-export function setOwnerToken(t: string): void {
-  ownerToken = t.trim();
-  try { localStorage.setItem('qlong_owner_token', ownerToken); } catch { /* ignore */ }
-}
-export function initOwnerToken(): void {
-  try {
-    const t = localStorage.getItem('qlong_owner_token');
-    if (t) ownerToken = t;
-  } catch { /* ignore */ }
-}
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' };
   if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
-  if (ownerToken) headers['Authorization'] = 'Bearer ' + ownerToken;
   const res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined, credentials: 'include' });
   if (res.status === 401) { window.location.hash = '#/login'; throw new Error('未认证'); }
   if (!res.ok) {

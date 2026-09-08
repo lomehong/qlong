@@ -11,6 +11,10 @@ export const ERROR_CODES = [
   'rate_limited',
   'quota_exceeded',
   'owner_auth_unconfigured',
+  'unauthorized',
+  'auth_failed',
+  'auth_error',
+  'csrf_mismatch',
   'bad_request',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];

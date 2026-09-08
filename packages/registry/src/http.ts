@@ -4,6 +4,7 @@
  * 错误:统一信封 {error:{code,message,retryable?,details?}}(评审 I-31)。
  */
 import { join } from 'node:path';
+import { SESSION_COOKIE, AuthError } from './auth.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError } from './errors.js';
 import type { Registry } from './directory.js';
@@ -18,6 +19,8 @@ export interface RegistryServerOptions {
   enrollRatePerMinPerIp?: number;
   /** 书坊分发目录(纪要 §3):提供 /install.sh、/install.ps1、/install、/releases/<版本>/<文件> */
   distDir?: string;
+  /** 人类账号与会话(02 §3.1):配置后 owner 端点走会话 Cookie 鉴权(未登录 → 401 → 控制台跳登录页) */
+  auth?: import('./auth.js').AuthService;
 }
 
 const MAX_BODY = 1 << 20;
@@ -71,6 +74,16 @@ function bearer(req: IncomingMessage): string | undefined {
   if (typeof h !== 'string' || !h.startsWith('Bearer ')) return undefined;
   const token = h.slice(7).trim();
   return token.length > 0 ? token : undefined;
+}
+
+function sessionIdFromCookie(cookieHeader: string | undefined): string | undefined {
+  if (!cookieHeader) return undefined;
+  const raw = cookieHeader.split(';').map((c) => c.trim()).find((c) => c.startsWith(SESSION_COOKIE + '='));
+  return raw ? raw.slice(SESSION_COOKIE.length + 1) : undefined;
+}
+
+function sessionCookie(sessionId: string): string {
+  return `${SESSION_COOKIE}=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`;
 }
 
 const DIST_TYPES: Record<string, string> = {
@@ -155,6 +168,53 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
       if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install' || url.pathname === '/' || url.pathname === '/console' || url.pathname === '/console-bundle.js')) {
         await serveDist(res, opts.distDir, url.pathname);
+        return;
+      }
+
+      // ---- 人类账号与会话(02 §3.1):公开路由;会话经 HttpOnly Cookie ----
+      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'status' && opts.auth) {
+        sendJson(res, 200, { needs_init: opts.auth.needsInit });
+        return;
+      }
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'register' && opts.auth) {
+        const body = await readJson(req);
+        try {
+          opts.auth.register(String(body.username ?? ''), String(body.password ?? ''));
+        } catch (e) {
+          if (e instanceof AuthError) throw new ApiError('auth_error', e.message, e.httpStatus);
+          throw e;
+        }
+        // 首个管理员注册即登录(免再输一次)
+        const r = opts.auth.login(String(body.username ?? ''), String(body.password ?? ''));
+        res.setHeader('Set-Cookie', sessionCookie(r.sessionId));
+        sendJson(res, 200, { username: r.username, csrf: r.csrf });
+        return;
+      }
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'login' && opts.auth) {
+        const body = await readJson(req);
+        let r;
+        try {
+          r = opts.auth.login(String(body.username ?? ''), String(body.password ?? ''));
+        } catch (e) {
+          if (e instanceof AuthError) throw new ApiError('auth_failed', e.message, e.httpStatus);
+          throw e;
+        }
+        res.setHeader('Set-Cookie', sessionCookie(r.sessionId));
+        sendJson(res, 200, { username: r.username, csrf: r.csrf });
+        return;
+      }
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'logout' && opts.auth) {
+        const sid = sessionIdFromCookie(req.headers.cookie);
+        if (sid) opts.auth.logout(sid);
+        res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`);
+        sendJson(res, 200, {});
+        return;
+      }
+      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'me' && opts.auth) {
+        const sid = sessionIdFromCookie(req.headers.cookie);
+        const session = sid ? opts.auth.session(sid) : undefined;
+        if (!session) throw new ApiError('unauthorized', '未登录', 401, false, { login: '#/login' });
+        sendJson(res, 200, { username: session.username, csrf: session.csrf });
         return;
       }
 
@@ -376,6 +436,21 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
   return server;
 
   async function assertOwner(o: RegistryServerOptions, req: IncomingMessage, teamId: string): Promise<void> {
+    // ① 人类会话(02 §3.1):有效登录会话即 owner(v1 单运营者);变更类请求须携带会话 CSRF
+    if (o.auth) {
+      const session = o.auth.sessionFromCookie(req.headers.cookie);
+      if (!session) {
+        throw new ApiError('unauthorized', '未登录', 401, false, { login: '#/login' });
+      }
+      const method = (req.method ?? 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') {
+        if (req.headers['x-csrf-token'] !== session.csrf) {
+          throw new ApiError('csrf_mismatch', 'CSRF 校验失败,请刷新页面重试', 403);
+        }
+      }
+      return;
+    }
+    // ② 产品侧接入点(无独立产品时的替代:QLONG_OWNER_TOKEN 环境变量)
     if (!o.ownerAuth) throw new ApiError('owner_auth_unconfigured', 'owner 鉴权未配置(产品侧接入点)', 503);
     const ok = await o.ownerAuth(req, teamId);
     if (!ok) throw new ApiError('not_team_member', 'owner 鉴权失败', 403);
