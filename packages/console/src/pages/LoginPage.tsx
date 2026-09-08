@@ -68,10 +68,6 @@ export default function LoginPage({ onLogin }: { onLogin: (username: string) => 
             {mode === 'init' ? '创建管理员并登录' : '登录'}
           </button>
         </div>
-        <div style={{ marginTop: 18, color: '#8892b0', fontSize: 11, lineHeight: 1.6 }}>
-          说明:此账号是<b>人类操作者</b>身份(生成邀请码、管理节点)。
-          Agent/节点不使用账号登录,而是经邀请码 enroll + 节点 token 接入。
-        </div>
       </div>
     </div>
   );
