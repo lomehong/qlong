@@ -42,13 +42,16 @@ async function writeRelease(dir) {
     bundle: true,
     format: 'esm',
     jsx: 'automatic',
-    loader: { '.css': 'empty' },
+    // ui.css 是真实样式表:css loader 让 esbuild 产出伴随的 console-bundle.css
+    loader: { '.css': 'css' },
   });
   copyFileSync(join(ROOT, 'packages/console/index.html'), rel('console.html'));
   {
-    // 发布态:dev 引用(/src/main.tsx)替换为构建产物
+    // 发布态:dev 引用(/src/main.tsx)替换为构建产物(JS + CSS)
     const htmlPath = rel('console.html');
-    const html = readFileSync(htmlPath, 'utf8').replace('/src/main.tsx', './console-bundle.js');
+    const html = readFileSync(htmlPath, 'utf8')
+      .replace('/src/main.tsx', './console-bundle.js')
+      .replace('</head>', '<link rel="stylesheet" href="./console-bundle.css"></head>');
     writeFileSync(htmlPath, html);
   }
 

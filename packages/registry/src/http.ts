@@ -112,8 +112,8 @@ async function serveDist(res: ServerResponse, distDir: string, pathname: string)
     rel = 'latest/' + pathname.slice(1);
   } else if (pathname === '/' || pathname === '/console' || pathname === '/console.html') {
     rel = 'latest/console.html';
-  } else if (pathname === '/console-bundle.js') {
-    rel = 'latest/console-bundle.js';
+  } else if (pathname === '/console-bundle.js' || pathname === '/console-bundle.css') {
+    rel = 'latest/' + pathname.slice(1);
   } else {
     rel = pathname.replace(/^\/releases\//, '');
   }
@@ -166,7 +166,7 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       }
 
       // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
-      if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install' || url.pathname === '/' || url.pathname === '/console' || url.pathname === '/console-bundle.js')) {
+      if (method === 'GET' && opts.distDir && (seg[0] === 'releases' || url.pathname === '/install.sh' || url.pathname === '/install.ps1' || url.pathname === '/install' || url.pathname === '/' || url.pathname === '/console' || url.pathname === '/console-bundle.js' || url.pathname === '/console-bundle.css')) {
         await serveDist(res, opts.distDir, url.pathname);
         return;
       }
