@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useStore } from './store/useStore';
 import { setCsrf } from './api/client';
 import { authApi } from './api/auth';
+import { ErrorToast } from './components/ui';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
@@ -26,13 +27,19 @@ const NAV = [
 ] as const;
 type PageKey = string;
 
+/** 由页面 key 推导高亮的导航项(详情页归入其列表页) */
+function navOf(page: PageKey): PageKey {
+  if (page === 'agent-detail') return 'agents';
+  if (page === 'team-detail') return 'teams';
+  return page;
+}
+
 export default function App() {
   const [page, setPage] = useState<PageKey>('dashboard');
   const [teamId, setTeamId] = useState('');
   const [authState, setAuthState] = useState<'checking' | 'login' | 'ready'>('checking');
   const [username, setUsername] = useState('');
   const loadTeams = useStore((s) => s.loadTeams);
-  const teams = useStore((s) => s.teams);
 
   const refreshAfterLogin = (u: string): void => {
     setUsername(u);
@@ -60,50 +67,58 @@ export default function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
-  useEffect(() => { document.title = '群龙控制台 - ' + (NAV.find(n => n.key === page)?.label ?? '详情'); }, [page]);
+  useEffect(() => { document.title = '群龙控制台 - ' + (NAV.find(n => n.key === navOf(page))?.label ?? '详情'); }, [page]);
+
   if (authState === 'checking') {
-    return <div style={{ minHeight: '100vh', background: '#0d1117', color: '#8892b0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>会话检查中…</div>;
+    return <div className="boot-screen"><span className="spinner" />会话检查中…</div>;
   }
   if (authState === 'login') {
     return <LoginPage onLogin={(u) => refreshAfterLogin(u)} />;
   }
+
+  const activeNav = navOf(page);
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
-      <nav style={{ width: 230, background: '#151b2e', display: 'flex', flexDirection: 'column', position: 'fixed', top: 0, bottom: 0 }}>
-        <div style={{ padding: '24px 20px 16px', fontSize: 20, fontWeight: 700, color: '#fff' }}>🐉 群龙<span style={{ color: '#4361ee' }}>Console</span></div>
-        <div style={{ flex: 1 }}>
+      <nav className="sidebar" aria-label="主导航">
+        <div className="sidebar-brand">🐉 <span className="brand-text">群龙<span style={{ color: 'var(--accent)' }}>Console</span></span></div>
+        <div className="sidebar-nav">
           {NAV.map(n => (
-            <a key={n.key} onClick={() => setPage(n.key as PageKey)} style={{
-              display: 'flex', alignItems: 'center', gap: 12, padding: '11px 20px', fontSize: 14, cursor: 'pointer',
-              color: page === n.key ? '#ccd6f6' : '#8892b0',
-              borderLeft: page === n.key ? '3px solid #4361ee' : '3px solid transparent',
-              background: page === n.key ? 'rgba(67,97,238,.12)' : 'transparent',
-            }}>
-              <span style={{ width: 20, textAlign: 'center' }}>{n.icon}</span> {n.label}
-            </a>
+            <button
+              key={n.key}
+              type="button"
+              className={`nav-item${activeNav === n.key ? ' active' : ''}`}
+              aria-current={activeNav === n.key ? 'page' : undefined}
+              onClick={() => setPage(n.key as PageKey)}
+            >
+              <span className="nav-icon" aria-hidden>{n.icon}</span>
+              <span className="nav-label">{n.label}</span>
+            </button>
           ))}
         </div>
-        <div style={{ padding: '16px 20px', borderTop: '1px solid rgba(255,255,255,.06)' }}>
-          <div style={{ fontSize: 11, color: '#8892b0' }}>Owner</div>
-          <div style={{ fontSize: 14, color: '#fff', marginTop: 2 }}>{username || 'owner'}</div>
-          <button onClick={() => { void authApi.logout().then(() => { setAuthState('login'); location.hash = '#/login'; }); }}
-            style={{ marginTop: 10, padding: '5px 12px', border: '1px solid #2a3145', borderRadius: 6, background: 'transparent', color: '#8892b0', fontSize: 12, cursor: 'pointer' }}>
+        <div className="sidebar-footer">
+          <div className="owner-label">OWNER</div>
+          <div className="owner-name">{username || 'owner'}</div>
+          <button className="btn-logout" onClick={() => { void authApi.logout().then(() => { setAuthState('login'); location.hash = '#/login'; }); }}>
             退出登录
           </button>
         </div>
       </nav>
-      <main style={{ marginLeft: 230, padding: '28px 36px', flex: 1, maxWidth: 1200 }}>
-        {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
-        {page === 'install' && <Install teamId={teamId} />}
-        {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
-        {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
-        {page === 'tasks' && <Tasks teamId={teamId} />}
-        {page === 'teams' && <Teams onNav={setPage} />}
-        {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
-        {page === 'grants' && <Grants teamId={teamId} />}
-        {page === 'audit' && <Audit teamId={teamId} />}
-        {page === 'settings' && <Settings />}
+      <main className="main">
+        {/* key 驱动页面切换的进入动效(减弱动效偏好下自动禁用) */}
+        <div key={page} className="page-enter">
+          {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
+          {page === 'install' && <Install teamId={teamId} />}
+          {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
+          {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
+          {page === 'tasks' && <Tasks teamId={teamId} />}
+          {page === 'teams' && <Teams onNav={setPage} />}
+          {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
+          {page === 'grants' && <Grants teamId={teamId} />}
+          {page === 'audit' && <Audit teamId={teamId} />}
+          {page === 'settings' && <Settings />}
+        </div>
       </main>
+      <ErrorToast />
     </div>
   );
 }

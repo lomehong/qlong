@@ -1,5 +1,8 @@
 # 群龙(Qlong)安装脚本 — Windows PowerShell
-# 用法: irm https://qlong.qianji.io/install.ps1 | iex; Install-Qlong -EnrollToken <token>
+# 用法(两步式,token 不进命令行 history,评审 I-16):
+#   irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP\qlong-install.ps1"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qlong-install.ps1" -EnrollToken "<邀请码>"
+# 卸载: powershell -File <本脚本> -Uninstall
 param(
   [string]$EnrollToken,
   [string]$InstallDir = "$env:LOCALAPPDATA\qlong",
@@ -36,22 +39,24 @@ if ($nodeMajor -lt 20) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-Write-Host ">>> 下载 qlong.exe..."
-$releaseUrl = "$DistBase/releases/$Version/qlong-win-x64.cmd"
-Invoke-WebRequest -Uri $releaseUrl -OutFile "$InstallDir\qlong.cmd"
+# 下载发布物(评审 I-22):程序 bundle + 启动垫片,二者缺一不可
+$releaseBase = "$DistBase/releases/$Version"
+Write-Host ">>> 下载 qlong($Version)..."
+Invoke-WebRequest -Uri "$releaseBase/qlong-cli.mjs" -OutFile "$InstallDir\qlong-cli.mjs"
+Invoke-WebRequest -Uri "$releaseBase/qlong-win-x64.cmd" -OutFile "$InstallDir\qlong.cmd"
 
-# 发布物校验(评审 I-16):SHA256SUMS.txt 比对,不匹配即中止
+# 发布物校验(评审 I-16):对程序 bundle 做 SHA256 比对,不匹配即中止
 Write-Host ">>> 校验发布物..."
-$sumsUrl = $releaseUrl -replace 'qlong-[a-z]+', 'SHA256SUMS.txt'
+$sumsUrl = "$releaseBase/SHA256SUMS.txt"
 $sumsPath = "$InstallDir\SHA256SUMS.txt"
 try {
   Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath
-  $expectedLine = (Get-Content $sumsPath) | Where-Object { $_ -match 'qlong-[a-z]+' }
+  $expectedLine = (Get-Content $sumsPath) | Where-Object { $_ -match 'qlong-cli\.mjs' }
   $expected = ($expectedLine -split '\s+')[0]
-  $actual = (Get-FileHash -Algorithm SHA256 "$InstallDir\qlong.cmd").Hash.ToLower()
+  $actual = (Get-FileHash -Algorithm SHA256 "$InstallDir\qlong-cli.mjs").Hash.ToLower()
   if ($expected -and $actual -ne $expected) {
-    Write-Error ">>> 安装中止:发布物校验和不匹配(预期 $expected,实际 $actual)"
-    Remove-Item "$InstallDir\qlong.cmd", $sumsPath -ErrorAction SilentlyContinue
+    Write-Host ">>> 安装中止:发布物校验和不匹配(预期 $expected,实际 $actual)" -ForegroundColor Red
+    Remove-Item "$InstallDir\qlong-cli.mjs", "$InstallDir\qlong.cmd", $sumsPath -ErrorAction SilentlyContinue
     exit 1
   }
   Write-Host ">>> 校验通过"
@@ -60,7 +65,7 @@ try {
 }
 Remove-Item $sumsPath -ErrorAction SilentlyContinue
 
-# 环境变量
+# 环境变量(qlong 命令全局可用)
 $currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($currentPath -notlike "*$InstallDir*") {
   [Environment]::SetEnvironmentVariable('Path', "$currentPath;$InstallDir", 'User')
@@ -81,4 +86,4 @@ Write-Host ">>> 验收入网状态..."
 & "$InstallDir\qlong.cmd" status
 
 Write-Host ">>> 安装完成: $InstallDir\qlong.cmd"
-Write-Host ">>> 卸载: Install-Qlong -Uninstall(含凭证清除)"
+Write-Host ">>> 卸载: powershell -File `$PSCommandPath -Uninstall(含凭证清除)"

@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
+import { StatusDot } from '../components/StatusDot';
+import { Loading, Empty } from '../components/ui';
 
 export default function Dashboard({ onNav, teamId }: { onNav: (p: string) => void; teamId: string }) {
   const { overview, fetchOverview, audits } = useStore();
@@ -8,39 +10,50 @@ export default function Dashboard({ onNav, teamId }: { onNav: (p: string) => voi
   const online = overview?.stats?.online ?? 0;
   const grantCount = overview?.grants?.length ?? 0;
   const stats = [
-    { n: total, label: 'Agent 总数', target: 'agents' },
-    { n: online, label: '在线', target: 'agents' },
-    { n: grantCount, label: '跨队 Grant', target: 'grants' },
-    { n: audits.length, label: '审计事件', target: 'audit' },
+    { n: total, label: 'Agent 总数', icon: '🖥️', target: 'agents' },
+    { n: online, label: '在线', icon: '🟢', target: 'agents' },
+    { n: grantCount, label: '跨队 Grant', icon: '🔗', target: 'grants' },
+    { n: audits.length, label: '审计事件', icon: '📜', target: 'audit' },
   ];
+  const nodes = overview?.nodes ?? [];
   return (
     <div>
-      <h1 style={{ fontSize: 22, marginBottom: 4 }}>总览</h1>
-      <p style={{ color: '#718096', fontSize: 13, marginBottom: 24 }}>全平台聚合数据</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 16, marginBottom: 24 }}>
+      <div className="page-head">
+        <h1 className="page-title">总览</h1>
+        <p className="page-sub">全平台聚合数据</p>
+      </div>
+      <div className="stat-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14, marginBottom: 22 }}>
         {stats.map(s => (
-          <div key={s.label} onClick={() => onNav(s.target)} style={{ background: '#fff', borderRadius: 8, padding: 18, border: '1px solid #e2e8f0', cursor: 'pointer' }}>
-            <div style={{ fontSize: 30, fontWeight: 700 }}>{s.n}</div>
-            <div style={{ fontSize: 12, color: '#718096', marginTop: 4 }}>{s.label}</div>
+          <div key={s.label} className="card card-clickable" role="button" tabIndex={0}
+            onClick={() => onNav(s.target)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNav(s.target); } }}
+            style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 18px' }}>
+            <span style={{ fontSize: 22 }} aria-hidden>{s.icon}</span>
+            <div>
+              <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.2, fontVariantNumeric: 'tabular-nums' }}>{s.n}</div>
+              <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 1 }}>{s.label}</div>
+            </div>
           </div>
         ))}
       </div>
-      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: 20 }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Agent 概况</h2>
-        {overview ? (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead><tr>{['名称', '状态', '平台', 'key_epoch', '最近活跃'].map(h => <th key={h} style={{ textAlign: 'left', padding: '8px 12px', fontSize: 11, color: '#718096', borderBottom: '1px solid #e2e8f0' }}>{h}</th>)}</tr></thead>
-            <tbody>{(overview.nodes ?? []).map(n => (
-              <tr key={n.node_id}>
-                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0' }}><strong>{n.name || n.node_id.slice(0, 8)}</strong></td>
-                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0' }}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: n.status === 'suspended' ? '#f5a623' : n.online ? '#16c784' : '#cbd5e0' }} />{n.status === 'suspended' ? 'suspended' : n.online ? '在线' : '离线'}</span></td>
-                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0' }}>{n.platform || '—'}</td>
-                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0' }}>{n.key_epoch}</td>
-                <td style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0' }}>{n.last_seen}</td>
-              </tr>
-            ))}</tbody>
-          </table>
-        ) : <p style={{ color: '#718096', fontSize: 13 }}>加载中...</p>}
+      <div className="card">
+        <h2 className="card-title">Agent 概况</h2>
+        {!overview ? <Loading /> : nodes.length === 0 ? <Empty icon="🖥️" text="暂无 Agent,可先在「节点安装」生成邀请码接入" /> : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr>{['名称', '状态', '平台', 'key_epoch', '最近活跃'].map(h => <th key={h}>{h}</th>)}</tr></thead>
+              <tbody>{nodes.map(n => (
+                <tr key={n.node_id}>
+                  <td><strong>{n.name || n.node_id.slice(0, 8)}</strong></td>
+                  <td><StatusDot online={n.online} status={n.status} /></td>
+                  <td>{n.platform || '—'}</td>
+                  <td className="mono">{n.key_epoch}</td>
+                  <td>{n.last_seen}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
