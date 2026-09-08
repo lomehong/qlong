@@ -23,7 +23,7 @@ interface Store {
   revokeAgent: (teamId: string, nodeId: string) => Promise<void>;
   createGrant: (teamId: string, to: string, caps: string[], ttlMs?: number) => Promise<void>;
   revokeGrant: (teamId: string, gid: string) => Promise<void>;
-  issueToken: (teamId: string, ttlMs?: number) => Promise<{ node_token: string; expires_at: string }>;
+  issueToken: (teamId: string, ttlMs?: number) => Promise<{ token: string }>;
   setError: (e: string | null) => void;
 }
 export const useStore = create<Store>()((set, get) => ({
@@ -67,6 +67,6 @@ export const useStore = create<Store>()((set, get) => ({
     return r.teams;
   },
   issueToken: async (teamId, ttlMs) => {
-    return api.post<{ node_token: string; expires_at: string }>(`/v1/teams/${teamId}/enroll-tokens`, { ttl_ms: ttlMs });
+    return api.post<{ token: string }>(`/v1/teams/${teamId}/enroll-tokens`, { ttl_ms: ttlMs });
   },
 }));

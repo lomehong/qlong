@@ -49,7 +49,7 @@ export default function TeamDetail({ onBack, teamId }: { onBack: () => void; tea
       {tab === 'tokens' && (
         <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: 20 }}>
           <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>签发新 Token</h2>
-          <button onClick={async () => { try { const r = await issueToken(teamId); setNewToken(r.node_token); } catch (e) { useStore.getState().setError((e as Error).message); } }}
+          <button onClick={async () => { try { const r = await issueToken(teamId); setNewToken(r.token); } catch (e) { useStore.getState().setError((e as Error).message); } }}
             style={{ padding: '8px 16px', borderRadius: 6, border: 'none', background: '#4361ee', color: '#fff', cursor: 'pointer' }}>签发(30 分钟)</button>
           {newToken && (
             <div style={{ marginTop: 16 }}>

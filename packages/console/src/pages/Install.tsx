@@ -27,8 +27,8 @@ export default function Install({ teamId }: { teamId: string }) {
     setBusy(true);
     try {
       const r = await issueToken(teamId);
-      setToken(r.node_token);
-      setExpires(r.expires_at);
+      setToken(r.token);
+      setExpires('邀请码有效期 30 分钟(单次使用),请尽快在目标设备完成安装');
     } catch (e) {
       alert('生成失败:' + (e instanceof Error ? e.message : String(e)));
     } finally {
