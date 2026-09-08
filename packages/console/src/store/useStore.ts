@@ -4,7 +4,7 @@ import { api } from '../api/client';
 export interface AgentRecord { node_id: string; name: string; team_id: string; status: string; online: boolean; platform: string; version: string; key_epoch: number; caps_rev: number; last_seen: string; }
 export interface GrantRecord { grant_id: string; from_team: string; to_team: string; caps_visible: string[]; expires_at?: number; }
 export interface AuditRecord { ts: string; event: string; node: string; team: string; reason: string; trace_id?: string; }
-export interface TeamSummary { team_id: string; name: string; owner_user_id: string | null; nodes: number; online: number }
+export interface TeamSummary { team_id: string; name: string; owner_user_id: string | null; state: string; created_at: string; nodes: number; online: number }
 export interface TeamOverview { team_id: string; nodes: AgentRecord[]; grants: GrantRecord[]; stats: { total: number; online: number }; }
 
 interface Store {

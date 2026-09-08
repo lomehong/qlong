@@ -129,7 +129,7 @@ export default function App() {
           {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
           {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
           {page === 'tasks' && <Tasks teamId={teamId} />}
-          {page === 'teams' && <Teams onNav={setPage} />}
+          {page === 'teams' && <Teams onOpen={(tid) => { setTeamId(tid); setPage('team-detail'); }} />}
           {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
           {page === 'grants' && <Grants teamId={teamId} />}
           {page === 'audit' && <Audit teamId={teamId} />}

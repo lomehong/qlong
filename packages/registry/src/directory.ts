@@ -500,14 +500,16 @@ export class Registry {
   }
 
   /** owner 视角团队清单(控制台动态发现用;含节点/在线计数) */
-  listTeams(): Array<{ team_id: string; name: string; owner_user_id: string | null; nodes: number; online: number }> {
-    const out: Array<{ team_id: string; name: string; owner_user_id: string | null; nodes: number; online: number }> = [];
+  listTeams(): Array<{ team_id: string; name: string; owner_user_id: string | null; state: string; created_at: string; nodes: number; online: number }> {
+    const out: Array<{ team_id: string; name: string; owner_user_id: string | null; state: string; created_at: string; nodes: number; online: number }> = [];
     for (const t of this.teams.values()) {
       const nodes = [...this.nodes.values()].filter((n) => n.team_id === t.team_id && n.status !== 'revoked');
       out.push({
         team_id: t.team_id,
         name: t.name,
         owner_user_id: t.owner_user_id ?? null,
+        state: t.state,
+        created_at: t.created_at,
         nodes: nodes.length,
         online: nodes.filter((n) => this.presence.get(n.node_id) === true).length,
       });
