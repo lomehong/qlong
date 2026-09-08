@@ -1,4 +1,5 @@
-const BASE = import.meta.env.VITE_QLONG_API ?? 'http://127.0.0.1:3200';
+// 部署态默认同源(控制台与 API 由同一服务承载);本地开发经 VITE_QLONG_API 指向后端
+const BASE = (import.meta.env.VITE_QLONG_API as string | undefined) ?? '';
 let csrfToken = '';
 export function setCsrf(t: string) { csrfToken = t; }
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
