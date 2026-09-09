@@ -1,4 +1,8 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>群龙控制台</title>
-<style>html,body{margin:0;background:#f5f7fb}</style></head>
+<style>html,body{margin:0;background:#f5f7fb}</style>
+<script>
+// 首帧前预置可见宽度档位,避免窄屏闪桌面布局;之后由 useVisibleWidth 探针接管
+(function(){var w=window.innerWidth;document.documentElement.dataset.vw=w<640?'s':w<860?'m':'l';})();
+</script></head>
 <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>

@@ -3,6 +3,7 @@ import { useStore } from './store/useStore';
 import { setCsrf } from './api/client';
 import { authApi } from './api/auth';
 import { ErrorToast } from './components/ui';
+import { useVisibleWidthTier } from './hooks/useVisibleWidth';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
@@ -46,6 +47,9 @@ export default function App() {
   const [authState, setAuthState] = useState<'checking' | 'login' | 'ready'>('checking');
   const [username, setUsername] = useState('');
   const loadTeams = useStore((s) => s.loadTeams);
+  // 真实可见宽度档位(s/m/l)写入 <html data-vw>,驱动全局响应式;
+  // 在固定宽度 iframe(创空间)内也能随外层窗口缩放/横滚正确适配
+  useVisibleWidthTier();
 
   /** 页面切换写回 hash(深链接/刷新可恢复);hashchange 再回灌同值,无环 */
   const setPage = (p: PageKey): void => {

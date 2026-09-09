@@ -22,7 +22,7 @@ export default function Dashboard({ onNav, teamId }: { onNav: (p: string) => voi
         <h1 className="page-title">总览</h1>
         <p className="page-sub">全平台聚合数据</p>
       </div>
-      <div className="stat-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14, marginBottom: 22 }}>
+      <div className="stat-grid" style={{ marginBottom: 22 }}>
         {stats.map(s => (
           <div key={s.label} className="card card-clickable" role="button" tabIndex={0}
             onClick={() => onNav(s.target)}

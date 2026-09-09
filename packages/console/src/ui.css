@@ -54,6 +54,7 @@
 *, *::before, *::after { box-sizing: border-box; }
 
 html, body { margin: 0; padding: 0; }
+html { background: var(--bg); }
 
 body {
   font-family: var(--font);
@@ -63,6 +64,9 @@ body {
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* 流式宽度:被外层 iframe 裁剪时由 useVisibleWidth 钉成真实可见宽度,
+     窗口拖多少布局跟多少;未裁剪时变量不存在,自然占满视口 */
+  width: var(--app-vw, auto);
 }
 
 h1, h2, h3, p, dl, dd, figure { margin: 0; }
@@ -291,7 +295,8 @@ button { font-family: inherit; }
 .toast-stack {
   position: fixed;
   top: 18px;
-  right: 18px;
+  /* 锚定到可见区域右缘,而非(可能被裁剪的)视口右缘 */
+  right: calc(100vw - var(--app-vw, 100vw) + 18px);
   z-index: 1000;
   display: flex;
   flex-direction: column;
@@ -303,8 +308,8 @@ button { font-family: inherit; }
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  min-width: 260px;
-  max-width: 380px;
+  min-width: min(260px, calc(var(--app-vw, 100vw) - 24px));
+  max-width: min(380px, calc(var(--app-vw, 100vw) - 24px));
   padding: 12px 14px;
   border-radius: var(--radius);
   font-size: 13px;
@@ -550,40 +555,46 @@ button { font-family: inherit; }
   font-size: 14px;
 }
 
-/* ---------- 响应式 ---------- */
-/* 平板/窄桌面:侧边栏收成图标轨,底栏保留紧凑退出按钮 */
-@media (max-width: 860px) {
-  .sidebar { width: 64px; }
-  .sidebar .nav-label, .sidebar .brand-text { display: none; }
-  .sidebar-brand { padding: 20px 0 12px; text-align: center; }
-  .nav-item { justify-content: center; padding: 11px 0; }
-  .main { margin-left: 64px; padding: 20px 16px 40px; }
-  .stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
-  .sidebar-footer { padding: 12px 0; text-align: center; }
-  .sidebar-footer .owner-label, .sidebar-footer .owner-name, .sidebar-footer .logout-label { display: none; }
-  .btn-logout { width: auto; margin-top: 0; padding: 7px 10px; }
-}
+/* ---------- 响应式 ----------
+   不由媒体查询驱动:页面可能被嵌入固定宽度 iframe(如创空间包装页
+   min-width 1280),iframe 内 innerWidth 恒定,媒体查询失效。
+   档位(s <640 / m 640–860 / l ≥860)由 useVisibleWidth 的
+   IntersectionObserver 探针写入 <html data-vw>,反映真实可见宽度。 */
+
+/* m/s 档:侧边栏收成图标轨,底栏保留紧凑退出按钮 */
+html[data-vw='m'] .sidebar, html[data-vw='s'] .sidebar { width: 64px; }
+html[data-vw='m'] .sidebar .nav-label, html[data-vw='s'] .sidebar .nav-label,
+html[data-vw='m'] .sidebar .brand-text, html[data-vw='s'] .sidebar .brand-text { display: none; }
+html[data-vw='m'] .sidebar-brand, html[data-vw='s'] .sidebar-brand { padding: 20px 0 12px; text-align: center; }
+html[data-vw='m'] .nav-item, html[data-vw='s'] .nav-item { justify-content: center; padding: 11px 0; }
+html[data-vw='m'] .main, html[data-vw='s'] .main { margin-left: 64px; padding: 20px 16px 40px; }
+html[data-vw='m'] .sidebar-footer, html[data-vw='s'] .sidebar-footer { padding: 12px 0; text-align: center; }
+html[data-vw='m'] .sidebar-footer .owner-label, html[data-vw='s'] .sidebar-footer .owner-label,
+html[data-vw='m'] .sidebar-footer .owner-name, html[data-vw='s'] .sidebar-footer .owner-name,
+html[data-vw='m'] .sidebar-footer .logout-label, html[data-vw='s'] .sidebar-footer .logout-label { display: none; }
+html[data-vw='m'] .btn-logout, html[data-vw='s'] .btn-logout { width: auto; margin-top: 0; padding: 7px 10px; }
+
+/* 统计卡:流式网格,随可用宽度连续增减列数(配合 --app-vw 裁剪钉宽);
+   min 取 22% 保证宽屏恰好 4 列,不会出现空轨道 */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(clamp(170px, 22%, 100%), 1fr)); gap: 14px; }
 
 /* 表单行:窄屏时字段与按钮全宽堆叠 */
 .form-grid { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
 .form-grid .field { display: flex; flex-direction: column; flex: 1 1 220px; max-width: 420px; }
 .form-grid .field .input, .form-grid .field .select { width: 100%; }
 
-@media (max-width: 640px) {
-  .form-grid .field { flex-basis: 100%; max-width: none; }
-  .form-grid > .btn { width: 100%; }
-  .dl { grid-template-columns: 1fr; gap: 2px 0; }
-  .dl dt { margin-top: 8px; font-size: 12px; }
-  .dl dd { margin-bottom: 2px; }
-  .tabs { overflow-x: auto; }
-  .tab { white-space: nowrap; }
-  .toast-stack { left: 12px; right: 12px; }
-  .toast { min-width: 0; max-width: none; }
-  .stat-grid { gap: 10px; }
-  .main { padding: 16px 12px 40px; }
-  .card:not(.card-flush) { padding: 16px; }
-  .page-title { font-size: 19px; }
-}
+/* s 档:表单/dl 堆叠、整体收紧 */
+html[data-vw='s'] .form-grid .field { flex-basis: 100%; max-width: none; }
+html[data-vw='s'] .form-grid > .btn { width: 100%; }
+html[data-vw='s'] .dl { grid-template-columns: 1fr; gap: 2px 0; }
+html[data-vw='s'] .dl dt { margin-top: 8px; font-size: 12px; }
+html[data-vw='s'] .dl dd { margin-bottom: 2px; }
+html[data-vw='s'] .tabs { overflow-x: auto; }
+html[data-vw='s'] .tab { white-space: nowrap; }
+html[data-vw='s'] .stat-grid { gap: 10px; }
+html[data-vw='s'] .main { padding: 16px 12px 40px; }
+html[data-vw='s'] .card:not(.card-flush) { padding: 16px; }
+html[data-vw='s'] .page-title { font-size: 19px; }
 
 /* 触屏表格滚动手感 */
 .table-wrap { -webkit-overflow-scrolling: touch; }
