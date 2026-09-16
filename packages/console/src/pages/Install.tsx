@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useStore } from '../store/useStore';
+import { unixInstallCommand, winInstallCommand } from './install-commands';
 
 /**
  * 节点安装页(纪要 §4 入网体验的页面侧):
@@ -12,12 +13,8 @@ export default function Install({ teamId }: { teamId: string }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState('');
 
-  const unixCmd = token
-    ? `curl -fsSL https://lomehong-qlong.ms.show/install.sh -o /tmp/qlong-install.sh && echo "${token}" | sh /tmp/qlong-install.sh --enroll-stdin${version !== 'latest' ? ` --version ${version}` : ''}`
-    : '# 先生成邀请码';
-  const winCmd = token
-    ? `irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\qlong-install.ps1" -EnrollToken "${token}"${version !== 'latest' ? ` -Version ${version}` : ''}`
-    : '# 先生成邀请码';
+  const unixCmd = token ? unixInstallCommand(token, version) : '# 先生成邀请码';
+  const winCmd = token ? winInstallCommand(token, version) : '# 先生成邀请码';
 
   const copy = (key: string, text: string): void => {
     void navigator.clipboard.writeText(text).then(() => {

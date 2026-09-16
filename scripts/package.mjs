@@ -94,8 +94,8 @@ async function writeRelease(dir) {
 
 /** /install 落地页:三平台安装命令 + 邀请码替换(纪要 §4 流程的页面侧) */
 function installHtml() {
-  const unix = `curl -fsSL https://qlong.qianji.io/install.sh -o /tmp/qlong-install.sh && echo "<邀请码>" | sh /tmp/qlong-install.sh --enroll-stdin`;
-  const win = `irm https://qlong.qianji.io/install.ps1 -OutFile "$env:TEMP\\qlong-install.ps1"; Install-Qlong -EnrollToken "<邀请码>"`;
+  const unix = `curl -fsSL https://lomehong-qlong.ms.show/install.sh -o /tmp/qlong-install.sh && echo "<邀请码>" | sh /tmp/qlong-install.sh --enroll-stdin`;
+  const win = `irm https://lomehong-qlong.ms.show/install.ps1 -OutFile "$env:TEMP/qlong-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP/qlong-install.ps1" -EnrollToken "<邀请码>"`;
   return `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>群龙 · 安装节点</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
