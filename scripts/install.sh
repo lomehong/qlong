@@ -86,10 +86,16 @@ if [ "$NODE_MAJOR" -lt 24 ]; then
   exit 1
 fi
 
-# enrollment(token 经 stdin,不进命令行)
+# enrollment(token 经 stdin;中心地址随分发源走:装自哪个中心就入哪个网)
+GW_BASE="$DIST_BASE"
+case "$GW_BASE" in
+  https://*) GW_BASE="wss://${GW_BASE#https://}" ;;
+  http://*) GW_BASE="ws://${GW_BASE#http://}" ;;
+esac
+GATEWAY_URL="${QLONG_GATEWAY_URL:-$GW_BASE/gateway}"
 if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 注册入网..."
-  echo "$ENROLL_TOKEN" | "$INSTALL_DIR/qlong" enroll --stdin
+  echo "$ENROLL_TOKEN" | "$INSTALL_DIR/qlong" enroll --stdin --registry "$DIST_BASE" --gateway "$GATEWAY_URL"
   echo ">>> 入网完成"
 fi
 

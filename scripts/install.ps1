@@ -71,10 +71,16 @@ if ($currentPath -notlike "*$InstallDir*") {
   [Environment]::SetEnvironmentVariable('Path', "$currentPath;$InstallDir", 'User')
 }
 
-# enrollment
+# enrollment(token 经 stdin;中心地址随分发源走:装自哪个中心就入哪个网)
+$gwBase = $DistBase -replace '^https://', 'wss://' -replace '^http://', 'ws://'
+$gatewayUrl = if ($env:QLONG_GATEWAY_URL) { $env:QLONG_GATEWAY_URL } else { "$gwBase/gateway" }
 if ($EnrollToken) {
   Write-Host ">>> 注册入网..."
-  $EnrollToken | & "$InstallDir\qlong.cmd" enroll --stdin
+  $EnrollToken | & "$InstallDir\qlong.cmd" enroll --stdin --registry "$DistBase" --gateway "$gatewayUrl"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host ">>> 安装中止:入网失败(邀请码无效/过期或网络不可达);回控制台重新生成邀请码后重跑同一安装命令" -ForegroundColor Red
+    exit 1
+  }
   Write-Host ">>> 入网完成"
 }
 
