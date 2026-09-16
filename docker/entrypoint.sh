@@ -32,9 +32,13 @@ ACL=""
 if [ "$QLONG_WINDOWS_ACL_CONFIRMED" = "1" ]; then
   ACL="--confirm-windows-acl"
 fi
-EXTRA=""
-for a in "$@"; do
-  EXTRA="$EXTRA \"$a\""
-done
-# shellcheck disable=SC2086
-exec node dist/latest/qlong-cli.mjs server --data-dir "$DATA_DIR" --storage-mode "$MODE" $CONFIRM $ACL $EXTRA
+# 以位置参数组合命令(不用字符串拼接:未加引号的展开不会剥掉字面引号,
+# 上个版本曾把 "--dist-dir" 连引号一起传给 CLI,导致 dist-dir 失效)
+set -- node dist/latest/qlong-cli.mjs server --data-dir "$DATA_DIR" --storage-mode "$MODE" $CONFIRM "$@"
+if [ -n "$ACL" ]; then
+  set -- "$@" $ACL
+fi
+if [ -n "$QLONG_DATA_BASE" ]; then
+  set -- "$@" --data-base "$QLONG_DATA_BASE"
+fi
+exec "$@"
