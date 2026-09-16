@@ -1,0 +1,36 @@
+#!/bin/sh
+# 群龙中心容器入口:持久存储准入的部署便利层(语义见 docs/repair/CENTER-STORAGE.md)。
+#
+# - QLONG_STORAGE_MODE=create|open:显式指定;
+#   缺省 auto:数据目录无 center.sqlite(全新卷)→ create;已有 → open。
+#   卷被整体清空 = 新部署(无数据可丢);主库缺失但 sidecar 尚存属损坏场景,
+#   由存储层拒绝(孤儿 sidecar/校验和不通过),绝不静默重建。
+# - QLONG_LOCAL_FS_CONFIRMED 缺省 1:容器 overlay/本地卷即本地盘;
+#   挂载 NFS/SMB/云同步盘的运维必须置 0,并另行显式确认——服务将拒绝启动。
+# - QLONG_DATA_DIR 缺省 /data/qlong;平台持久卷请对齐挂载到该路径。
+# 注:路径含空格时本入口不支持(请直接以完整命令行启动);镜像 CMD 参数(如 --dist-dir)原样透传。
+set -e
+DATA_DIR="${QLONG_DATA_DIR:-/data/qlong}"
+MODE="${QLONG_STORAGE_MODE:-auto}"
+mkdir -p "$DATA_DIR"
+if [ "$MODE" = "auto" ]; then
+  if [ -f "$DATA_DIR/center.sqlite" ]; then
+    MODE=open
+  else
+    MODE=create
+  fi
+fi
+CONFIRM=""
+if [ "${QLONG_LOCAL_FS_CONFIRMED:-1}" != "0" ]; then
+  CONFIRM="--confirm-local-filesystem"
+fi
+ACL=""
+if [ "$QLONG_WINDOWS_ACL_CONFIRMED" = "1" ]; then
+  ACL="--confirm-windows-acl"
+fi
+EXTRA=""
+for a in "$@"; do
+  EXTRA="$EXTRA \"$a\""
+done
+# shellcheck disable=SC2086
+exec node dist/latest/qlong-cli.mjs server --data-dir "$DATA_DIR" --storage-mode "$MODE" $CONFIRM $ACL $EXTRA

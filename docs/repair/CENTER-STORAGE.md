@@ -32,7 +32,7 @@
 
 首次创建后，下次启动必须改为 `open`；数据库丢失、损坏、较新 schema 或迁移校验失败时，保留文件并进入恢复流程，不能改回 `create`“修复”。
 
-容器部署也需要显式设置上述环境变量和私有本地卷；Dockerfile 不设置自动初始化，也不自动宣称卷已通过持久性准入。未配置时拒绝启动是预期行为。
+容器部署：镜像内置入口 `docker/entrypoint.sh` 落位显式准入——`QLONG_DATA_DIR`（默认 `/data/qlong`，平台持久卷请对齐挂载）上 `QLONG_STORAGE_MODE` 缺省 `auto`（目录无 `center.sqlite` → create，已有 → open；可显式覆盖为 create/open）；`QLONG_LOCAL_FS_CONFIRMED` 缺省 1（容器 overlay/本地卷即本地盘；挂载 NFS/SMB/云同步盘必须置 0，服务将拒绝启动直至另行显式确认）。策略边界：卷被整体清空视为新部署（auto 重新 create）；主库缺失但 sidecar 尚存属损坏场景，由存储层拒绝，绝不静默重建。未挂持久卷时数据随容器生命周期，auto 每次全量重建都会得到全新中心——需要跨重建留存就必须挂卷。
 
 生产持久模式拒绝同时配置 `QLONG_AUTH_DIR`、`QLONG_MAILBOX_FILE` 或旧 cluster 设置；旧文件仅供后续显式迁移。没有自动读取、覆盖、删除或重置已有账号、节点凭证及发行物。
 
@@ -67,3 +67,4 @@
 - 当前验证覆盖中心目录/Auth/投影及单 authority 消息接管恢复，**不是任务与外部副作用均可恢复**；不要向不受信节点开放远端执行。tombstone 暂无 GC，计入容量上限，满时拒收而非淘汰。
 - Registry 草稿克隆/校验扫描状态，Auth 查询校验全部认证记录。这是优先兑现单实例一致性的实现，不是容量基准；后续须测同步 SQLite 延迟、限制会话/任务数据规模，不能据单元测试声称大规模可用。
 - 备份必须使用 SQLite backup API 或经验证的停机一致备份；禁止在线只复制主库、删除 WAL/SHM 或替换 ownership 文件。
+
