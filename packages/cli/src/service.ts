@@ -16,12 +16,16 @@ export function selfEntrance(argv1 = process.argv[1] ?? 'qlong', platform: Servi
   return platform === 'win32' ? p : p.replace(/\\/g, '/');
 }
 
-/** 生成注册物内容与安装/卸载命令(纯函数,供测试与执行共用) */
+/** 生成注册物内容与安装/卸载命令(纯函数,供测试与执行共用);runArgs 透传给 `qlong run`(存储准入等) */
 export function serviceDefinition(
   platform: ServicePlatform,
   entrance: string,
   home: string,
+  runArgs: string[] = [],
 ): { path: string; content?: string; installCmds: string[]; uninstallCmds: string[] } {
+  const shellTail = (): string => (runArgs.length
+    ? ' ' + runArgs.map(shellQuote).join(' ')
+    : '');
   if (platform === 'linux') {
     const path = home.split('\\').join('/') + '/.config/systemd/user/qlong.service';
     const content = [
@@ -30,7 +34,7 @@ export function serviceDefinition(
       'After=network-online.target',
       '',
       '[Service]',
-      `ExecStart=${entrance} run`,
+      `ExecStart=${entrance} run${shellTail()}`,
       'Restart=on-failure',
       'RestartSec=5',
       '',
@@ -57,6 +61,7 @@ export function serviceDefinition(
       '  <array>',
       `    <string>${entrance}</string>`,
       '    <string>run</string>',
+      ...runArgs.map((a) => `    <string>${xmlEscape(a)}</string>`),
       '  </array>',
       '  <key>RunAtLoad</key><true/>',
       '  <key>KeepAlive</key><true/>',
@@ -75,23 +80,35 @@ export function serviceDefinition(
   return {
     path: '',
     installCmds: [
-      `schtasks /Create /F /TN ${SERVICE_NAME} /SC ONLOGON /TR "'${entrance}' run"`,
+      `schtasks /Create /F /TN ${SERVICE_NAME} /SC ONLOGON /TR "'${entrance}' run${shellTail()}"`,
     ],
     uninstallCmds: [`schtasks /Delete /F /TN ${SERVICE_NAME}`],
   };
 }
 
-/** 安装服务(生成注册物 + 执行启用命令 + 启动节点) */
+/** plist 字符串转义(参数含路径时防 XML 注入) */
+function xmlEscape(value: string): string {
+  return value.replace(/[&<>"']/g, (c) =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&apos;');
+}
+
+/** shell 风格参数引用(ExecStart/schtasks /TR):含空白时加双引号 */
+function shellQuote(value: string): string {
+  return /\s/.test(value) ? '"' + value.replace(/"/g, '\\"') + '"' : value;
+}
+
+/** 安装服务(生成注册物 + 执行启用命令 + 启动节点);runArgs 透传给 `qlong run` */
 export async function serviceInstall(
   platform: ServicePlatform,
   entrance: string,
   home: string,
+  runArgs: string[] = [],
   exec: (cmd: string) => Promise<void> = async (cmd) => {
     const { execSync } = await import('node:child_process');
     execSync(cmd, { stdio: 'inherit' });
   },
 ): Promise<{ path: string }> {
-  const def = serviceDefinition(platform, entrance, home);
+  const def = serviceDefinition(platform, entrance, home, runArgs);
   if (def.content) {
     mkdirSync(dirname(def.path), { recursive: true });
     writeFileSync(def.path, def.content);

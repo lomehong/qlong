@@ -134,6 +134,7 @@ describe('M3:跨机 lost/改派演练(真实时序,R3/R4/R7/R8)', () => {
       priv: kpA.priv,
       client: clientA,
       params: FAST_PARAMS,
+      validateAcceptance: () => true, // PROJECT 缺省拒绝;本演练验证 lost/改派而非验收闸
     });
     sessions.push(sessionA);
     clients.push(clientA);

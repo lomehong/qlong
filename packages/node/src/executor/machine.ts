@@ -116,6 +116,13 @@ export class ExecutorMachine {
     ) {
       return [];
     }
+    // R2/D24:先检查新鲜性,再允许更高 attempt 隐式取消;死单不得覆盖在途或已决记录。
+    if (o.exp !== undefined && isExpiredByExp(o.exp, o.now)) {
+      if (this.rec.state === 'idle' || this.rec.state === 'rejected') {
+        this.rec = { state: 'rejected', lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
+      }
+      return [this.outFor(o, 'task.reject', { reason_code: 'expired' })];
+    }
     // 已有同任务在途:R0 特别则
     if (
       (this.rec.state === 'offered' || this.rec.state === 'running') &&
@@ -149,11 +156,6 @@ export class ExecutorMachine {
       ];
     }
 
-    // R2/D24:信封 exp 过期(含离线补投的死单)→ reject(expired),不得照单开跑
-    if (o.exp !== undefined && isExpiredByExp(o.exp, o.now)) {
-      this.rec = { state: 'rejected', lastSeq: 0, driverCompleted: false, cancelReceived: false, paused: false };
-      return [this.outFor(o, 'task.reject', { reason_code: 'expired' })];
-    }
     // 评审 M1-ARCH-2:v1 单执行位 —— 异任务 offer 在已有在途任务时拒绝(busy),防覆盖致旧任务不可撤销
     if (this.rec.state === 'running' || this.rec.state === 'offered') {
       return [
@@ -371,9 +373,10 @@ export class ExecutorMachine {
     return [this.stopAllTimers(), this.out('task.fail', from, failBody)];
   }
 
-  /** 入站 cancel(01 §5.2/R5):running → 停止+ack;已完成未交付 → result+completed_before_cancel;result_sent → ack 带标记不重发 */
+  /** 入站 cancel(调用方绑定 task_id):当前 peer/attempt 才可停止或获取完成回执(01 §5.2/R5)。 */
   onCancel(fromNode: string, attempt: number): ExecAction[] {
-    if (this.rec.state === 'running' && attempt === this.rec.attempt) {
+    if (fromNode !== this.rec.from || attempt !== this.rec.attempt) return [];
+    if (this.rec.state === 'running') {
       this.rec.cancelReceived = true;
       if (this.rec.driverCompleted) {
         // 已完成但尚未交付时收到 cancel → 仍发 result 并标 completed_before_cancel(R5)
@@ -388,7 +391,7 @@ export class ExecutorMachine {
         this.out('task.cancel.ack', fromNode, {}),
       ];
     }
-    if (this.rec.state === 'offered' && attempt === this.rec.attempt) {
+    if (this.rec.state === 'offered') {
       this.rec.state = 'stopped';
       return [this.stopAllTimers(), this.out('task.cancel.ack', fromNode, {})];
     }

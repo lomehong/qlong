@@ -78,12 +78,26 @@ describe('凭证生命周期(02 §6)', () => {
   it('轮换:epoch+1 + 历史保留 + 纪元现势区分 current/historical/unknown', () => {
     const r = reg();
     const { node_token } = enrollActive(r);
-    r.rotateKeys(node_token, { pubkey: PUB2 });
+    // 显式测试验证器;不再把无签名的轮换当作成功路径。
+    r.rotateKeys(node_token, { pubkey: PUB2, sig: 'test-signature' }, (_node, input) => input.sig === 'test-signature');
     const node = [...r.nodes.values()][0] as NonNullable<ReturnType<Registry['getNode']>>;
     expect(node.keys.map((k) => k.epoch)).toEqual([1, 2]);
     expect(r.lookupPubkey(node.node_id, 2)).toMatchObject({ status: 'current', pubkey: PUB2 });
     expect(r.lookupPubkey(node.node_id, 1)).toMatchObject({ status: 'historical', pubkey: PUB1 });
     expect(r.lookupPubkey(node.node_id, 99).status).toBe('unknown_epoch');
+  });
+
+  it('轮换缺少验证器/签名/有效 token 或验证失败均拒绝且不推进目录', () => {
+    const r = reg();
+    const { node_id, node_token } = enrollActive(r);
+    const before = r.directoryEpoch;
+    expect(() => r.rotateKeys(node_token, { pubkey: PUB2, sig: 'test-signature' })).toThrowError(/未配置/);
+    expect(() => r.rotateKeys(node_token, { pubkey: PUB2 }, () => true)).toThrowError(/签名/);
+    expect(() => r.rotateKeys(node_token, { pubkey: PUB2, sig: 'test-signature' }, () => false)).toThrowError(/签名/);
+    expect(() => r.rotateKeys('invalid', { pubkey: PUB2, sig: 'test-signature' }, () => true)).toThrowError(/凭证/);
+    expect(() => r.rotateKeys(node_token, { pubkey: PUB2, sig: 'test-signature' }, () => { throw new Error('verifier failed'); })).toThrowError(/签名/);
+    expect(r.directoryEpoch).toBe(before);
+    expect(r.getNode(node_id)?.keys).toEqual([{ epoch: 1, pubkey: PUB1 }]);
   });
 
   it('suspend → 认证 403 node_suspended;revoke → token 吊销 + 403 node_revoked', () => {

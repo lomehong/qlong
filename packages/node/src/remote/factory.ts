@@ -13,12 +13,12 @@
  *   await node.start();
  */
 import { GatewayClient } from '../gateway-client.js';
-import { FileOutbox } from '../outbox/file-outbox.js';
 import { DeepSeekHarnessDriver } from '../driver/harness-driver.js';
 import { RemoteNodeSession } from './session.js';
-import { loadOrCreateIdentity } from '../identity.js';
+import { loadIdentity } from '../identity.js';
+import { createRegistryVerifier, loadRegistryIdentity, REGISTRY_TIMEOUT_MS } from './registry-verifier.js';
 import { CapsHealth } from '../caps-health.js';
-import { makeAudit } from '@qlong/core';
+import { makeAudit, publicKeyFromPrivate, toBase64 } from '@qlong/core';
 import { DEFAULT_PARAMS, type QlongParams } from '@qlong/core';
 import type { LoadSnapshot } from '../executor/gates.js';
 
@@ -31,7 +31,7 @@ export interface ProductionNodeOptions {
   params?: QlongParams;
   /** 覆盖默认 harness driver */
   driver?: import('../executor/driver.js').ExecutorDriver;
-  /** 身份私钥(02 §3.2);缺省从 dataDir/identity.json 恢复或创建 */
+  /** 身份私钥(02 §3.2);缺省仅恢复已 enroll 的 dataDir/identity.json,绝不自动创建 */
   privKey?: Uint8Array;
   /** 静态能力标签(03 篇):启动时上报 /v1/nodes/me/caps,闸3 亦使用 */
   capabilities?: () => string[];
@@ -41,6 +41,8 @@ export interface ProductionNodeOptions {
   reportIntervalMs?: number;
   /** 审计事件出口(含能力自愈 cap_tag_* 事件,01 §11) */
   onAudit?: (a: import('@qlong/core').AuditRecord) => void;
+  /** Best-effort terminal POST failure; no raw response/network error is exposed. */
+  onTaskReportError?: (failure: { task_id: string; status?: number }) => void | Promise<void>;
 }
 
 export interface ProductionNode {
@@ -51,19 +53,19 @@ export interface ProductionNode {
 }
 
 export async function createProductionNode(opts: ProductionNodeOptions): Promise<ProductionNode> {
-  // 1) 用 node_token 向 registry 查自身身份(/v1/nodes/me)
-  const res = await fetch(`${opts.registryUrl}/v1/nodes/me`, {
-    headers: { Authorization: `Bearer ${opts.nodeToken}` },
-  });
-  if (!res.ok) throw new Error(`registry /v1/nodes/me 返回 ${res.status}:无法获取节点身份`);
-  const me = (await res.json()) as { node_id: string; team_id: string; key_epoch: number };
-
-  // 1.5) 身份私钥:显式传入 > dataDir 存档(02 §3.2;空私钥会导致全部出站签名无效)
-  const identity = opts.privKey
-    ? { priv: opts.privKey, pubkeyB64: '' }
-    : opts.dataDir
-      ? loadOrCreateIdentity(opts.dataDir)
-      : { priv: new Uint8Array(0), pubkeyB64: '' };
+  // 1) 只恢复已登记身份;失败不得生成替代密钥或创建 outbox/workspace。
+  let priv: Uint8Array;
+  let pubkey: string;
+  try {
+    const seed = opts.privKey !== undefined ? opts.privKey : opts.dataDir ? loadIdentity(opts.dataDir).priv : undefined;
+    if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new Error('missing identity');
+    priv = new Uint8Array(seed);
+    pubkey = toBase64(publicKeyFromPrivate(priv));
+  } catch {
+    throw new Error('节点身份缺失或损坏:请恢复已登记身份,不会自动生成替代密钥');
+  }
+  const me = await loadRegistryIdentity(opts);
+  if (me.pubkey !== pubkey) throw new Error('节点身份不匹配:本地私钥不对应 registry 当前纪元公钥');
 
   // 2) 构建 GatewayClient(FileOutbox 持久化 + weak-net 重连已内置)
   const client = new GatewayClient({
@@ -71,6 +73,7 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     nodeToken: opts.nodeToken,
     params: opts.params ?? DEFAULT_PARAMS,
     dataDir: opts.dataDir,
+    verifyInbound: createRegistryVerifier(opts, me),
   });
 
   // 3) 组装 session(harness driver 或自定义)
@@ -86,7 +89,7 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     nodeId: me.node_id,
     teamId: me.team_id,
     keyEpoch: me.key_epoch,
-    priv: identity.priv,
+    priv,
     client,
     params: opts.params ?? DEFAULT_PARAMS,
     driver: opts.driver ?? new DeepSeekHarnessDriver(),
@@ -108,6 +111,8 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+      redirect: 'error',
     }).catch(() => {});
   };
 
@@ -135,13 +140,33 @@ export async function createProductionNode(opts: ProductionNodeOptions): Promise
     reportCaps(); // 周期内顺带做变更检测(自愈/静态变更即报,03 §4)
   };
 
-  // 5) taskStatusReporter:lead 终态时自动上报到 registry
+  const reportTaskError = async (failure: { task_id: string; status?: number }): Promise<void> => {
+    if (opts.onTaskReportError) {
+      try {
+        await opts.onTaskReportError(failure);
+        return;
+      } catch {
+        // Callback failures are contained too; never log their potentially sensitive errors.
+      }
+    }
+    console.error('任务终态上报失败');
+  };
+
+  // 5) Best-effort terminal POST only; no durable intent, retry, or shutdown flush yet.
+  // Reliable reporting remains pending node transactional intents (stages 4/8).
   session.opts.taskStatusReporter = (t) => {
-    fetch(opts.registryUrl + '/v1/teams/' + t.team_id + '/tasks', {
+    void fetch(opts.registryUrl + '/v1/teams/' + t.team_id + '/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
       body: JSON.stringify(t),
-    }).catch(() => {});
+      signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+      redirect: 'error',
+    }).then(
+      (response) => {
+        if (!response.ok) return reportTaskError({ task_id: t.task_id, status: response.status });
+      },
+      () => reportTaskError({ task_id: t.task_id }),
+    );
   };
 
   let reportTimer: NodeJS.Timeout | undefined;

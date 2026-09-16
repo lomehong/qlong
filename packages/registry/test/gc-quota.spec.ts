@@ -31,12 +31,16 @@ describe('Registry 配额 / GC / 变更通知', () => {
     // team 有 owner → 不属于 orphan,不删
     let r = reg.gc();
     expect(r.removedOrphanTeams).toBe(0);
-    // b) 无 token enroll(单机 self-owned team)→ revoke 后零成员无 owner → 到期删除
+    // b) 吊销节点仍引用团队:保留墓碑以便重启后给出 node_revoked,不能删成悬空引用。
     const solo = reg.enroll({ pubkey: 'pk2' });
     reg.revoke(solo.node_id);
+    const empty = reg.createTeam();
     t += 31 * day;
     r = reg.gc();
     expect(r.removedOrphanTeams).toBe(1);
+    expect(reg.teams.has(empty.team_id)).toBe(false);
+    expect(reg.teams.has(solo.team_id)).toBe(true);
+    expect(() => reg.authByToken(solo.node_token)).toThrow('吊销');
     // c) 长期离线节点 → revoked + 档案清理
     const alive = reg.enroll({ pubkey: 'pk3' });
     reg.putCaps(alive.node_token, ['tool:x']);
@@ -61,7 +65,7 @@ describe('Registry 配额 / GC / 变更通知', () => {
     reg.joinTeam(n1.node_token, reg.issueEnrollToken(team2.team_id));
     reg.suspend(n1.node_id);
     reg.resume(n1.node_id);
-    reg.rotateKeys(n1.node_token, { pubkey: 'pk1-new' });
+    reg.rotateKeys(n1.node_token, { pubkey: 'pk1-new', sig: 'test-proof' }, () => true);
     reg.revoke(n1.node_id);
     expect(calls).toBeGreaterThanOrEqual(5);
     off();

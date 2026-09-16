@@ -1,6 +1,7 @@
 /**
- * 网关回执帧与路由拒绝帧(01 §9/D26;02 §7 A6)。
+ * 旧演示协议的网关回执帧与路由拒绝帧(01 §9/D26;02 §7 A6)。
  * 回执仅用于诊断与改派触发判定,不参与可靠性——不构成第二套真相。
+ * v2 durable custody frames are defined separately in transport.ts; never infer stored from these.
  */
 import { isPlainObject } from './validate-utils.js';
 

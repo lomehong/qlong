@@ -1,25 +1,24 @@
 /**
  * 注册中心 HTTP 面(02 §9,node:http 零依赖实现;fastify 候选被否——镜像抖动环境优先零新增依赖)。
- * 鉴权:节点 = Bearer node token;owner = opts.ownerAuth(产品侧会话代持接入点,v1 默认拒绝,P12)。
+ * 鉴权:节点 = Bearer node token;人类 owner = 当前 global_owner 或目标团队 owner;无 auth 时走 ownerAuth。
  * 错误:统一信封 {error:{code,message,retryable?,details?}}(评审 I-31)。
  */
-import { join } from 'node:path';
-import { SESSION_COOKIE, AuthError } from './auth.js';
+import { SESSION_COOKIE, AuthError, type SessionRecord } from './auth.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError } from './errors.js';
-import type { Registry } from './directory.js';
+import type { NodeRecord, Registry } from './directory.js';
 
 export interface RegistryServerOptions {
   registry: Registry;
-  /** owner 端点鉴权(产品侧接入点);未配置 → 一律 503 owner_auth_unconfigured(P12) */
+  /** 未配置 auth 时的 owner 接入点;teamId='*' 要求全局权限;两者均缺失 → 503(P12)。 */
   ownerAuth?: (req: IncomingMessage, teamId: string) => boolean | Promise<boolean>;
-  /** 轮换请求签名校验(§6.1 双因子;未配置 → 仅 token 认证放行,签名要素由调用方自证) */
-  verifyRotationSig?: (node: { node_id: string }, input: { pubkey: string; sig?: string }) => boolean;
+  /** 轮换请求验签:必须用当前公钥校验并绑定目标/纪元/新公钥;未配置 → 503 失败关闭。 */
+  verifyRotationSig?: (node: { node_id: string; key_epoch: number; pubkey: string }, input: { pubkey: string; sig?: string }) => boolean;
   /** enroll 每 IP 每分钟上限(评审 I-16) */
   enrollRatePerMinPerIp?: number;
   /** 书坊分发目录(纪要 §3):提供 /install.sh、/install.ps1、/install、/releases/<版本>/<文件> */
   distDir?: string;
-  /** 人类账号与会话(02 §3.1):配置后 owner 端点走会话 Cookie 鉴权(未登录 → 401 → 控制台跳登录页) */
+  /** 人类账号会话:owner 端点校验当前角色及团队归属(未登录 401,无资源权限 403)。 */
   auth?: import('./auth.js').AuthService;
   /** v0.8 网关集群中继(02 §12.1):两者齐备时暴露 POST /internal/envelope(单端口部署形态) */
   clusterSecret?: string;
@@ -35,6 +34,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function sendError(res: ServerResponse, e: unknown): void {
+  if (e instanceof AuthError) {
+    sendJson(res, e.httpStatus, new ApiError('auth_error', e.message, e.httpStatus).body());
+    return;
+  }
   if (e instanceof ApiError) {
     sendJson(res, e.httpStatus, e.body());
     return;
@@ -87,6 +90,43 @@ function sessionIdFromCookie(cookieHeader: string | undefined): string | undefin
 
 function sessionCookie(sessionId: string): string {
   return `${SESSION_COOKIE}=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 3600}`;
+}
+
+function isWrite(req: IncomingMessage): boolean {
+  return !['GET', 'HEAD', 'OPTIONS'].includes((req.method ?? 'GET').toUpperCase());
+}
+
+function assertCsrf(req: IncomingMessage, session: SessionRecord): void {
+  if (isWrite(req) && req.headers['x-csrf-token'] !== session.csrf) {
+    throw new ApiError('csrf_mismatch', 'CSRF 校验失败,请刷新页面重试', 403);
+  }
+}
+
+/** 登录/首次注册尚无 CSRF 会话:要求非简单 JSON 请求,并拒绝跨站 Cookie 签发。 */
+function assertAuthRequest(req: IncomingMessage): void {
+  if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+    throw new ApiError('bad_request', '认证请求必须使用 application/json', 400);
+  }
+  if (req.headers['sec-fetch-site'] === 'cross-site') {
+    throw new ApiError('csrf_mismatch', '拒绝跨站认证请求', 403);
+  }
+}
+
+/** 显式白名单:仅公开身份、纪元与公钥,禁止展开内部记录(含 tokenHash)。 */
+function publicNode(node: NodeRecord) {
+  const pubkeys = node.keys.map(({ epoch, pubkey }) => ({ epoch, pubkey }));
+  const current = pubkeys[pubkeys.length - 1];
+  if (!current || !Number.isSafeInteger(current.epoch) || current.epoch < 1) {
+    throw new ApiError('key_epoch_conflict', '节点公钥纪元不可用', 503);
+  }
+  return {
+    node_id: node.node_id, team_id: node.team_id, name: node.name, status: node.status,
+    key_epoch: current.epoch,
+    pubkeys, keys: pubkeys,
+    platform: node.platform, qlong_version: node.qlong_version,
+    caps: node.caps, caps_rev: node.caps_rev, load: node.load,
+    last_seen: node.last_seen, joined_at: node.joined_at,
+  };
 }
 
 const DIST_TYPES: Record<string, string> = {
@@ -153,6 +193,21 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
       const seg = url.pathname.split('/').filter(Boolean);
       const method = (req.method ?? 'GET').toUpperCase();
 
+      // Cookie 一旦随写请求发送就必须校验,不能用同时携带的 Bearer 绕过 CSRF。
+      if (isWrite(req) && sessionIdFromCookie(req.headers.cookie) !== undefined) {
+        if (!opts.auth) throw new ApiError('csrf_mismatch', 'Cookie 会话校验未配置', 403);
+        const session = opts.auth.sessionFromCookie(req.headers.cookie);
+        if (session) {
+          assertCsrf(req, session);
+        } else if (method === 'POST' && seg[0] === 'v1' && seg[1] === 'auth'
+          && seg.length === 3 && (seg[2] === 'login' || seg[2] === 'register')) {
+          // 重启/过期后的 Cookie 不再提供任何授权;密码重登仍须通过非简单请求保护。
+          assertAuthRequest(req);
+        } else {
+          throw new ApiError('unauthorized', '会话无效', 401);
+        }
+      }
+
       const enrollLimit = opts.enrollRatePerMinPerIp;
       if (method === 'POST' && seg[1] === 'enroll' && enrollLimit !== undefined) {
         const ip = req.socket.remoteAddress ?? 'unknown';
@@ -192,12 +247,15 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         return;
       }
 
+      if (seg[0] !== 'v1') throw new ApiError('bad_request', 'not found', 404);
+
       // ---- 人类账号与会话(02 §3.1):公开路由;会话经 HttpOnly Cookie ----
-      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'status' && opts.auth) {
+      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'status' && seg.length === 3 && opts.auth) {
         sendJson(res, 200, { needs_init: opts.auth.needsInit });
         return;
       }
-      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'register' && opts.auth) {
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'register' && seg.length === 3 && opts.auth) {
+        assertAuthRequest(req);
         const body = await readJson(req);
         try {
           opts.auth.register(String(body.username ?? ''), String(body.password ?? ''));
@@ -211,7 +269,8 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         sendJson(res, 200, { username: r.username, csrf: r.csrf });
         return;
       }
-      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'login' && opts.auth) {
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'login' && seg.length === 3 && opts.auth) {
+        assertAuthRequest(req);
         const body = await readJson(req);
         let r;
         try {
@@ -224,22 +283,20 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         sendJson(res, 200, { username: r.username, csrf: r.csrf });
         return;
       }
-      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'logout' && opts.auth) {
+      if (method === 'POST' && seg[1] === 'auth' && seg[2] === 'logout' && seg.length === 3 && opts.auth) {
+        // 销毁自己的会话不要求任何团队所有权,但仍须有效会话和 CSRF。
+        requireSession(opts, req);
         const sid = sessionIdFromCookie(req.headers.cookie);
         if (sid) opts.auth.logout(sid);
         res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`);
         sendJson(res, 200, {});
         return;
       }
-      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'me' && opts.auth) {
-        const sid = sessionIdFromCookie(req.headers.cookie);
-        const session = sid ? opts.auth.session(sid) : undefined;
-        if (!session) throw new ApiError('unauthorized', '未登录', 401, false, { login: '#/login' });
+      if (method === 'GET' && seg[1] === 'auth' && seg[2] === 'me' && seg.length === 3 && opts.auth) {
+        const session = requireSession(opts, req);
         sendJson(res, 200, { username: session.username, csrf: session.csrf });
         return;
       }
-
-      if (seg[0] !== 'v1') throw new ApiError('bad_request', 'not found', 404);
 
       // ---- 公开:enroll ----
       if (seg[1] === 'enroll' && seg.length === 2 && method === 'POST') {
@@ -254,49 +311,69 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         return;
       }
 
+      // ---- owner 节点管理:不得被后面的 node token 认证提前拦住 ----
+      if (seg[1] === 'nodes' && seg[2] !== 'me' && seg.length === 4
+        && (seg[3] === 'suspend' || seg[3] === 'revoke') && method === 'POST') {
+        const targetId = seg[2] as string;
+        const target = registry.getNode(targetId);
+        if (!target) throw new ApiError('bad_request', '节点不存在', 404);
+        const targetTeamId = target.team_id;
+        await assertOwner(opts, req, targetTeamId);
+        if (registry.getNode(targetId)?.team_id !== targetTeamId) {
+          throw new ApiError('not_team_member', '节点团队已变更,请重试授权', 403);
+        }
+        sendJson(res, 200, seg[3] === 'suspend' ? registry.suspend(targetId) : registry.revoke(targetId));
+        return;
+      }
+
       // ---- 节点凭证面 ----
       const token = bearer(req);
-      if (seg[1] === 'nodes' && (seg[2] === 'me' || (seg[2] !== undefined && seg[2] !== 'me'))) {
+      if (seg[1] === 'nodes' && seg[2] !== undefined) {
         if (!token) throw new ApiError('not_team_member', '缺少凭证', 401);
 
         if (seg[2] === 'me' && seg.length === 3) {
-          const node = registry.authByToken(token);
           if (method === 'GET') {
-            sendJson(res, 200, { ...node, tokenHash: undefined });
+            sendJson(res, 200, publicNode(registry.authByToken(token)));
             return;
           }
           if (method === 'PATCH') {
             const body = await readJson(req);
-            if (typeof body.name === 'string' && body.name.length > 0) node.name = body.name;
-            sendJson(res, 200, { ...node, tokenHash: undefined });
+            if (Object.keys(body).length !== 1 || typeof body.name !== 'string' || body.name.trim().length === 0) {
+              throw new ApiError('bad_request', 'PATCH 必须且只能包含非空 name');
+            }
+            // No pre-await auth record: revalidate Cookie and bearer after the body arrives.
+            if (sessionIdFromCookie(req.headers.cookie) !== undefined) requireSession(opts, req);
+            sendJson(res, 200, publicNode(registry.updateNodeName(token, body.name)));
             return;
           }
           throw new ApiError('bad_request', '不支持的方法', 405);
         }
 
-        if (seg[2] === 'me' && seg[3] === 'caps' && method === 'PUT') {
-          const node = registry.authByToken(token);
+        if (seg[2] === 'me' && seg[3] === 'caps' && seg.length === 4 && method === 'PUT') {
           const body = await readJson(req);
-          const r = registry.putCaps(token, Array.isArray(body.caps) ? (body.caps as string[]) : []);
-          void node;
+          if (!Array.isArray(body.caps)) throw new ApiError('bad_request', 'caps 必须为字符串数组');
+          // Authentication/touch belongs to putCaps' transaction, not a pre-await commit.
+          const r = registry.putCaps(token, body.caps as string[]);
           sendJson(res, 200, r);
           return;
         }
-        if (seg[2] === 'me' && seg[3] === 'load' && method === 'PUT') {
+        if (seg[2] === 'me' && seg[3] === 'load' && seg.length === 4 && method === 'PUT') {
           const body = await readJson(req);
           registry.putLoad(token, body);
           res.writeHead(204);
           res.end();
           return;
         }
-        if (seg[2] === 'me' && seg[3] === 'keys' && method === 'POST') {
+        if (seg[2] === 'me' && seg[3] === 'keys' && seg.length === 4 && method === 'POST') {
           const body = await readJson(req);
-          const verifier = opts.verifyRotationSig
-            ? (node: { node_id: string }, input: { pubkey: string; sig?: string }) =>
-                (opts.verifyRotationSig as NonNullable<NonNullable<RegistryServerOptions['verifyRotationSig']>>)(
-                  { node_id: node.node_id },
-                  input,
-                )
+          const verifySig = opts.verifyRotationSig;
+          const verifier = verifySig
+            ? (node: NodeRecord, input: { pubkey: string; sig?: string }) => {
+                const current = node.keys[node.keys.length - 1];
+                return current !== undefined && verifySig(
+                  { node_id: node.node_id, key_epoch: current.epoch, pubkey: current.pubkey }, input,
+                );
+              }
             : undefined;
           const r = registry.rotateKeys(token, {
             pubkey: String(body.pubkey ?? ''),
@@ -306,8 +383,8 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           return;
         }
 
-        // /v1/nodes/{id}/pubkey | suspend | revoke
-        if (seg[3] === 'pubkey' && method === 'GET') {
+        // /v1/nodes/{id}/pubkey
+        if (seg[3] === 'pubkey' && seg.length === 4 && method === 'GET') {
           const self = registry.authByToken(token);
           const targetId = seg[2] as string;
           const target = registry.getNode(targetId);
@@ -330,25 +407,10 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           if (lookup.status === 'node_unknown') throw new ApiError('bad_request', '节点不存在', 404);
           throw new ApiError('key_epoch_conflict', '查无此纪元', 404);
         }
-
-        if ((seg[3] === 'suspend' || seg[3] === 'revoke') && method === 'POST') {
-          const targetId = seg[2] as string;
-          const target = registry.getNode(targetId);
-          if (!target) throw new ApiError('bad_request', '节点不存在', 404);
-          await assertOwner(opts, req, target.team_id);
-          if (seg[3] === 'suspend') {
-            const r = registry.suspend(targetId);
-            sendJson(res, 200, r);
-          } else {
-            const r = registry.revoke(targetId);
-            sendJson(res, 200, r);
-          }
-          return;
-        }
       }
 
       // ---- team 面 ----
-      // ---- owner:团队列表(控制台动态发现,替代硬编码 team_id)----
+      // ---- global_owner:全局团队列表;普通团队 owner 不得枚举所有团队 ----
       if (seg[1] === 'teams' && seg.length === 2 && method === 'GET') {
         await assertOwner(opts, req, '*');
         sendJson(res, 200, { teams: registry.listTeams() });
@@ -384,17 +446,31 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           sendJson(res, 200, { tasks });
           return;
         }
-        // 节点恢复(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/resume
-        if (seg[3] === 'nodes' && seg[5] === 'resume' && method === 'POST' && seg.length === 6) {
-          requireTeamAccess(opts, req, teamId);
-          registry.resume(seg[4] as string);
-          sendJson(res, 200, { ok: true });
+        if (seg[3] === 'tasks' && method === 'POST' && seg.length === 4) {
+          // Lead projection, never owner-cookie scheduling. Do not authenticate/touch separately.
+          if (!token) throw new ApiError('not_team_member', '缺少节点凭证', 401);
+          const body = await readJson(req);
+          if (sessionIdFromCookie(req.headers.cookie) !== undefined) requireSession(opts, req);
+          sendJson(res, 200, registry.reportTask(token, teamId, body));
           return;
         }
-        // 节点暂停(v0.2 P1):POST /v1/teams/{id}/nodes/{nid}/suspend
-        if (seg[3] === 'nodes' && seg[5] === 'suspend' && method === 'POST' && seg.length === 6) {
+        if (seg[3] === 'tasks' && method === 'GET' && seg.length === 5) {
           requireTeamAccess(opts, req, teamId);
-          registry.suspend(seg[4] as string);
+          // Authorization and lookup are synchronous: no awaited revocation/team-change gap.
+          const task = registry.getTask(teamId, seg[4] as string);
+          if (!task) throw new ApiError('bad_request', '任务不存在', 404);
+          sendJson(res, 200, task);
+          return;
+        }
+        // 暂停/恢复属于 owner 管理,普通成员不得调用;目标必须属于 URL team。
+        if (seg[3] === 'nodes' && (seg[5] === 'resume' || seg[5] === 'suspend') && method === 'POST' && seg.length === 6) {
+          await assertOwner(opts, req, teamId);
+          const targetId = seg[4] as string;
+          const target = registry.getNode(targetId);
+          if (!target) throw new ApiError('bad_request', '节点不存在', 404);
+          if (target.team_id !== teamId) throw new ApiError('not_team_member', '节点不属于 URL team', 403);
+          if (seg[5] === 'resume') registry.resume(targetId);
+          else registry.suspend(targetId);
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -428,7 +504,11 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         }
         if (seg[3] === 'grants' && seg[4] && method === 'DELETE' && seg.length === 5) {
           await assertOwner(opts, req, teamId);
-          registry.revokeGrant(seg[4] as string);
+          const grant = registry.grants.get(seg[4]);
+          if (!grant) throw new ApiError('bad_request', 'grant 不存在', 404);
+          // 保守 owner-only:接收方/无关团队不得借 URL 删除来源方创建的授权。
+          if (grant.from_team !== teamId) throw new ApiError('not_team_member', 'grant 不属于 URL 来源 team', 403);
+          registry.revokeGrant(grant.grant_id);
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -450,15 +530,34 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
 
   return server;
 
+  function requireSession(o: RegistryServerOptions, req: IncomingMessage): SessionRecord {
+    const session = o.auth?.sessionFromCookie(req.headers.cookie);
+    if (!session) throw new ApiError('unauthorized', '未登录', 401, false, { login: '#/login' });
+    assertCsrf(req, session);
+    return session;
+  }
+
+  /** session() 已按当前用户刷新角色;仍显式白名单校验,未知角色绝不能靠 owner 字段放行。 */
+  function assertSessionOwner(session: SessionRecord, teamId: string): void {
+    if (session.role === 'global_owner') return;
+    if (session.role === 'user' && teamId !== '*'
+      && registry.teams.get(teamId)?.owner_user_id === session.username) return;
+    throw new ApiError('not_team_member', '无目标团队 owner 权限', 403);
+  }
+
   /**
-   * 团队级访问(读/成员操作):人类会话(02 §3.1)或 同队 active 节点 token 任一即可。
+   * 团队级读取:人类 global_owner/本团队 owner 或同队 active 节点 token。
    * 会话缺失且无有效节点 token → 401(控制台跳登录页)。
    */
   function requireTeamAccess(o: RegistryServerOptions, req: IncomingMessage, teamId: string): void {
-    // ① 人类会话(02 §3.1):有效登录会话即可(读/成员操作)
+    // ① 人类会话须有资源所有权;不得退回外部 ownerAuth 绕过,未来写路由也须 CSRF。
     if (o.auth) {
       const session = o.auth.sessionFromCookie(req.headers.cookie);
-      if (session) return;
+      if (session) {
+        assertCsrf(req, session);
+        assertSessionOwner(session, teamId);
+        return;
+      }
     }
     // ② 节点 token:须 active 且属于该 team
     const token = bearer(req);
@@ -477,23 +576,17 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
   }
 
   async function assertOwner(o: RegistryServerOptions, req: IncomingMessage, teamId: string): Promise<void> {
-    // ① 人类会话(02 §3.1):有效登录会话即 owner(v1 单运营者);变更类请求须携带会话 CSRF
+    // ① 人类会话:当前显式角色 + 目标团队归属;变更类请求须携带会话 CSRF。
     if (o.auth) {
-      const session = o.auth.sessionFromCookie(req.headers.cookie);
-      if (!session) {
-        throw new ApiError('unauthorized', '未登录', 401, false, { login: '#/login' });
-      }
-      const method = (req.method ?? 'GET').toUpperCase();
-      if (method !== 'GET' && method !== 'HEAD') {
-        if (req.headers['x-csrf-token'] !== session.csrf) {
-          throw new ApiError('csrf_mismatch', 'CSRF 校验失败,请刷新页面重试', 403);
-        }
-      }
+      assertSessionOwner(requireSession(o, req), teamId);
       return;
     }
     // ② 产品侧接入点(无独立产品时的替代:QLONG_OWNER_TOKEN 环境变量)
+    if (isWrite(req) && req.headers.cookie) {
+      throw new ApiError('csrf_mismatch', '外部 Cookie owner 鉴权缺少会话 CSRF 验证', 403);
+    }
     if (!o.ownerAuth) throw new ApiError('owner_auth_unconfigured', 'owner 鉴权未配置(产品侧接入点)', 503);
     const ok = await o.ownerAuth(req, teamId);
-    if (!ok) throw new ApiError('not_team_member', 'owner 鉴权失败', 403);
+    if (ok !== true) throw new ApiError('not_team_member', 'owner 鉴权失败', 403);
   }
 }

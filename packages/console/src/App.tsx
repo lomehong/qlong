@@ -85,7 +85,10 @@ export default function App() {
         location.hash = '#/login';
       });
     // v0.8:hashchange 只同步页面状态(会话探测只在挂载时做一次,导航不重发请求)
-    const onHash = (): void => { setPageState(pageFromHash()); };
+    const onHash = (): void => {
+      if (location.hash === '#/login') setAuthState('login');
+      setPageState(pageFromHash());
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -120,7 +123,11 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="owner-label">OWNER</div>
           <div className="owner-name">{username || 'owner'}</div>
-          <button className="btn-logout" onClick={() => { void authApi.logout().then(() => { setAuthState('login'); location.hash = '#/login'; }); }}>
+          <button className="btn-logout" onClick={() => {
+            void authApi.logout()
+              .then(() => { setAuthState('login'); location.hash = '#/login'; })
+              .catch((e: unknown) => { useStore.getState().setError(e instanceof Error ? e.message : String(e)); });
+          }}>
             <span aria-hidden>⏻</span><span className="logout-label">退出登录</span>
           </button>
         </div>

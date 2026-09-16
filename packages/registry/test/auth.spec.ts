@@ -44,6 +44,8 @@ describe('auth(人类账号密码登录)', () => {
     expect(r.setCookie).toContain('qlong_session=');
     cookie = ((r.setCookie ?? '').split(';')[0])!;
     csrf = (r.body as { csrf: string }).csrf;
+    expect(auth.users.get('lomehong')?.role).toBe('global_owner');
+    expect(auth.sessionFromCookie(cookie)?.role).toBe('global_owner');
   });
 
   it('初始化后注册关闭(403)', async () => {
@@ -71,11 +73,18 @@ describe('auth(人类账号密码登录)', () => {
 
   it('会话 Cookie 但缺 CSRF 的变更请求 → 403 csrf_mismatch', async () => {
     const r = await post('/v1/teams/whatever/enroll-tokens', {}, { Cookie: cookie });
-    expect([403, 404]).toContain(r.status);
+    expect(r.status).toBe(403);
+    expect(r.body).toMatchObject({ error: { code: 'csrf_mismatch' } });
+  });
+
+  it('登出缺 CSRF → 403,不能销毁现有会话', async () => {
+    const r = await post('/v1/auth/logout', {}, { Cookie: cookie });
+    expect(r.status).toBe(403);
+    expect((await get('/v1/auth/me', { Cookie: cookie })).status).toBe(200);
   });
 
   it('登出后 me → 401', async () => {
-    const r = await post('/v1/auth/logout', {}, { Cookie: cookie });
+    const r = await post('/v1/auth/logout', {}, { Cookie: cookie, 'X-CSRF-Token': csrf });
     expect(r.status).toBe(200);
     const me = await get('/v1/auth/me', { Cookie: cookie });
     expect(me.status).toBe(401);

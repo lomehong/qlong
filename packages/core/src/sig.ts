@@ -59,6 +59,12 @@ export function newKeyPair(): { priv: Bytes; publicKey: Uint8Array } {
   return { priv, publicKey: getPublicKey(priv) };
 }
 
+/** Derive the registered public identity from a 32-byte Ed25519 seed. */
+export function publicKeyFromPrivate(priv: Bytes): Uint8Array {
+  if (priv.length !== 32) throw new Error('Ed25519 private seed must be 32 bytes');
+  return getPublicKey(priv);
+}
+
 export function toBase64(b: Bytes): string {
   return Buffer.from(b).toString('base64');
 }

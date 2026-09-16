@@ -32,4 +32,20 @@ describe('service 跨平台注册物', () => {
     expect(selfEntrance('qlong', 'linux')).toContain('.local/bin/qlong');
     expect(selfEntrance('/x/y/qlong', 'linux')).toBe('/x/y/qlong');
   });
+
+  it('runArgs 透传:三平台注册物携带 qlong run 的存储准入参数', () => {
+    const runArgs = ['--storage-mode', 'create', '--confirm-local-filesystem', '--data-dir', 'D:/q data'];
+    const linux = serviceDefinition('linux', '/home/u/.local/bin/qlong', '/home/u', runArgs);
+    // systemd ExecStart 单值内联完整命令(含引号参数)
+    expect(linux.content).toContain(
+      'ExecStart=/home/u/.local/bin/qlong run --storage-mode create --confirm-local-filesystem --data-dir "D:/q data"',
+    );
+    const darwin = serviceDefinition('darwin', '/Users/u/.local/bin/qlong', '/Users/u', runArgs);
+    expect(darwin.content).toContain('<string>--storage-mode</string>');
+    expect(darwin.content).toContain('<string>--data-dir</string>');
+    expect(darwin.content).toContain('<string>D:/q data</string>');
+    const win32 = serviceDefinition('win32', 'C:/Users/u/qlong.cmd', 'C:/Users/u', runArgs);
+    expect(win32.installCmds[0]).toContain('/TR');
+    expect(win32.installCmds[0]).toContain('run --storage-mode create');
+  });
 });

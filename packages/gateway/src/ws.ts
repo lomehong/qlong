@@ -6,19 +6,40 @@
  * - 连接表以 connId 守卫:同节点新连接踢旧连接,旧连接的 close 不会误删新会话(M2-03)
  * - 非 active 节点连不开(M2-18);管理断连带语义 close code 4001/4002(A6)
  */
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
-import { newId, validateEnvelope, type EnvelopeV1 } from '@qlong/core';
+import {
+  CUSTODY_FEATURES, TRANSPORT_VERSION, MAX_TRANSPORT_BYTES,
+  envelopeDigest, hasCustodyFeatures, isReceiptFrame, newId, validateEnvelope,
+  type EnvelopeV1, type ReceiptFrame,
+} from '@qlong/core';
 import type { GatewayCore } from './core.js';
 import type { GatewayDirectorySnapshot } from './types.js';
 import type { GatewayCluster } from './cluster.js';
+import type { SqliteCustodyStore } from './custody-store.js';
 
 export const AUTH_KEY = 'node_' + 'token';
+// Allow framing overhead without accepting arbitrarily large JSON or send queues.
+const MAX_FRAME_BYTES = MAX_TRANSPORT_BYTES + 4_096;
+const MAX_BUFFERED_BYTES = MAX_FRAME_BYTES * 2;
+const MAX_WINDOW = 16;
 
 export interface WsGatewayOptions {
   core: GatewayCore;
+  /** Supplying custody requires transport v2; legacy routing is never used. */
+  custody?: SqliteCustodyStore;
+  /** Test tuning: positive integer milliseconds; defaults to 1 second. */
+  retryIntervalMs?: number;
+  /** Test tuning: integer in [1, 16]; defaults to 16. */
+  window?: number;
+  /** Cached ACL/connection state must not outlive an unavailable authority. */
+  assertAuthorityAvailable?: () => void;
   /** A3:node token → 节点(注册中心 authByToken);无效或非 active = 拒绝(close 4003) */
   authenticate: (nodeToken: string) => { node_id: string; team_id: string; status: string } | undefined;
+  /** 单实例在线态:connect 后、auth_ok 前置真;仅当前 connId 清理时置假。异常将断连。 */
+  onPresenceChange?: (nodeId: string, online: boolean, connId: string) => void;
   /** 02 §12.1:集群路由(source ACL 已过,目标不在本网关时调用) */
   cluster?: GatewayCluster;
   /** 02 §12.1 总线:集群共享密钥(设置后本 server 暴露 POST /internal/envelope 中继端点) */
@@ -33,6 +54,10 @@ interface RegistryLike {
 interface ConnState {
   ws: WebSocket;
   nodeId: string;
+  connId: string;
+  ready: boolean;
+  /** Opaque ticket → delivery, scoped to this authenticated connection only. */
+  inflight: Map<string, { envelope: EnvelopeV1; digest: string; lastSentAt: number }>;
 }
 
 export class WsGateway {
@@ -50,33 +75,69 @@ export class WsGateway {
   /** nodeId → 当前 connId(同节点新连接踢旧) */
   private currentConnByNode = new Map<string, string>();
   private syncTimer?: NodeJS.Timeout;
+  private retryTimer?: NodeJS.Timeout;
+  private readonly retryIntervalMs: number;
+  private readonly window: number;
+  private unavailable = false;
+  private started = false;
+  private closing = false;
+  private pendingListen?: Promise<number>;
+  private closePromise?: Promise<void>;
 
-  /** 单端口部署:附加挂载点路径(/gateway 等);'/' 由独立端口模式自动接管 */
-  private readonly attachedPaths = new Set<string>();
+  /** 每个 HTTP server 只注册一个 upgrade listener,关闭时仅拆除自己的挂载。 */
+  private readonly upgradeBindings = new Map<Server, {
+    paths: Set<string>;
+    listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+  }>();
 
   constructor(private readonly opts: WsGatewayOptions) {
-    this.wss = new WebSocketServer({ noServer: true });
+    if (opts.custody && (opts.cluster !== undefined || opts.clusterSecret !== undefined)) {
+      throw new Error('Durable custody does not support cluster routing');
+    }
+    this.retryIntervalMs = opts.retryIntervalMs === undefined ? 1_000 : opts.retryIntervalMs;
+    this.window = opts.window === undefined ? MAX_WINDOW : opts.window;
+    if (!Number.isSafeInteger(this.retryIntervalMs) || this.retryIntervalMs < 1 || this.retryIntervalMs > 2_147_483_647) {
+      throw new RangeError('retryIntervalMs must be a positive timer interval');
+    }
+    if (!Number.isSafeInteger(this.window) || this.window < 1 || this.window > MAX_WINDOW) {
+      throw new RangeError('window must be an integer between 1 and 16');
+    }
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
     // 独立端口模式:listen() 的 server 上 '/' 即网关入口
     this.bindUpgrade(this.server, '/');
     this.start();
   }
 
   /** 单端口部署(02 §12.1):把网关挂到业务 HTTP server 的指定路径(/gateway) */
-  attach(server: import('node:http').Server, path: string): void {
+  attach(server: Server, path: string): void {
     this.bindUpgrade(server, path);
   }
 
-  private bindUpgrade(server: import('node:http').Server, path: string): void {
-    this.attachedPaths.add(path);
-    server.on('upgrade', (req, socket, head) => {
+  private bindUpgrade(server: Server, path: string): void {
+    if (this.closing) throw new Error('Gateway is closing');
+    const existing = this.upgradeBindings.get(server);
+    if (existing) {
+      existing.paths.add(path);
+      return;
+    }
+    const paths = new Set([path]);
+    const listener = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
       const p = (req.url ?? '/').split('?')[0] ?? '';
-      if (this.attachedPaths.has(p)) {
+      if (paths.has(p)) {
+        if (this.closing || this.unavailable) {
+          socket.destroy();
+          return;
+        }
         this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
       }
-    });
+    };
+    this.upgradeBindings.set(server, { paths, listener });
+    server.on('upgrade', listener);
   }
 
   start(): void {
+    if (this.started || this.closing || this.unavailable) return;
+    this.started = true;
     this.registerInternalRelay();
     this.wss.on('connection', (ws) => {
       let connId: string | null = null;
@@ -84,15 +145,21 @@ export class WsGateway {
 
       const cleanup = (): void => {
         if (connId === null) return;
-        this.socketsByConn.delete(connId);
-        // M2-03:仅当自己仍是该节点当前连接时才摘除在线态(防旧 close 误删新会话)
-        if (this.currentConnByNode.get(nodeId) === connId) {
-          this.currentConnByNode.delete(nodeId);
-          this.opts.core.disconnect(nodeId);
-        }
+        this.disconnect(connId, nodeId);
       };
 
       ws.on('message', (data) => {
+        if (this.closing || this.unavailable || ws.readyState !== WebSocket.OPEN) return;
+        try { this.opts.assertAuthorityAvailable?.(); } catch {
+          if (this.opts.custody) {
+            this.failClosed();
+            return;
+          }
+          cleanup();
+          // No success/rejection ACK: sender must retain custody until authority recovers.
+          this.closeSocket(ws, 1011, 'authority unavailable');
+          return;
+        }
         let frame: Record<string, unknown>;
         try {
           const parsed: unknown = JSON.parse(String(data));
@@ -107,40 +174,86 @@ export class WsGateway {
         if (connId === null) {
           const token = frame[AUTH_KEY];
           if (frame.frame !== 'auth' || typeof token !== 'string') {
-            ws.close(4003, 'unauthorized');
+            this.closeSocket(ws, 4003, 'unauthorized');
             return;
           }
-          const node = this.opts.authenticate(token);
+          const compatible = this.opts.custody
+            ? frame.transport_version === TRANSPORT_VERSION && hasCustodyFeatures(frame.features)
+            : frame.transport_version === undefined || frame.transport_version === 1;
+          if (!compatible) {
+            this.closeSocket(ws, 4004, 'version_mismatch');
+            return;
+          }
+          let node: ReturnType<WsGatewayOptions['authenticate']>;
+          try {
+            node = this.opts.authenticate(token);
+          } catch {
+            this.closeSocket(ws, 4003, 'unauthorized');
+            return;
+          }
           if (!node || node.status !== 'active') {
-            ws.close(4003, 'unauthorized'); // M2-18:非 active 节点连不开
+            this.closeSocket(ws, 4003, 'unauthorized'); // M2-18:非 active 节点连不开
             return;
           }
           connId = newId();
           nodeId = node.node_id;
           // M2-03:同节点旧连接踢下线(新连接接管;旧 close 由守卫忽略)
           const oldConnId = this.currentConnByNode.get(nodeId);
+          this.currentConnByNode.set(nodeId, connId);
+          const state: ConnState = { ws, nodeId, connId, ready: false, inflight: new Map() };
+          this.socketsByConn.set(connId, state);
           if (oldConnId !== undefined) {
             const old = this.socketsByConn.get(oldConnId);
             this.socketsByConn.delete(oldConnId);
-            try {
-              old?.ws.close(4000, 'replaced');
-            } catch {
-              /* ignore */
+            if (old) {
+              old.inflight.clear();
+              this.closeSocket(old.ws, 4000, 'replaced');
             }
           }
-          this.currentConnByNode.set(nodeId, connId);
-          this.socketsByConn.set(connId, { ws, nodeId });
-          this.opts.core.connect({ connId, nodeId, teamId: node.team_id, connectedAt: Date.now() });
-          // M2-02:认证成功即接线收件箱补投(离线期间排队的 project 单)
-          const take = this.opts.core.takeInbox(nodeId, Date.now());
-          for (const d of take.deliveries) {
-            this.safeSend(ws, { frame: 'envelope', envelope: d.envelope });
+          try {
+            this.opts.core.connect({ connId, nodeId, teamId: node.team_id, connectedAt: Date.now() });
+            this.opts.onPresenceChange?.(nodeId, true, connId);
+            // 回调可能同步触发管理断连或关闭;不得再确认认证成功。
+            if (this.closing || this.currentConnByNode.get(nodeId) !== connId || ws.readyState !== WebSocket.OPEN) return;
+            // Negotiation always precedes delivery, including offline replay.
+            if (!this.safeSend(ws, {
+              frame: 'auth_ok', node_id: nodeId, team_id: node.team_id,
+              ...(this.opts.custody ? { transport_version: TRANSPORT_VERSION, features: CUSTODY_FEATURES } : {}),
+            })) throw new Error('Authentication response failed');
+            state.ready = true;
+            if (this.opts.custody) {
+              this.pumpCustody(state, Date.now());
+            } else {
+              const take = this.opts.core.takeInbox(nodeId, Date.now());
+              for (const d of take.deliveries) {
+                this.safeSend(ws, { frame: 'envelope', envelope: d.envelope });
+              }
+            }
+          } catch {
+            if (this.opts.custody) {
+              this.failClosed();
+              return;
+            }
+            cleanup();
+            this.closeSocket(ws, 1011, 'connection failed');
           }
-          this.safeSend(ws, { frame: 'auth_ok', node_id: nodeId, team_id: node.team_id });
           return;
         }
 
         // ---- 已认证:上行信封 ----
+        if (this.currentConnByNode.get(nodeId) !== connId) return;
+        if (this.opts.custody) {
+          const state = this.socketsByConn.get(connId);
+          if (!state?.ready) return;
+          try {
+            if (isReceiptFrame(frame)) this.receiveReceipt(state, frame, Date.now());
+            else if (frame.frame === 'envelope') this.admitCustody(state, frame.envelope, Date.now());
+          } catch {
+            // A failed DB operation must never turn into a legacy rejected ACK.
+            this.failClosed();
+          }
+          return;
+        }
         if (frame.frame !== 'envelope' || typeof frame.envelope !== 'object' || frame.envelope === null) {
           return; // 未知帧:静默(协议演进位,§8 兼容承诺)
         }
@@ -193,13 +306,138 @@ export class WsGateway {
 
       ws.on('close', () => cleanup());
       ws.on('error', () => {
-        try {
-          ws.close(1011, 'error');
-        } catch {
-          /* already closing */
-        }
+        cleanup();
+        this.closeSocket(ws, 1011, 'error');
       });
+      if (this.closing) this.closeSocket(ws, 1001, 'gateway closing');
+      else if (this.unavailable) this.closeSocket(ws, 1011, 'gateway unavailable');
     });
+    if (this.opts.custody) {
+      // A short shared sweep avoids stretching a one-second retry to two seconds
+      // when admission happens just after an interval boundary.
+      this.retryTimer = setInterval(() => {
+        if (this.closing || this.unavailable) return;
+        try {
+          this.opts.assertAuthorityAvailable?.();
+          const now = Date.now();
+          for (const state of this.socketsByConn.values()) this.pumpCustody(state, now);
+        } catch {
+          this.failClosed();
+        }
+      }, Math.min(this.retryIntervalMs, 100));
+      this.retryTimer.unref();
+    }
+  }
+
+  private admitCustody(state: ConnState, raw: unknown, now: number): void {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const envelope = raw as EnvelopeV1;
+    let digest: string;
+    let valid: boolean;
+    try {
+      digest = envelopeDigest(envelope);
+      valid = validateEnvelope(envelope).ok;
+    } catch {
+      this.closeSocket(state.ws, 1008, 'invalid envelope');
+      return;
+    }
+    const identity = {
+      from_node: state.nodeId,
+      msg_id: typeof envelope.msg_id === 'string' ? envelope.msg_id : 'unknown',
+      digest,
+    };
+    const nack = (reason: string): void => {
+      this.safeSend(state.ws, { frame: 'nack', ...identity, reason, retry_after_ms: 1_000 });
+    };
+    if (!valid) {
+      nack('invalid');
+      return;
+    }
+    const verdict = this.opts.core.authorizeUplink(state.nodeId, envelope);
+    if (verdict.verdict === 'silent_drop') return;
+    if (verdict.verdict === 'routing_denied') {
+      nack('acl_rejected');
+      this.safeSend(state.ws, {
+        frame: 'routing.denied', rule: verdict.rule, reason_code: verdict.reasonCode, msg_id: envelope.msg_id,
+      });
+      return;
+    }
+    const result = this.opts.custody!.offer(envelope, now);
+    if (result !== 'stored') {
+      nack(result);
+      return;
+    }
+    // offer returns only after commit, for both online and offline recipients.
+    this.safeSend(state.ws, { frame: 'stored', ...identity });
+    const targetConn = this.currentConnByNode.get(envelope.to.node_id);
+    const target = targetConn === undefined ? undefined : this.socketsByConn.get(targetConn);
+    if (target) this.pumpCustody(target, now);
+  }
+
+  private pumpCustody(state: ConnState, now: number): void {
+    if (this.closing || this.unavailable || !state.ready || state.ws.readyState !== WebSocket.OPEN ||
+        this.currentConnByNode.get(state.nodeId) !== state.connId || state.ws.bufferedAmount >= MAX_BUFFERED_BYTES) return;
+    // Peeking is bounded and never transfers custody. Expired/terminal rows drop
+    // out of this snapshot; their tickets cannot be reused to acknowledge a row.
+    const pending = this.opts.custody!.pending(state.nodeId, now, this.window);
+    const matches = (a: { envelope: EnvelopeV1; digest: string }, b: { envelope: EnvelopeV1; digest: string }): boolean =>
+      a.envelope.from.node_id === b.envelope.from.node_id && a.envelope.msg_id === b.envelope.msg_id && a.digest === b.digest;
+    for (const [ticket, delivery] of state.inflight) {
+      if (!pending.some((item) => matches(item, delivery))) state.inflight.delete(ticket);
+    }
+    for (const item of pending) {
+      let entry = [...state.inflight].find(([, delivery]) => matches(delivery, item));
+      if (!entry) {
+        if (state.inflight.size >= this.window) break;
+        const ticket = randomBytes(32).toString('hex');
+        const delivery = { ...item, lastSentAt: Number.NEGATIVE_INFINITY };
+        state.inflight.set(ticket, delivery);
+        entry = [ticket, delivery];
+      }
+      const [ticket, delivery] = entry;
+      if (now - delivery.lastSentAt < this.retryIntervalMs) continue;
+      if (!this.safeSend(state.ws, { frame: 'delivery', envelope: delivery.envelope, digest: delivery.digest, ticket })) break;
+      delivery.lastSentAt = now;
+    }
+  }
+
+  private receiveReceipt(state: ConnState, frame: ReceiptFrame, now: number): void {
+    if (this.currentConnByNode.get(state.nodeId) !== state.connId) return;
+    const delivery = state.inflight.get(frame.ticket);
+    if (!delivery || delivery.envelope.to.node_id !== state.nodeId || delivery.envelope.from.node_id !== frame.from_node ||
+        delivery.envelope.msg_id !== frame.msg_id || delivery.digest !== frame.digest) return;
+    if (this.opts.custody!.acknowledge(state.nodeId, frame.from_node, frame.msg_id, frame.digest, now)) {
+      // Free the window only after the receiver's DB receipt has committed.
+      state.inflight.delete(frame.ticket);
+      this.pumpCustody(state, now);
+    }
+  }
+
+  /** Stop admission and background work after authority/storage failure. */
+  private failClosed(): void {
+    if (this.unavailable || this.closing) return;
+    this.unavailable = true;
+    if (this.retryTimer) clearInterval(this.retryTimer);
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    this.retryTimer = undefined;
+    this.syncTimer = undefined;
+    for (const [nodeId, connId] of [...this.currentConnByNode]) this.disconnect(connId, nodeId);
+    for (const ws of this.wss.clients) this.closeSocket(ws, 1011, 'gateway unavailable');
+  }
+
+  private disconnect(connId: string, nodeId: string): void {
+    const state = this.socketsByConn.get(connId);
+    state?.inflight.clear();
+    this.socketsByConn.delete(connId);
+    // M2-03:旧 close/error 不得清除新连接,同一连接最多发一次离线通知。
+    if (this.currentConnByNode.get(nodeId) !== connId) return;
+    this.currentConnByNode.delete(nodeId);
+    this.opts.core.disconnect(nodeId);
+    try {
+      this.opts.onPresenceChange?.(nodeId, false, connId);
+    } catch {
+      if (state) this.closeSocket(state.ws, 1011, 'presence failed');
+    }
   }
 
   /** 集群成员接口(02 §12.1 连接注册):是否持有节点连接 */
@@ -209,6 +447,7 @@ export class WsGateway {
 
   /** 集群成员接口:向本网关在线节点投递(返回是否确有连接) */
   deliverTo(nodeId: string, envelope: EnvelopeV1): void {
+    if (this.opts.custody) throw new Error('Legacy delivery is unavailable in custody mode');
     this.routeToNode(nodeId, { frame: 'envelope', envelope });
   }
 
@@ -217,6 +456,8 @@ export class WsGateway {
    * 在线 → 直投(delivered);离线 project → 入本实例收件箱(queued);aid 离线 → not_here。
    */
   internalDeliver(toNodeId: string, envelope: EnvelopeV1, now: number): 'delivered' | 'queued' | 'not_here' {
+    if (this.opts.custody) throw new Error('Legacy relay is unavailable in custody mode');
+    this.opts.assertAuthorityAvailable?.();
     if (this.has(toNodeId)) {
       this.deliverTo(toNodeId, envelope);
       return 'delivered';
@@ -266,9 +507,36 @@ export class WsGateway {
   }
 
   listen(port = 0, host = '127.0.0.1'): Promise<number> {
-    return new Promise((resolve) => {
-      this.server.listen(port, host, () => resolve((this.server.address() as { port: number }).port));
+    if (this.closing) return Promise.reject(new Error('Gateway is closing'));
+    if (this.pendingListen || this.server.listening) return Promise.reject(new Error('Gateway is already listening'));
+    const pending = new Promise<number>((resolve, reject) => {
+      const cleanup = (): void => {
+        this.server.off('error', onError);
+        this.server.off('listening', onListening);
+      };
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      const onListening = (): void => {
+        cleanup();
+        resolve((this.server.address() as { port: number }).port);
+      };
+      this.server.once('error', onError);
+      this.server.once('listening', onListening);
+      try {
+        this.server.listen(port, host);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
+    this.pendingListen = pending;
+    void pending.then(
+      () => { this.pendingListen = undefined; },
+      () => { this.pendingListen = undefined; },
+    );
+    return pending;
   }
 
   /** 目录同步 + 悬挂管理断连(connId 守卫版,§7.1) */
@@ -281,43 +549,86 @@ export class WsGateway {
         const state = this.socketsByConn.get(connId);
         if (state) {
           this.safeSend(state.ws, { frame: 'closing', code: st === 'suspended' ? 4001 : 4002, reason: st });
-          try {
-            state.ws.close(st === 'suspended' ? 4001 : 4002, st);
-          } catch {
-            /* ignore */
-          }
+          this.closeSocket(state.ws, st === 'suspended' ? 4001 : 4002, st);
         }
-        this.socketsByConn.delete(connId);
-        this.currentConnByNode.delete(nodeId);
-        this.opts.core.disconnect(nodeId);
+        this.disconnect(connId, nodeId);
       }
     }
   }
 
   startRegistrySync(registry: RegistryLike, intervalMs = 50): void {
-    const tick = (): void => this.syncRegistry(registry.snapshot(), (id) => registry.getNode(id)?.status);
-    tick();
-    this.syncTimer = setInterval(tick, intervalMs);
-  }
-
-  private safeSend(ws: WebSocket, obj: unknown): void {
-    try {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-    } catch {
-      /* 竞态忽略 */
-    }
-  }
-
-  async close(): Promise<void> {
+    if (this.closing || this.unavailable) return;
     if (this.syncTimer) clearInterval(this.syncTimer);
-    for (const s of this.socketsByConn.values()) {
-      try {
-        s.ws.close(1001, 'gateway closing');
-      } catch {
-        /* ignore */
-      }
+    const tick = (): void => {
+      try { this.syncRegistry(registry.snapshot(), (id) => registry.getNode(id)?.status); }
+      catch { this.failClosed(); }
+    };
+    tick();
+    if (!this.unavailable) this.syncTimer = setInterval(tick, intervalMs);
+  }
+
+  private safeSend(ws: WebSocket, obj: unknown): boolean {
+    try {
+      if (ws.readyState !== WebSocket.OPEN) return false;
+      const serialized = JSON.stringify(obj);
+      if (ws.bufferedAmount + Buffer.byteLength(serialized) > MAX_BUFFERED_BYTES) return false;
+      ws.send(serialized);
+      return true;
+    } catch {
+      return false;
     }
-    await new Promise<void>((resolve) => this.wss.close(() => resolve()));
-    this.server.close();
+  }
+
+  private closeSocket(ws: WebSocket, code: number, reason: string): void {
+    try {
+      ws.close(code, reason);
+    } catch {
+      ws.terminate();
+    }
+  }
+
+  close(): Promise<void> {
+    if (!this.closePromise) {
+      this.closing = true;
+      // 先留存 Promise,回调内重入 close() 也只执行一次清理。
+      this.closePromise = Promise.resolve().then(() => this.shutdown());
+    }
+    return this.closePromise;
+  }
+
+  private async shutdown(): Promise<void> {
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.retryTimer) clearInterval(this.retryTimer);
+    this.syncTimer = undefined;
+    this.retryTimer = undefined;
+    for (const [server, binding] of this.upgradeBindings) {
+      server.off('upgrade', binding.listener);
+    }
+    this.upgradeBindings.clear();
+    for (const [nodeId, connId] of [...this.currentConnByNode]) this.disconnect(connId, nodeId);
+    this.socketsByConn.clear();
+    this.currentConnByNode.clear();
+
+    // 包括未认证与被替换但尚未完成 close 握手的连接,不依赖认证连接表。
+    const timer = setTimeout(() => {
+      for (const ws of this.wss.clients) ws.terminate();
+      this.server.closeAllConnections();
+    }, 1_000);
+    timer.unref();
+    try {
+      const wsClosed = new Promise<void>((resolve) => this.wss.close(() => resolve()));
+      for (const ws of this.wss.clients) this.closeSocket(ws, 1001, 'gateway closing');
+      const serverClosed = (async (): Promise<void> => {
+        // close() 可与尚在解析 host/绑定端口的 listen() 并发。
+        await this.pendingListen?.catch(() => undefined);
+        await new Promise<void>((resolve, reject) => this.server.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+          else resolve();
+        }));
+      })();
+      await Promise.all([wsClosed, serverClosed]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }

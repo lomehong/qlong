@@ -1,4 +1,5 @@
-/** 网关收件箱(01 §9/02 §8):离线暂存仅 project 类;容量上限,溢出丢最旧。
+/** LEGACY demo/migration only: NOT durable custody. Production v2 uses SqliteCustodyStore.
+ * 网关收件箱(01 §9/02 §8):离线暂存仅 project 类;容量上限,溢出丢最旧。
  *  v0.8(FileMailboxStore 语义,02 §12.1 收件箱落盘):可选 persistFile ——
  *  每次变更后原子写(tmp+rename),构造时自动恢复;网关重启收件箱不丢。 */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';

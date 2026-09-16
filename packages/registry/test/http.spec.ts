@@ -18,7 +18,11 @@ beforeAll(async () => {
   const token = registry.issueEnrollToken(teamId);
   const res = registry.enroll({ token, pubkey: PUB1 });
   bearer = res.node_token;
-  server = createRegistryServer({ registry, ownerAuth: () => true, enrollRatePerMinPerIp: 1000 });
+  server = createRegistryServer({
+    registry, ownerAuth: () => true, enrollRatePerMinPerIp: 1000,
+    // 本文件仅测试路由;真实双因子和缺省拒绝见 http-security.spec.ts。
+    verifyRotationSig: (_node, input) => input.sig === 'test-signature',
+  });
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve());
   });
@@ -59,6 +63,7 @@ describe('注册中心 HTTP 面(02 §9)', () => {
     const r = await call('GET', '/v1/nodes/me', undefined, bearer);
     expect(r.status).toBe(200);
     expect((r.json as Record<string, unknown>)).not.toHaveProperty('tokenHash');
+    expect(r.json).toMatchObject({ key_epoch: 1, pubkeys: [{ epoch: 1, pubkey: PUB1 }] });
   });
 
   it('caps/load:PUT 全量替换 + rev 仅静态变更自增', async () => {
@@ -83,7 +88,8 @@ describe('注册中心 HTTP 面(02 §9)', () => {
   it('公钥目录:current/historical/unknown_epoch 三态 + 限流独立', async () => {
     const me = await call('GET', '/v1/nodes/me', undefined, bearer);
     const nodeId = (me.json as { node_id: string }).node_id;
-    await call('POST', '/v1/nodes/me/keys', { pubkey: PUB2 }, bearer);
+    const rotated = await call('POST', '/v1/nodes/me/keys', { pubkey: PUB2, sig: 'test-signature' }, bearer);
+    expect(rotated.status).toBe(200);
     const cur = await call('GET', `/v1/nodes/${nodeId}/pubkey`, undefined, bearer);
     expect(cur.status).toBe(200);
     expect((cur.json as { key_epoch: number }).key_epoch).toBe(2);

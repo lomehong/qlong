@@ -86,6 +86,19 @@ short_description: 分布式 AI Agent 协作系统——每台设备一条自治
 
 ## 状态
 
+### 系统性修复进行中（Node.js 24 基线）
+
+- 当前运行要求为 **Node.js >=24**；安装器、CLI 和容器镜像同步升级，使用内置 `node:sqlite`，不新增第三方存储依赖。
+- 已接通生产工厂可信目录验签：身份缺失/损坏、当前纪元不匹配时拒绝启动，不自动生成替代密钥。团队管理校验 owner 和资源归属，Cookie 写操作要求 CSRF。
+- `packages/storage` 提供 SQLite 短事务、迁移校验、独立 daemon 所有权与崩溃回归。中心 `startQlongServer` 的 `center.sqlite` 保存 Registry/Auth/任务投影及 v2 mailbox；在线/离线消息均提交后才确认 `stored`，接收端落 inbox 并返回有效 `receipt` 后才释放 mailbox payload。
+- `server` 不再默认内存启动：须配置数据目录、显式 `create/open` 与本地文件系统准入；`--ephemeral` 仅限回环地址演示。旧 JSON 与完整多 server 集群不能混入持久模式。配置及边界见 [中心 SQLite 接线说明](docs/repair/CENTER-STORAGE.md)。
+- 新增任务投影 POST/详情 GET，校验牵头节点、团队、真实类型与修订；旧修订不能覆盖新状态，同修订不同正文冲突。网关认证/替换/管理断连已同步单实例 presence，重启一律离线。节点终态上报已匹配新接口并暴露错误，但**尚无持久重试或中间状态上报**。
+- `NodeRuntimeStore` 已提供 inbox/去重/状态/outbox/意图同事务及恢复校验；`GatewayClient({ runtime })` 使用严格 v2 协商、持久收件和有界重试。
+- **生产节点已接入事务任务 pump（单 executor aid 闭环）**：`createDurableNode`（显式 SQLite 准入 `create/open` + 收件箱逐条重授权消费 + `DurableExecutor` 事务租约/心跳/终态 + 关停 flush 后断连）+ `FencedProcessDriver`（harness 命令 → RunHandle fence 协议；recover 恒 unknown → 重启在跑任务一律 recovery_required，绝不重放）。`qlong run` 已默认走该装配，要求 `--storage-mode create|open` 与 `--confirm-local-filesystem`；`qlong service install` 的额外参数原样透传给注册的 run。旧 `createProductionNode` / 旧 `RemoteNodeSession` 仍为 v1 演示链路，禁止绑定 v2 client。协议与限制见 [transport v2 接线说明](docs/repair/PROTOCOL-V2.md)。
+- 业务续租、多网关、Docker/Podman 强隔离、任务产物可信验收仍在后续阶段；**当前不应向不受信节点开放执行**。消息接管不代表任务可恢复，后端未验证前不以宿主执行代替强隔离。
+- 根目录测试和类型检查现包含 Console 与 storage。单元测试不得调用模型；真实模型测试使用单独 opt-in，常规验证显式排除 `dsh-e2e.spec.ts`。
+- 下列版本说明是历史记录，不代表本轮安全、持久化、隔离与真实双机验收均已完成。
+
 架构方向已确定。01–03 篇详细设计已成,经**三轮评审修订**,评审委员会 60 条意见全部处置。实现现状:packages/core(协议/JCS 签名/新鲜性/R0 闸门)、packages/node(双状态机/五道闸/执行档案/驱动)、packages/registry(enroll/目录锚定/纪元现势/grant/审计)、packages/gateway(ACL A0–A6/收件箱/回执帧/语义断连)、packages/cli(join/run/server/status/tasks)、packages/console(控制台)。跨机端到端 lost/改派演练通过。
 
 > 商用前请自查商标与域名占用。
@@ -193,3 +206,4 @@ short_description: 分布式 AI Agent 协作系统——每台设备一条自治
 - 注:真单文件二进制(Node SEA/bun compile)列为 v0.6 可选,当前为"bundle + node 运行时"形态
 
 **待办(v0.6)已全部由 v0.7 兑现**(git bundle/集群化/跨机接管/走查文档/真实联调)。
+

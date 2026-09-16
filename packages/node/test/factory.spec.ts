@@ -1,30 +1,41 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { newKeyPair } from '@qlong/core';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe('createProductionNode', () => {
   it('fetch /v1/nodes/me 失败时抛出明确错误', async () => {
-    const mockFetch = (await import('vitest')).vi.fn().mockResolvedValue({ ok: false, status: 401 });
-    (await import('vitest')).vi.stubGlobal('fetch', mockFetch);
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', mockFetch);
     const { createProductionNode } = await import('../src/remote/factory.js');
-    await expect(createProductionNode({
+    const failure = await createProductionNode({
       registryUrl: 'http://fake',
       gatewayUrl: 'ws://fake',
       nodeToken: 'bad',
-    })).rejects.toThrow('401');
-    (await import('vitest')).vi.unstubAllGlobals();
+      privKey: newKeyPair().priv,
+    }).then((node) => { node.stop(); return null; }, (error: unknown) => error);
+    expect(failure instanceof Error && failure.message.includes('401')).toBe(true);
+    expect(mockFetch.mock.calls[0]?.[1]?.redirect).toBe('error');
+    expect(mockFetch.mock.calls[0]?.[1]?.signal instanceof AbortSignal).toBe(true);
   });
 
   it('启动即上报 caps,并按周期上报 load(03 §4)', async () => {
     const puts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const dataDir = mkdtempSync(join(tmpdir(), 'qlong-factory-'));
+    const identity = loadOrCreateIdentity(dataDir);
     const srv: Server = createServer((req, res) => {
       const path = req.url ?? '';
       if (req.method === 'GET' && path === '/v1/nodes/me') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ node_id: '11111111-1111-4111-8111-111111111111', team_id: 't1', key_epoch: 1 }));
+        res.end(JSON.stringify({
+          node_id: '11111111-1111-4111-8111-111111111111', team_id: '33333333-3333-4333-8333-333333333333',
+          status: 'active', key_epoch: 1, pubkeys: [{ epoch: 1, pubkey: identity.pubkeyB64 }],
+        }));
         return;
       }
       if (req.method === 'PUT' && (path === '/v1/nodes/me/caps' || path === '/v1/nodes/me/load')) {
@@ -43,7 +54,6 @@ describe('createProductionNode', () => {
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const port = (srv.address() as { port: number }).port;
 
-    const dataDir = mkdtempSync(join(tmpdir(), 'qlong-factory-'));
     const { createProductionNode } = await import('../src/remote/factory.js');
     const node = await createProductionNode({
       registryUrl: `http://127.0.0.1:${port}`,
@@ -78,11 +88,16 @@ describe('createProductionNode', () => {
 describe('caps 变更检测与自愈上报(03 §4/§7)', () => {
   it('静态变更 → 周期内即报;caps_missing 自愈软摘 → 档案对齐', async () => {
     const capsPuts: string[][] = [];
+    const dataDir = mkdtempSync(join(tmpdir(), 'qlong-caps-'));
+    const identity = loadOrCreateIdentity(dataDir);
     const srv: Server = createServer((req, res) => {
       const path = req.url ?? '';
       if (req.method === 'GET' && path === '/v1/nodes/me') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ node_id: '22222222-2222-4222-8222-222222222222', team_id: 't1', key_epoch: 1 }));
+        res.end(JSON.stringify({
+          node_id: '22222222-2222-4222-8222-222222222222', team_id: '33333333-3333-4333-8333-333333333333',
+          status: 'active', key_epoch: 1, pubkeys: [{ epoch: 1, pubkey: identity.pubkeyB64 }],
+        }));
         return;
       }
       if (req.method === 'PUT' && path === '/v1/nodes/me/caps') {
@@ -107,7 +122,6 @@ describe('caps 变更检测与自愈上报(03 §4/§7)', () => {
     const port = (srv.address() as { port: number }).port;
 
     const staticCaps = ['tool:node@20'];
-    const dataDir = mkdtempSync(join(tmpdir(), 'qlong-caps-'));
     const { createProductionNode } = await import('../src/remote/factory.js');
     const node = await createProductionNode({
       registryUrl: `http://127.0.0.1:${port}`,

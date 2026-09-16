@@ -69,7 +69,7 @@ export interface LeadInit {
   task_id: string;
   kind: 'aid' | 'project';
   params?: QlongParams;
-  /** 验收判据(评审 I-24):contract.acceptance 的机器可检部分;缺省=通过(v1 aid 常态) */
+  /** 验收判据(评审 I-24):PROJECT 缺省拒绝;aid 保留 v1 acceptance_results 兼容规则。 */
   validateAcceptance?: (resultBody: Record<string, unknown>) => boolean;
 }
 
@@ -87,6 +87,8 @@ export class LeadTaskMachine {
     this.params = init.params ?? DEFAULT_PARAMS;
     this.validateAcceptance =
       init.validateAcceptance ?? ((b) => {
+        // 执行方自报 pass 不能替代牵头方对 PROJECT contract.acceptance 的验证。
+        if (init.kind === 'project') return false;
         const arr = b.acceptance_results;
         if (!Array.isArray(arr)) return true;
         return arr.every((x) => (x as { pass?: boolean } | null)?.pass !== false);
@@ -162,9 +164,9 @@ export class LeadTaskMachine {
       { kind: 'schedule', timer: 'offer_ttl', atMs: this.rec.offerTtlUntil },
     ];
   }
-  /** 入站 task.*(attempt 已对齐本记录;attempt 不符的先行处置见 onForeignAttempt) */
+  /** 入站 task.*:调用方验签并绑定 task_id;所有状态统一绑定当前 peer/attempt。 */
   onMessage(type: string, fromNode: string, attempt: number, body: Record<string, unknown>, now: number): LeadAction[] {
-    if (this.terminal) return [];
+    if (this.terminal || fromNode !== this.rec.target) return [];
     // R0:attempt 不符
     if (attempt !== this.rec.attempt) {
       if (attempt < this.rec.attempt) {
@@ -191,7 +193,7 @@ export class LeadTaskMachine {
   }
 
   private onOfferedMessage(type: string, fromNode: string, body: Record<string, unknown>, now: number): LeadAction[] {
-    if (type === 'task.accept' && fromNode === this.rec.target) {
+    if (type === 'task.accept') {
       this.rec.acceptedThisAttempt = true;
       this.rec.state = 'running';
       const lease = typeof body.lease_ms === 'number' ? body.lease_ms : this.rec.leaseMs;
@@ -203,7 +205,7 @@ export class LeadTaskMachine {
         { kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline },
       ];
     }
-    if (type === 'task.reject' && fromNode === this.rec.target) {
+    if (type === 'task.reject') {
       // reject 码走 reject 登记表(评审 M1-ARCH:busy 归一为 other 会被误排除)
       const { code } = normalizeRejectCode(typeof body.reason_code === 'string' ? body.reason_code : 'other');
       this.rec.history.push({ node: fromNode, attempt: this.rec.attempt, outcome: 'rejected', reason_code: code });
@@ -215,7 +217,6 @@ export class LeadTaskMachine {
   }
 
   private onRunningMessage(type: string, fromNode: string, body: Record<string, unknown>, now: number): LeadAction[] {
-    if (fromNode !== this.rec.target) return [];
     if (type === 'task.progress') {
       // 心跳即续租(R3);progress 不驱动状态机,seq/乱序由去重层与展示层处理。
       // 评审 M1-DIST-1:必须先取消旧 lease 定时器,否则存活超首个死线的健康长任务被误判 lost
@@ -296,6 +297,11 @@ export class LeadTaskMachine {
   private onCancellingMessage(type: string, body: Record<string, unknown>): LeadAction[] {
     if (type === 'task.result') {
       this.rec.resultBody = body;
+      if (!this.validateAcceptance(body)) {
+        this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'acceptance_failed' });
+        // 用户撤销仍在等待 ack/超时,验收失败不得变成 done 或触发改派。
+        return [];
+      }
       this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'result_delivered' });
       return this.finish('done');
     }

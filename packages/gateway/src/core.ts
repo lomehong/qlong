@@ -5,7 +5,7 @@
  */
 import type { AuditRecord, EnvelopeV1, QlongParams } from '@qlong/core';
 import { DEFAULT_PARAMS, isExpiredByExp, makeAudit } from '@qlong/core';
-import { evaluateUplink, type DirectoryLookup } from './acl.js';
+import { evaluateUplink, type AclVerdict } from './acl.js';
 import { InboxStore } from './mailbox.js';
 import type { GatewayAck, GatewayConnection, GatewayDirectorySnapshot, RoutingDenied } from './types.js';
 
@@ -95,6 +95,27 @@ export class GatewayCore {
     return [{ nodeId, code: status === 'suspended' ? 4001 : 4002, status }];
   }
 
+  /** Authorization only: no delivery, mailbox mutation, or expiration policy. */
+  authorizeUplink(fromNodeId: string, envelope: EnvelopeV1): AclVerdict {
+    const conn = this.connections.get(fromNodeId);
+    if (!conn) {
+      return { verdict: 'silent_drop', rule: 'A0', auditEvent: 'acl_rejected_from_pin', reason: '无认证连接' };
+    }
+    return evaluateUplink({
+      conn,
+      head: {
+        msg_id: envelope.msg_id,
+        type: envelope.type,
+        from: envelope.from,
+        to: envelope.to,
+        exp: envelope.exp,
+        body: envelope.body,
+        envelope,
+      },
+      dir: { snapshotEpoch: this.directory.epoch, lookup: (id) => this.lookup(id), grantLookup: this.grantLookup },
+    });
+  }
+
   /**
    * 上行信封:ACL(A0/A1/A2)→ 在线投递 / 离线暂存(aid 不暂存,评审 I-11)/ 拒绝。
    * A0 与过期 = A6 静默(无回执);A1/A2 = 回执 rejected + routing.denied(仅发往发送方本人)。
@@ -109,27 +130,7 @@ export class GatewayCore {
       return result;
     }
 
-    const conn = this.connections.get(fromNodeId);
-    if (!conn) {
-      // 无连接 = 未认证(A3 上游已失守的防御分支):静默
-      audits.push(makeAudit('acl_rejected_from_pin', { node_id: fromNodeId, envelope, reason: '无认证连接' }, () => new Date(now).toISOString()));
-      return result;
-    }
-
-    const head = {
-      msg_id: envelope.msg_id,
-      type: envelope.type,
-      from: envelope.from,
-      to: envelope.to,
-      exp: envelope.exp,
-      body: envelope.body,
-      envelope,
-    };
-    const verdict = evaluateUplink({
-      conn,
-      head,
-      dir: { snapshotEpoch: this.directory.epoch, lookup: (id) => this.lookup(id), grantLookup: this.grantLookup },
-    });
+    const verdict = this.authorizeUplink(fromNodeId, envelope);
 
     if (verdict.verdict === 'silent_drop') {
       audits.push(makeAudit(verdict.auditEvent, { node_id: fromNodeId, envelope, reason: verdict.reason }, () => new Date(now).toISOString()));

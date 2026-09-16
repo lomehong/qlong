@@ -10,14 +10,20 @@ import { LeadTaskMachine } from '../src/lead/machine.js';
 const TASK = '66666666-6666-4666-8666-666666666666';
 const B = '22222222-2222-4222-8222-222222222222';
 const BODY = { kind: 'project', summary: 's', lease_ms: 300000, offer_ttl_ms: 60000 };
+// 本文件验证检查点/接管;PROJECT 无验证器的缺省拒绝已由 machine-safety.spec 固化。
+const ACCEPT = (b: Record<string, unknown>): boolean => {
+  const arr = b.acceptance_results;
+  if (!Array.isArray(arr)) return true;
+  return arr.every((x) => (x as { pass?: boolean } | null)?.pass !== false);
+};
 
 describe('检查点序列化(01 §4.4)', () => {
   it('running 态往返:attempt/history/状态保留,恢复后可继续到终态', () => {
-    const m = new LeadTaskMachine({ task_id: TASK, kind: 'project' });
+    const m = new LeadTaskMachine({ task_id: TASK, kind: 'project', validateAcceptance: ACCEPT });
     m.dispatchTo(B, BODY, 0);
     m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 100);
     const blob = checkpointLeadMachine(m);
-    const m2 = restoreLeadMachine(blob);
+    const m2 = restoreLeadMachine(blob, { validateAcceptance: ACCEPT });
     expect(m2.rec.state).toBe('running');
     expect(m2.rec.attempt).toBe(1);
     expect(m2.rec.history).toHaveLength(1);
@@ -58,14 +64,14 @@ describe('存储:Memory + JsonFile(原子写)', () => {
 describe('接管:进程重启 + 检查点重放(01 §4.4)', () => {
   it('running 中崩溃 → 恢复 → 交付结果 → done', () => {
     const store = new MemoryStore();
-    const s1 = new LeadSupervisor({ store });
+    const s1 = new LeadSupervisor({ store, validateAcceptance: ACCEPT });
     s1.create(TASK, 'project');
     s1.dispatch(TASK, B, BODY, 0);
     s1.deliver(TASK, 'task.accept', B, 1, { lease_ms: 300000 }, 100);
     expect(s1.get(TASK)?.rec.state).toBe('running');
     void s1; // —— 进程崩溃,一切内存态丢失 ——
 
-    const s2 = new LeadSupervisor({ store });
+    const s2 = new LeadSupervisor({ store, validateAcceptance: ACCEPT });
     s2.restoreAll();
     const m2 = s2.get(TASK);
     expect(m2?.rec.state).toBe('running');
@@ -95,7 +101,7 @@ describe('接管:进程重启 + 检查点重放(01 §4.4)', () => {
 
   it('终态任务恢复后保持终态;JsonFileStore 跨进程接管', () => {
     const dir = join(mkdtempSync(join(tmpdir(), 'qlong-cp-')), 'cp');
-    const s1 = new LeadSupervisor({ store: new JsonFileStore(dir) });
+    const s1 = new LeadSupervisor({ store: new JsonFileStore(dir), validateAcceptance: ACCEPT });
     s1.create(TASK, 'project');
     s1.dispatch(TASK, B, BODY, 0);
     s1.deliver(TASK, 'task.accept', B, 1, { lease_ms: 300000 }, 0);

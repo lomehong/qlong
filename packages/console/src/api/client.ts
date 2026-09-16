@@ -11,12 +11,19 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' };
   if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
   const res = await fetch(BASE + path, { method, headers, body: body ? JSON.stringify(body) : undefined, credentials: 'include' });
-  if (res.status === 401) { window.location.hash = '#/login'; throw new Error('未认证'); }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message ?? `HTTP ${res.status}`);
+  if (res.status === 401) {
+    setCsrf('');
+    if (typeof window !== 'undefined') window.location.hash = '#/login';
+    throw new Error('未认证');
   }
-  return res.json() as Promise<T>;
+  if (!res.ok) {
+    const err = await res.json().catch(() => null) as { error?: { message?: unknown }; message?: unknown } | null;
+    const message = err?.error?.message ?? err?.message;
+    throw new Error(typeof message === 'string' ? message : `HTTP ${res.status}`);
+  }
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text.trim() ? JSON.parse(text) : undefined) as T;
 }
 export const api = {
   get: <T>(p: string) => request<T>('GET', p),

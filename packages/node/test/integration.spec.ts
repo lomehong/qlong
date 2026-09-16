@@ -5,7 +5,12 @@ const TASK = '66666666-6666-4666-8666-666666666666';
 
 describe('单机总线集成(A2 单机版种子)', () => {
   it('主路径:offer→accept→心跳续租→result→done,attempt=1,心跳>0', () => {
-    const h = new SingleNodeHarness({ taskId: TASK, kind: 'project', script: { completeAfterMs: 150_000 } });
+    const h = new SingleNodeHarness({
+      taskId: TASK,
+      kind: 'project',
+      validateAcceptance: () => true, // PROJECT 缺省拒绝;本用例验证主路径而非验收闸
+      script: { completeAfterMs: 150_000 },
+    });
     h.startTask();
     h.advanceTo(160_000);
     expect(h.lead.rec.state).toBe('done');
@@ -20,6 +25,7 @@ describe('单机总线集成(A2 单机版种子)', () => {
     const h = new SingleNodeHarness({
       taskId: TASK,
       kind: 'project',
+      validateAcceptance: () => true,
       script: [
         { failAfter: { ms: 1_000, body: { reason_code: 'internal_error', retryable: true, summary: '瞬态错误' } } },
         { completeAfterMs: 2_000, resultBody: { summary: '第二次成功' } },

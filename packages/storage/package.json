@@ -1,0 +1,14 @@
+{
+  "name": "@qlong/storage",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "node ../../node_modules/vitest/vitest.mjs run",
+    "typecheck": "node ../../node_modules/typescript/bin/tsc -p ."
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  }
+}

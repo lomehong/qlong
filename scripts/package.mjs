@@ -31,6 +31,8 @@ async function writeRelease(dir) {
     bundle: true,
     format: 'esm',
     platform: 'node',
+    target: 'node24',
+    external: ['node:*'],
     banner: { js: bannerJs },
     alias: { '@qlong/core': join(ROOT, 'packages/core/src/index.ts') },
   });

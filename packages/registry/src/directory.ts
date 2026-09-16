@@ -6,7 +6,11 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { matchOne } from '@qlong/core';
+import type { SqliteStore } from '../../storage/src/index.js';
 import { ApiError } from './errors.js';
+import { commitRegistryState, emptyRegistryState, loadRegistryState } from './state-store.js';
+import type { AuditRecord, RegistryState, TaskRecord } from './state-store.js';
+import { parseTaskProjection, taskProjectionHash } from './task-projection.js';
 
 /** 随机字节 → base64url(不经 node:crypto 的随机 API 别名,规避本会话内容过滤误伤) */
 function secureRandomB64(n: number): string {
@@ -73,6 +77,8 @@ export type PubkeyLookup =
   | { status: 'node_unknown' };
 
 export interface RegistryOptions {
+  /** Externally opened center store; Registry neither migrates nor closes it. */
+  storage?: SqliteStore;
   now?: () => number;
   /** enroll token TTL,默认 30 分钟(评审 I-23) */
   enrollTtlMs?: number;
@@ -116,14 +122,29 @@ export interface DirectorySnapshot {
   nodes: DirectoryNodeSnapshot[];
 }
 
+// Multiple facades over one borrowed connection may read, but stale caches cannot write/trust.
+const registryRevisions = new WeakMap<SqliteStore, symbol>();
+
 export class Registry {
-  readonly teams = new Map<string, TeamRecord>();
-  readonly nodes = new Map<string, NodeRecord>();
-  private readonly enrollTokens = new Map<string, EnrollRecord>();
-  private readonly nodeByTokenHash = new Map<string, string>();
+  #state: RegistryState = emptyRegistryState();
+  #writing = false;
+  #revision = Symbol();
+  private readonly storage?: SqliteStore;
+  /** Durable views are detached; memory mode preserves the original mutable API. */
+  get teams(): Map<string, TeamRecord> { return this.readView(this.#state.teams); }
+  get nodes(): Map<string, NodeRecord> { return this.readView(this.#state.nodes); }
+  get grants(): Map<string, GrantRecord> { return this.readView(this.#state.grants); }
+  get taskIndex(): Map<string, TaskRecord> { return this.readView(this.#state.taskIndex); }
+  get auditLog(): AuditRecord[] { return this.readView(this.#state.auditLog); }
+  private get enrollTokens(): Map<string, EnrollRecord> { return this.readView(this.#state.enrollTokens); }
+  private get nodeByTokenHash(): Map<string, string> { return this.readView(this.#state.nodeByTokenHash); }
   /** 在线权威 = 网关连接态(02 §8):由网关适配器注入 */
   readonly presence = new Map<string, boolean>();
-  directoryEpoch = 0;
+  get directoryEpoch(): number { return this.readView(this.#state.directoryEpoch); }
+  set directoryEpoch(value: number) {
+    if (this.storage) throw new Error('Durable registry epoch is read-only');
+    this.#state.directoryEpoch = value;
+  }
 
   private readonly nowFn: () => number;
   private readonly enrollTtlMs: number;
@@ -135,12 +156,59 @@ export class Registry {
   private readonly changeListeners = new Set<() => void>();
 
   constructor(opts: RegistryOptions = {}) {
+    this.storage = opts.storage;
     this.nowFn = opts.now ?? (() => Date.now());
     this.enrollTtlMs = opts.enrollTtlMs ?? 30 * 60 * 1000;
     this.maxKeysPerNode = Math.max(3, opts.maxKeysPerNode ?? 5);
     this.maxNodesPerOwner = Math.max(1, opts.maxNodesPerOwner ?? 100);
     this.orphanTeamTtlMs = opts.orphanTeamTtlMs ?? 30 * 24 * 3_600_000;
     this.offlineNodeTtlMs = opts.offlineNodeTtlMs ?? 30 * 24 * 3_600_000;
+    if (this.storage) {
+      this.#state = loadRegistryState(this.storage);
+      this.#revision = registryRevisions.get(this.storage) ?? this.#revision;
+      registryRevisions.set(this.storage, this.#revision);
+    }
+    // Presence is gateway connection state, never restored from disk as online.
+  }
+
+  private readView<T>(value: T): T {
+    if (!this.storage) return value;
+    void this.storage.database; // Revalidate ownership/health; fail closed, never trust a faulted cache.
+    if (registryRevisions.get(this.storage) !== this.#revision) throw new Error('Registry cache is stale; reconstruct the facade');
+    return structuredClone(value);
+  }
+
+  /** Run existing memory semantics on a separate draft, then commit and publish once. */
+  private mutate<T>(operation: (draft: Registry) => T): T {
+    const storage = this.storage;
+    if (!storage) throw new Error('Durable mutation requires storage');
+    this.readView(undefined);
+    if (this.#writing) throw new Error('Reentrant registry mutation is not allowed');
+    this.#writing = true;
+    let result: T;
+    let changed = false;
+    try {
+      const draft = new Registry({
+        now: this.nowFn, enrollTtlMs: this.enrollTtlMs, maxKeysPerNode: this.maxKeysPerNode,
+        maxNodesPerOwner: this.maxNodesPerOwner, orphanTeamTtlMs: this.orphanTeamTtlMs,
+        offlineNodeTtlMs: this.offlineNodeTtlMs,
+      });
+      draft.#state = structuredClone(this.#state);
+      for (const [id, online] of this.presence) draft.presence.set(id, online);
+      result = structuredClone(operation(draft));
+      // Detach inputs/callback-retained records as well as returned records.
+      const next = structuredClone(draft.#state);
+      changed = next.directoryEpoch !== this.#state.directoryEpoch;
+      commitRegistryState(storage, this.#state, next);
+      this.#state = next;
+      this.#revision = Symbol();
+      registryRevisions.set(storage, this.#revision);
+      for (const [id, online] of draft.presence) this.presence.set(id, online);
+    } finally {
+      this.#writing = false;
+    }
+    if (changed) this.notifyChange();
+    return result;
   }
 
   /** 订阅目录变更(§7.1);返回取消订阅函数 */
@@ -180,6 +248,7 @@ export class Registry {
   // ---------- team ----------
 
   createTeam(opts: { name?: string; owner_user_id?: string | null } = {}): TeamRecord {
+    if (this.storage) return this.mutate((draft) => draft.createTeam(opts));
     const team: TeamRecord = {
       team_id: randomUUID(),
       name: opts.name ?? 'qlong-team',
@@ -195,6 +264,7 @@ export class Registry {
 
   /** 签发一次性 enroll token(明文只出现一次;服务端仅存哈希) */
   issueEnrollToken(teamId: string, opts: { ttlMs?: number; created_by?: string } = {}): string {
+    if (this.storage) return this.mutate((draft) => draft.issueEnrollToken(teamId, opts));
     if (!this.teams.has(teamId)) throw new ApiError('bad_request', 'team 不存在', 404);
     const token = secureRandomB64(16);
     this.enrollTokens.set(this.sha(token), {
@@ -208,6 +278,7 @@ export class Registry {
 
   /** enroll(§4):token 消费原子(评审 I-23②);无 token → 单机 team(评审 I-48) */
   enroll(input: EnrollInput): EnrollResult {
+    if (this.storage) return this.mutate((draft) => draft.enroll(input));
     if (!isNonEmptyStr(input.pubkey)) throw new ApiError('bad_request', 'pubkey 必填');
     if (!input.token) {
       const team = this.createTeam({ name: 'self-owned' });
@@ -265,6 +336,7 @@ export class Registry {
 
   /** join(换队):旧凭证 + 新 enroll token 双因子,原子改归属(评审 I-48②) */
   joinTeam(nodeToken: string, enrollToken: string): { team_id: string } {
+    if (this.storage) return this.mutate((draft) => draft.joinTeam(nodeToken, enrollToken));
     const node = this.authByToken(nodeToken);
     const h = this.sha(enrollToken);
     const rec = this.enrollTokens.get(h);
@@ -283,6 +355,7 @@ export class Registry {
 
   /** node token → 节点(§3.2);suspended/revoked 分别给出错误码(P12) */
   authByToken(token: string): NodeRecord {
+    if (this.storage) return this.mutate((draft) => draft.authByToken(token));
     const nodeId = this.nodeByTokenHash.get(this.sha(token));
     const node = nodeId ? this.nodes.get(nodeId) : undefined;
     if (!node) throw new ApiError('not_team_member', '凭证无效', 401);
@@ -294,6 +367,15 @@ export class Registry {
 
   getNode(nodeId: string): NodeRecord | undefined {
     return this.nodes.get(nodeId);
+  }
+
+  /** Explicit persisted replacement for mutating the detached auth/getNode result. */
+  updateNodeName(nodeToken: string, name: string): NodeRecord {
+    if (this.storage) return this.mutate((draft) => draft.updateNodeName(nodeToken, name));
+    if (!isNonEmptyStr(name) || name.trim().length === 0) throw new ApiError('bad_request', 'name 必填');
+    const node = this.authByToken(nodeToken);
+    node.name = name;
+    return node;
   }
 
   // ---------- 凭证生命周期(§6) ----------
@@ -314,8 +396,19 @@ export class Registry {
 
   /** 常规轮换:token + 请求签名双因子;epoch+1;历史保留(评审 I-15/I-46) */
   rotateKeys(nodeToken: string, input: { pubkey: string; sig?: string }, verifyRequestSig?: (node: NodeRecord, input: { pubkey: string; sig?: string }) => boolean): { key_epoch: number } {
+    if (this.storage) return this.mutate((draft) => draft.rotateKeys(nodeToken, input, verifyRequestSig));
     const node = this.authByToken(nodeToken);
-    if (typeof verifyRequestSig === 'function' && !verifyRequestSig(node, input)) {
+    if (typeof verifyRequestSig !== 'function') {
+      throw new ApiError('bad_request', '轮换请求签名验证器未配置', 503);
+    }
+    if (!isNonEmptyStr(input.sig)) throw new ApiError('bad_request', '轮换请求签名缺失', 401);
+    let verified = false;
+    try {
+      verified = verifyRequestSig(structuredClone(node), input) === true;
+    } catch {
+      // 验证器异常与非法签名均失败关闭,不推进公钥或目录纪元。
+    }
+    if (!verified) {
       throw new ApiError('bad_request', '轮换请求签名验证失败', 401);
     }
     if (!isNonEmptyStr(input.pubkey)) throw new ApiError('bad_request', 'pubkey 必填');
@@ -329,6 +422,7 @@ export class Registry {
 
   /** owner 操作:状态变更 + epoch 推进;返回网关应执行的语义 close code(A6,评审 I-14) */
   suspend(nodeId: string): { closeCode: 4001 } {
+    if (this.storage) return this.mutate((draft) => draft.suspend(nodeId));
     const node = this.mustNode(nodeId);
     if (node.status === 'revoked') throw new ApiError('node_revoked', '节点已吊销', 409);
     node.status = 'suspended';
@@ -337,6 +431,7 @@ export class Registry {
   }
 
   resume(nodeId: string): void {
+    if (this.storage) return this.mutate((draft) => draft.resume(nodeId));
     const node = this.mustNode(nodeId);
     if (node.status === 'suspended') {
       node.status = 'active';
@@ -345,6 +440,7 @@ export class Registry {
   }
 
   revoke(nodeId: string): { closeCode: 4002 } {
+    if (this.storage) return this.mutate((draft) => draft.revoke(nodeId));
     const node = this.mustNode(nodeId);
     node.status = 'revoked';
     // token 映射保留:吊销后凭证使用应返回 node_revoked(而非笼统 invalid,§6.1)
@@ -356,6 +452,7 @@ export class Registry {
   // ---------- 能力与负载(03 §4) ----------
 
   putCaps(nodeToken: string, tags: string[]): { caps_rev: number } {
+    if (this.storage) return this.mutate((draft) => draft.putCaps(nodeToken, tags));
     const node = this.authByToken(nodeToken);
     if (!Array.isArray(tags) || tags.some((t) => !isNonEmptyStr(t))) {
       throw new ApiError('bad_request', 'caps 必须为字符串数组', 400);
@@ -368,6 +465,7 @@ export class Registry {
   }
 
   putLoad(nodeToken: string, snapshot: Record<string, unknown>): void {
+    if (this.storage) return this.mutate((draft) => draft.putLoad(nodeToken, snapshot));
     const node = this.authByToken(nodeToken);
     node.load = snapshot;
   }
@@ -398,9 +496,8 @@ export class Registry {
 
   /** 网关目录快照(§7.1):带 epoch,A0/A1/A2 执法与缓存失效依据 */
   // ---------- 跨队 grant(02 §12.1,v0.2 新增) ----------
-  readonly grants = new Map<string, GrantRecord>();
-
   createGrant(opts: { from_team: string; to_team: string; caps_visible?: string[]; ttlMs?: number; created_by?: string }): GrantRecord {
+    if (this.storage) return this.mutate((draft) => draft.createGrant(opts));
     if (!this.teams.has(opts.from_team) || !this.teams.has(opts.to_team)) throw new ApiError('bad_request', 'team 不存在', 404);
     if (opts.from_team === opts.to_team) throw new ApiError('bad_request', '不能对自己团队创建 grant', 400);
     const gid = randomUUID();
@@ -416,6 +513,7 @@ export class Registry {
   }
 
   revokeGrant(gid: string): void {
+    if (this.storage) return this.mutate((draft) => draft.revokeGrant(gid));
     if (!this.grants.has(gid)) throw new ApiError('bad_request', 'grant 不存在', 404);
     this.grants.delete(gid);
     this.bumpEpoch();
@@ -426,25 +524,66 @@ export class Registry {
   }
 
   /** A1 扩展:检查 from_team 是否有权向 to_team 发消息(grant 或同队) */
-  readonly auditLog: Array<{ ts: string; event: string; node: string; team: string; reason: string; trace_id?: string }> = [];
-
   logAudit(event: string, node: string, team: string, reason: string, traceId?: string): void {
-    this.auditLog.push({ ts: new Date().toISOString(), event, node, team, reason, trace_id: traceId });
-    if (this.auditLog.length > 10_000) this.auditLog.shift();
+    if (this.storage) return this.mutate((draft) => draft.logAudit(event, node, team, reason, traceId));
+    this.auditLog.push({ ts: this.iso(), event, node, team, reason, trace_id: traceId });
+    if (this.auditLog.length > 10_000) {
+      this.auditLog.shift();
+      this.#state.auditOffset += 1;
+    }
   }
 
   getAuditEvents(teamId: string, limit: number): Array<{ ts: string; event: string; node: string; team: string; reason: string; trace_id?: string }> {
     return this.auditLog.filter((e) => e.team === teamId).slice(-limit);
   }
-  // ---------- 任务注册表(v0.2:任务列表查询) ----------
-  readonly taskIndex = new Map<string, { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string; updated_at: string }>();
-
-  upsertTask(t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }): void {
-    this.taskIndex.set(t.task_id, { ...t, updated_at: this.iso() });
+  // ---------- 任务投影:仅牵头方报告,不派发/调度任务 ----------
+  reportTask(nodeToken: string, teamId: string, input: unknown): TaskRecord {
+    // Authentication/touch and projection publication share exactly one durable commit.
+    if (this.storage) return this.mutate((draft) => draft.reportTask(nodeToken, teamId, input));
+    const node = this.authByToken(nodeToken);
+    const task = parseTaskProjection(input);
+    if (node.team_id !== teamId || task.team_id !== teamId || task.lead !== node.node_id) {
+      throw new ApiError('not_team_member', '仅本 team 的牵头节点可报告任务', 403);
+    }
+    const previous = this.taskIndex.get(task.task_id);
+    if (previous && (previous.team_id !== teamId || previous.lead !== node.node_id)) {
+      throw new ApiError('not_team_member', '任务归属团队与牵头节点不可变更', 403);
+    }
+    if (previous && previous.type !== task.type) {
+      throw new ApiError('bad_request', '任务类型不可变更', 409, false, { reason: 'task_kind_conflict' });
+    }
+    const content_hash = taskProjectionHash(task);
+    if (previous?.task_seq === task.task_seq) {
+      if (previous.content_hash !== content_hash) {
+        throw new ApiError('bad_request', '同一任务修订内容冲突', 409, false, { reason: 'task_revision_conflict' });
+      }
+      return structuredClone(previous);
+    }
+    if (previous && (task.task_seq < previous.task_seq || task.attempt < previous.attempt)) {
+      throw new ApiError('bad_request', '过期任务投影不可覆盖新修订', 409, false, { reason: 'stale_task_report' });
+    }
+    if (task.exec !== null && !this.nodes.has(task.exec)) {
+      throw new ApiError('bad_request', 'exec 节点不存在');
+    }
+    const record = { ...task, content_hash, updated_at: this.iso() };
+    this.taskIndex.set(task.task_id, record);
+    return structuredClone(record);
   }
 
-  listTasks(teamId: string, limit = 100): Array<{ task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string; updated_at: string }> {
+  /** Trusted tests/demo compatibility only; HTTP must call reportTask. */
+  upsertTask(t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }): void {
+    if (this.storage) return this.mutate((draft) => draft.upsertTask(t));
+    const task = parseTaskProjection({ ...t, task_seq: (this.taskIndex.get(t.task_id)?.task_seq ?? -1) + 1 });
+    this.taskIndex.set(t.task_id, { ...task, content_hash: taskProjectionHash(task), updated_at: this.iso() });
+  }
+
+  listTasks(teamId: string, limit = 100): TaskRecord[] {
     return [...this.taskIndex.values()].filter((t) => t.team_id === teamId).slice(-limit);
+  }
+
+  getTask(teamId: string, taskId: string): TaskRecord | undefined {
+    const task = this.taskIndex.get(taskId);
+    return task?.team_id === teamId ? structuredClone(task) : undefined;
   }
   hasGrant(fromTeam: string, toTeam: string): boolean {
     for (const g of this.grants.values()) {
@@ -456,26 +595,29 @@ export class Registry {
 
   /**
    * GC(评审 I-16/I-48):
-   * - 零成员且超过 orphanTeamTtlMs 的单机 team → 删除(连同未消费的 enroll tokens);
+   * - 无节点/grant/task 引用且超过 orphanTeamTtlMs 的单机 team → 删除(连同 enroll tokens);
    * - 超过 offlineNodeTtlMs 无心跳/无交互的节点 → revoked + 档案清理(caps/load,03 §8 留存语义)。
    * 幂等;返回清理计数供运营观测。
    */
   gc(): { removedOrphanTeams: number; revokedOfflineNodes: number } {
+    if (this.storage) return this.mutate((draft) => draft.gc());
     const now = this.now;
     let removedOrphanTeams = 0;
     let revokedOfflineNodes = 0;
 
     for (const team of [...this.teams.values()]) {
-      // orphan 推导:无 owner 且零活成员(revoke 后 state 字段不会自动变,按事实判定)
+      // Retain team tombstones while any node (even revoked), grant or task references them.
       if (team.owner_user_id) continue;
-      const hasMembers = [...this.nodes.values()].some((n) => n.team_id === team.team_id && n.status !== 'revoked');
-      if (hasMembers) continue;
+      if ([...this.nodes.values()].some((n) => n.team_id === team.team_id)) continue;
+      if ([...this.grants.values()].some((g) => g.from_team === team.team_id || g.to_team === team.team_id)) continue;
+      if ([...this.taskIndex.values()].some((t) => t.team_id === team.team_id)) continue;
       const createdAt = Date.parse(team.created_at);
       if (Number.isFinite(createdAt) && now - createdAt >= this.orphanTeamTtlMs) {
         this.teams.delete(team.team_id);
         for (const [h, rec] of [...this.enrollTokens.entries()]) {
           if (rec.team_id === team.team_id) this.enrollTokens.delete(h);
         }
+        this.bumpEpoch();
         removedOrphanTeams += 1;
       }
     }
@@ -490,7 +632,7 @@ export class Registry {
         node.status = 'revoked';
         node.caps = [];
         node.load = null;
-        this.nodeByTokenHash.delete(node.tokenHash);
+        // Keep the mapping, just as explicit revoke() does: stale tokens report node_revoked.
         this.presence.set(node.node_id, false);
         this.bumpEpoch();
         revokedOfflineNodes += 1;

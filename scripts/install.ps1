@@ -28,13 +28,13 @@ if ($Uninstall) {
 
 Write-Host ">>> 群龙安装: Windows/$env:PROCESSOR_ARCHITECTURE"
 
-# 运行时检测:Windows 产物为 cmd 垫片(需 node ≥ 20)
+# 运行时检测:内置 SQLite 需要 Node.js >= 24
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Write-Error ">>> 安装中止:未检测到 node,请先安装 Node.js ≥ 20(https://nodejs.org)"
+  Write-Error ">>> 安装中止:未检测到 node,请先安装 Node.js >= 24(https://nodejs.org)"
 }
 $nodeMajor = [int](node -p "process.versions.node.split('.')[0]")
-if ($nodeMajor -lt 20) {
-  Write-Error ">>> 安装中止:Node.js 需 ≥ 20(当前 $nodeMajor)"
+if ($nodeMajor -lt 24) {
+  Write-Error ">>> 安装中止:Node.js 需 >= 24(当前 $nodeMajor)"
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -78,8 +78,27 @@ if ($EnrollToken) {
   Write-Host ">>> 入网完成"
 }
 
-# 服务化自启(纪要 §8.5:装完即在线/重启自动在线)
-& "$InstallDir\qlong.cmd" service install
+# 服务化自启(纪要 §8.5:装完即在线/重启自动在线)。
+# 持久节点拒绝隐式启动:自启必须显式准入(open + 本地文件系统确认 + Windows ACL 确认);
+# create 不能注册为自启(重启即 DATABASE_EXISTS 失败循环)——首次创建须手动完成。
+$serviceArgs = @()
+if ($env:QLONG_STORAGE_MODE -and $env:QLONG_LOCAL_FS_CONFIRMED -eq '1') {
+  if ($env:QLONG_STORAGE_MODE -ne 'open') {
+    Write-Host ">>> 跳过自启注册:QLONG_STORAGE_MODE=$($env:QLONG_STORAGE_MODE);自启必须 open"
+    Write-Host "    首次手动执行: qlong run --storage-mode create --confirm-local-filesystem --confirm-windows-acl"
+    Write-Host "    完成后以 QLONG_STORAGE_MODE=open 重跑安装即可注册自启"
+  } else {
+    if ($env:QLONG_DATA_DIR) { $serviceArgs += @('--data-dir', $env:QLONG_DATA_DIR) }
+    if ($env:QLONG_DATA_BASE) { $serviceArgs += @('--data-base', $env:QLONG_DATA_BASE) }
+    $serviceArgs += @('--storage-mode', 'open', '--confirm-local-filesystem')
+    if ($env:QLONG_WINDOWS_ACL_CONFIRMED -eq '1') { $serviceArgs += '--confirm-windows-acl' }
+    & "$InstallDir\qlong.cmd" service install @serviceArgs
+  }
+} else {
+  Write-Host ">>> 跳过自启注册:未配置持久存储准入(QLONG_STORAGE_MODE=open + QLONG_LOCAL_FS_CONFIRMED=1 + QLONG_WINDOWS_ACL_CONFIRMED=1)"
+  Write-Host "    数据目录须在本机本地磁盘(勿用 NFS/SMB/云同步盘);配置后重跑安装,"
+  Write-Host "    或手动: qlong service install --storage-mode open --confirm-local-filesystem --confirm-windows-acl"
+}
 
 # 装完即在线验收(I-22 清单)
 Write-Host ">>> 验收入网状态..."
@@ -87,3 +106,4 @@ Write-Host ">>> 验收入网状态..."
 
 Write-Host ">>> 安装完成: $InstallDir\qlong.cmd"
 Write-Host ">>> 卸载: powershell -File `$PSCommandPath -Uninstall(含凭证清除)"
+

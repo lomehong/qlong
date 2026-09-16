@@ -22,7 +22,11 @@ function execOffer(over: Record<string, unknown> = {}) {
 
 describe('M1 评审 P0 回归', () => {
   it('DIST-1:心跳续租取消旧 lease 定时器 —— 健康长任务跨 230s 不误判', () => {
-    const m = new LeadTaskMachine({ task_id: TASK, kind: 'project' });
+    const m = new LeadTaskMachine({
+      task_id: TASK,
+      kind: 'project',
+      validateAcceptance: () => true, // PROJECT 缺省拒绝;本用例验证续租定时器而非验收闸
+    });
     m.dispatchTo(B, BODY, 0);
     m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
     m.onMessage('task.progress', B, 1, { seq: 1 }, 100_000);
@@ -105,7 +109,12 @@ describe('M1 评审 P0 回归', () => {
     const blob = checkpointLeadMachine(h1.lead);
     expect(h1.lead.rec.state).toBe('running');
 
-    const h2 = new SingleNodeHarness({ taskId: TASK, kind: 'project', script: { completeAfterMs: 500_000 } });
+    const h2 = new SingleNodeHarness({
+      taskId: TASK,
+      kind: 'project',
+      validateAcceptance: () => true,
+      script: { completeAfterMs: 500_000 },
+    });
     h2.adoptRestoredLead(blob);
     expect(pendingTimers(h2.lead).some((t) => t.timer === 'lease')).toBe(true);
     h2.advanceTo(900_000);

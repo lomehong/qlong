@@ -5,6 +5,8 @@ await build({
   entryPoints: [fileURLToPath(new URL('./src/main.ts', import.meta.url))],
   bundle: true,
   platform: 'node',
+  target: 'node24',
+  external: ['node:*'],
   format: 'esm',
   outfile: fileURLToPath(new URL('./dist/cli.mjs', import.meta.url)),
   alias: { '@qlong/core': fileURLToPath(new URL('../core/src/index.ts', import.meta.url)) },

@@ -65,6 +65,13 @@ export class GatewayCluster {
     const home = this.shardOf(toNodeId);
     if (home) {
       home.core.queueInbox(envelope, now);
+      // 竞态封口:本方法含 await(总线),节点可能在 uplink 判离线之后、入箱完成之前
+      // 上线——其连接时的补投已经扑空,信封会滞留到下次重连。入箱后(同一事件循环步,
+      // 无 await)复查连接表,命中则立即排空补投;未命中则由连接时补投接管。
+      if (home.has(toNodeId)) {
+        const take = home.core.takeInbox(toNodeId, now);
+        for (const d of take.deliveries) home.deliver(d.toNodeId, d.envelope);
+      }
       return 'queued';
     }
     return 'unknown';

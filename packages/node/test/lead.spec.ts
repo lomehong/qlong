@@ -7,7 +7,16 @@ const B = '22222222-2222-4222-8222-222222222222';
 const C = '44444444-4444-4444-8444-444444444444';
 
 function mk(): LeadTaskMachine {
-  return new LeadTaskMachine({ task_id: TASK, kind: 'project' });
+  // 本文件验证 R 系列转移语义;PROJECT 无验证器的缺省拒绝已由 machine-safety.spec 固化。
+  return new LeadTaskMachine({
+    task_id: TASK,
+    kind: 'project',
+    validateAcceptance: (b) => {
+      const arr = b.acceptance_results;
+      if (!Array.isArray(arr)) return true;
+      return arr.every((x) => (x as { pass?: boolean } | null)?.pass !== false);
+    },
+  });
 }
 function offerBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return { kind: 'project', summary: 's', lease_ms: 300000, offer_ttl_ms: 60000, ...over };

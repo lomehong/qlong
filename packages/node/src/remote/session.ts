@@ -24,9 +24,21 @@ import {
 import { ExecutorMachine, type ExecAction } from '../executor/machine.js';
 import type { DriverHost, ExecutorDriver } from '../executor/driver.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
-import { LeadTaskMachine, type LeadAction } from '../lead/machine.js';
+import { LeadTaskMachine, type LeadAction, type LeadTerminal } from '../lead/machine.js';
 import { WorkspaceManager, type WorkspaceHandle } from '../collab/workspace.js';
 import type { GatewayClient } from '../gateway-client.js';
+
+/** Temporary terminal-only projection; not a durable reporting intent. */
+export type TerminalTaskProjection = Readonly<{
+  task_id: string;
+  type: 'aid' | 'project';
+  team_id: string;
+  lead: string;
+  exec: string | null;
+  attempt: number;
+  status: LeadTerminal;
+  task_seq: number;
+}>;
 
 export interface RemoteSessionOptions {
   nodeId: string;
@@ -52,8 +64,8 @@ export interface RemoteSessionOptions {
   /** rpc.ask 应答器(01 §4.1):缺省用内置 caps.query/status.query;自定义则完全接管 */
   rpcHandler?: (q: { from: string; request_id: string; question: string; timeout_ms?: number }) => Promise<unknown> | unknown;
   onTerminal?: (taskId: string, state: string, resultBody?: Record<string, unknown>) => void;
-  /** v0.2:任务状态上报到 registry(供 console Tasks 页查询) */
-  taskStatusReporter?: (t: { task_id: string; type: string; team_id: string; lead: string; exec: string; attempt: number; status: string }) => void;
+  /** Best-effort terminal projection only: no intermediate revisions or restart durability yet. */
+  taskStatusReporter?: (t: TerminalTaskProjection) => void;
   onEscalate?: (summary: { task_id: string; attempts: unknown[]; final_reason: string }) => void;
   onAudit?: (a: AuditRecord) => void;
   onRoutingDenied?: (d: { rule: string; reason_code: string; msg_id: string }) => void;
@@ -127,6 +139,9 @@ export class RemoteNodeSession {
   >();
 
   constructor(opts: RemoteSessionOptions) {
+    if (opts.client.transportVersion === 2) {
+      throw new Error('Legacy RemoteNodeSession cannot consume durable inbox; transactional task runtime required');
+    }
     this.opts = opts;
     this.nodeId = opts.nodeId;
     this.teamId = opts.teamId;
@@ -148,11 +163,9 @@ export class RemoteNodeSession {
         load: opts.load,
         confirmHandler: opts.confirmHandler,
       });
-    // A4(评审 M3-SEC-1):入站验签缺省拒绝 —— 未配置 verifyInbound 不接收任何任务
-    opts.client.verifyInbound = async (env) => {
-      if (!opts.verifyInbound) return false;
-      return opts.verifyInbound(env);
-    };
+    // Explicit session override wins; otherwise preserve the client verifier.
+    // GatewayClient denies by default when neither layer configures one.
+    if (opts.verifyInbound !== undefined) opts.client.verifyInbound = opts.verifyInbound;
     // R3(blocker 评审 M3-DIST-1):progress 的回执 → 执行方续租
     const prevAck = opts.client.onAck;
     // A6:routing.denied 转发(会话层可观测,评审 M3-DIST)
@@ -173,7 +186,9 @@ export class RemoteNodeSession {
   }
 
   /** 网关回执:progress 的送达回执 → 执行方续租;其余回执交上层 */
-  private onGatewayAck(ack: { msg_id: string }): void {
+  private onGatewayAck(ack: { msg_id: string; ack_type: string }): void {
+    // Legacy loopback compatibility only. stored/queued/rejected/receipt are not lead liveness.
+    if (this.opts.client.transportVersion !== 1 || ack.ack_type !== 'delivered') return;
     if (this.lastProgressMsgId !== '' && ack.msg_id === this.lastProgressMsgId && this.execCtx) {
       this.lastProgressMsgId = '';
       const ctx = this.execCtx;
@@ -211,6 +226,9 @@ export class RemoteNodeSession {
   }
 
   private processLead(actions: LeadAction[]): void {
+    // Bind this action batch to its originating lead, including callbacks before terminal.
+    const lead = this.lead;
+    const rec = lead?.rec;
     for (const a of actions) {
       switch (a.kind) {
         case 'send': {
@@ -242,8 +260,22 @@ export class RemoteNodeSession {
           break;
         }
         case 'terminal': {
-          this.metrics.onTerminal(this.lead?.rec.attempt ?? 0);
-          const taskId = this.lead?.task_id ?? '';
+          const taskId = lead?.task_id ?? '';
+          const attempt = rec?.attempt ?? 0;
+          const target = rec?.target ?? null;
+          const resultBody = rec?.resultBody;
+          // Snapshot primitives before notify/onTerminal can replace the lead or mutate its record.
+          // TEMP: runtime emits only once at terminal, so seq=0 is stable for that projection.
+          // No intermediate revisions/restart durability: reliable reporting awaits node
+          // transactional intents (stages 4/8), not a clock or an in-memory retry queue.
+          // Unoffered draft cancellation (attempt=0) has no agreed Registry schema; do not forge 1.
+          const projection: TerminalTaskProjection | undefined = rec && Number.isSafeInteger(attempt) && attempt >= 1
+            ? Object.freeze({
+                task_id: taskId, team_id: this.teamId, lead: this.nodeId,
+                exec: target, attempt, status: a.state, type: rec.kind, task_seq: 0,
+              })
+            : undefined;
+          this.metrics.onTerminal(attempt);
           const last = this.lastTaskMsg.get(taskId);
           if (this.logger && last) {
             logTaskEvent(this.logger, 'info', '任务到达终态 ' + a.state, {
@@ -253,9 +285,9 @@ export class RemoteNodeSession {
               msg_id: last.msg_id,
             });
           }
-          this.notify?.({ kind: 'task_end', task_id: taskId, from: this.lead?.rec.target ?? '', state: a.state });
-          this.opts.onTerminal?.(taskId, a.state, this.lead?.rec.resultBody);
-          this.opts.taskStatusReporter?.({ task_id: this.lead?.task_id ?? '', type: 'project', team_id: this.opts.teamId, lead: this.opts.nodeId, exec: this.lead?.rec.target ?? '', attempt: this.lead?.rec.attempt ?? 0, status: a.state });
+          this.notify?.({ kind: 'task_end', task_id: taskId, from: target ?? '', state: a.state });
+          this.opts.onTerminal?.(taskId, a.state, resultBody);
+          if (projection) this.opts.taskStatusReporter?.(projection);
           break;
         }
         case 'escalate':

@@ -1,0 +1,322 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { envelopeDigest, newKeyPair, signEnvelope, toBase64, type EnvelopeV1 } from '@qlong/core';
+import { AuthService, SESSION_COOKIE } from '../../registry/src/auth.js';
+import { CENTER_SCHEMA, Registry, type EnrollResult } from '../../registry/src/index.js';
+import { SqliteStore } from '../../storage/src/index.js';
+import {
+  cleanupServerFixtures, nodeHeaders, ownerHeaders, persistedSnapshot, type Owner,
+} from './server-durable-fixtures.js';
+import {
+  centerView, CustodyFixture, failCommit, inspectSql, offer, readCenter, repairCommit, setup, wait,
+} from './server-custody-helpers.js';
+
+afterEach(async () => { await cleanupServerFixtures(); });
+
+function deliveryStatus(store: SqliteStore, envelope: EnvelopeV1) {
+  return store.database.prepare('SELECT status FROM node_delivery WHERE sender = ? AND msg_id = ?')
+    .get(envelope.from.node_id, envelope.msg_id)?.status;
+}
+
+function unexecuted(store: SqliteStore): void {
+  expect(store.database.prepare("SELECT count(*) AS count FROM node_inbox WHERE decision = 'pending' AND payload IS NOT NULL")
+    .get()?.count).toBe(1);
+  for (const table of ['node_state', 'node_effects', 'node_dedup', 'node_outbox']) {
+    expect(store.database.prepare(`SELECT count(*) AS count FROM ${table}`).get()?.count).toBe(0);
+  }
+}
+
+describe('startQlongServer v2 custody with real node runtimes', () => {
+  it('persists offline custody through center/node restarts, receipts to a tombstone, and never executes the inbox', async () => {
+    const { f, handles, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const a = await f.client(handles, sender, source.runtime);
+    const b = await f.client(handles, receiver, target.runtime); // Enrolled but deliberately offline.
+    const envelope = offer(sender, receiver);
+    await a.client.open();
+    source.runtime.save({ envelope, attempts: 0, lastAt: 0 });
+    expect(source.runtime.all().length).toBe(1);
+    expect(await a.client.send(envelope, { ackTimeoutMs: 3_000 })).toBe('stored');
+    expect(a.events.acks).toEqual(['stored']);
+    expect(source.runtime.all().length).toBe(0);
+    expect(deliveryStatus(source.store, envelope)).toBe('stored');
+    expect(target.runtime.pending().length).toBe(0);
+    expect(readCenter(f, envelope)).toMatchObject({ status: 'pending', payload: true, digestMatches: true, entries: 1 });
+    expect(readCenter(f, envelope).bytes).toBeGreaterThan(0);
+
+    await Promise.all([a.close(), b.close()]);
+    await f.stop();
+    source.store.close();
+    target.store.close();
+    f.offline((store) => expect(centerView(store.database, envelope)).toMatchObject({ status: 'pending', payload: true }));
+
+    const reopened = await f.start('open');
+    const source2 = f.runtime(sender, 'open');
+    const target2 = f.runtime(receiver, 'open');
+    expect(source2.runtime.all().length).toBe(0);
+    expect(deliveryStatus(source2.store, envelope)).toBe('stored');
+    const a2 = await f.client(reopened, sender, source2.runtime);
+    const b2 = await f.client(reopened, receiver, target2.runtime);
+    await Promise.all([a2.client.open(), b2.client.open()]);
+    // onInboxReady is not a center ACK. Observe the committed receiver receipt in a read-only DB view.
+    await wait(() => expect(readCenter(f, envelope).status).toBe('received'));
+    expect(b2.events.ready).toBe(1);
+    expect(b2.events.legacy).toBe(0);
+    expect(b2.client.rejectedInbound).toBe(0);
+    expect(target2.runtime.pending().length).toBe(1);
+    expect(envelopeDigest(target2.runtime.pending()[0]!) === envelopeDigest(envelope)).toBe(true);
+    unexecuted(target2.store);
+    await Promise.all([a2.close(), b2.close()]);
+    await f.stop();
+    source2.store.close();
+    target2.store.close();
+    f.offline((store) => expect(centerView(store.database, envelope)).toEqual({
+      status: 'received', payload: false, digestMatches: true, entries: 1, bytes: 0,
+    }));
+
+    const finalCenter = await f.start('open');
+    const target3 = f.runtime(receiver, 'open');
+    const b3 = await f.client(finalCenter, receiver, target3.runtime);
+    expect(target3.runtime.pending().length).toBe(1);
+    // A stored runtime intentionally cannot resurrect its outbox: replay the exact signed bytes raw.
+    const replay = await f.rawSender(finalCenter, sender);
+    await replay.send(envelope, 'stored');
+    await replay.send(signEnvelope({ ...envelope, body: { ...envelope.body, summary: 'changed after receipt' } }, sender.pair.priv), 'conflict');
+    await replay.close();
+    expect(replay.successes()).toBe(1);
+    // Keep the recipient offline so a fast duplicate receipt cannot conceal payload resurrection.
+    expect(readCenter(f, envelope)).toEqual({ status: 'received', payload: false, digestMatches: true, entries: 1, bytes: 0 });
+    await b3.client.open();
+    await b3.close();
+    // Restart notification discovers existing pending work; it is not a redelivery or execution.
+    expect(b3.events.ready).toBe(1);
+    expect(b3.events.legacy).toBe(0);
+    expect(target3.runtime.pending().length).toBe(1);
+    unexecuted(target3.store);
+    await f.stop();
+    f.offline((store) => expect(centerView(store.database, envelope)).toEqual({
+      status: 'received', payload: false, digestMatches: true, entries: 1, bytes: 0,
+    }));
+  }, 20_000);
+
+  it('rejects a re-signed same-ID mutation without source deletion and reconciles a lost stored reply after reopen', async () => {
+    const { f, handles, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const envelope = offer(sender, receiver);
+    source.runtime.save({ envelope, attempts: 0, lastAt: 0 });
+    const raw = await f.rawSender(handles, sender);
+    await raw.send(envelope, 'stored'); // Deliberately never hand this reply to the node runtime.
+    await raw.close();
+    expect(deliveryStatus(source.store, envelope)).toBe('pending');
+    await f.stop();
+    source.store.close();
+
+    const reopened = await f.start('open');
+    const source2 = f.runtime(sender, 'open');
+    const conflicting = signEnvelope({ ...envelope, body: { ...envelope.body, summary: 'mutated same ID' } }, sender.pair.priv);
+    expect(envelopeDigest(conflicting) !== envelopeDigest(envelope)).toBe(true);
+    // The runtime forbids mutation; raw WS exercises the center conflict boundary instead.
+    const attacker = await f.rawSender(reopened, sender);
+    await attacker.send(conflicting, 'conflict');
+    await attacker.close(); // Same-socket close drains any erroneous extra success frames too.
+    expect(attacker.successes()).toBe(0);
+    expect(source2.runtime.all().length).toBe(1);
+    expect(envelopeDigest(source2.runtime.all()[0]!.envelope) === envelopeDigest(envelope)).toBe(true);
+    expect(deliveryStatus(source2.store, envelope)).toBe('pending');
+    expect(readCenter(f, envelope)).toMatchObject({ status: 'pending', digestMatches: true, payload: true, entries: 1 });
+
+    const a = await f.client(reopened, sender, source2.runtime);
+    await a.client.open(); // Real client automatically retries its persisted, unchanged pending ID.
+    await wait(() => expect(a.events.acks).toEqual(['stored']));
+    expect(source2.runtime.all().length).toBe(0);
+    expect(deliveryStatus(source2.store, envelope)).toBe('stored');
+    await a.close();
+    await f.stop();
+    f.offline((store) => expect(centerView(store.database, envelope)).toMatchObject({
+      status: 'pending', digestMatches: true, payload: true, entries: 1,
+    }));
+  }, 20_000);
+
+  it('closes admission on a center COMMIT failure, retains the sender payload, and delivers after offline repair', async () => {
+    const { f, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const envelope = offer(sender, receiver);
+    await f.stop();
+    f.offline((store) => failCommit(store, 'gateway_custody'));
+    const broken = await f.start('open');
+    const a = await f.client(broken, sender, source.runtime);
+    await a.client.open();
+    source.runtime.save({ envelope, attempts: 0, lastAt: 0 });
+    expect(await a.client.send(envelope, { ackTimeoutMs: 3_000 })).toBe('timeout');
+    await wait(() => expect(a.events.closes[0]).toBe(1011));
+    await a.close(); // Stop retries before repairing/reopening the authority.
+    expect(a.events.acks.length).toBe(0);
+    expect(source.runtime.all().length).toBe(1);
+    expect(envelopeDigest(source.runtime.all()[0]!.envelope) === envelopeDigest(envelope)).toBe(true);
+    expect(deliveryStatus(source.store, envelope)).toBe('pending');
+    await f.stop();
+    f.offline((store) => {
+      expect(centerView(store.database, envelope)).toMatchObject({ status: undefined, entries: 0, bytes: 0 });
+      repairCommit(store); // Recovered DB proves the trigger INSERT was rolled back at COMMIT.
+    });
+    source.store.close();
+    target.store.close();
+
+    const recovered = await f.start('open');
+    const source2 = f.runtime(sender, 'open');
+    const target2 = f.runtime(receiver, 'open');
+    expect(source2.runtime.all().length).toBe(1);
+    // Reset retry scheduling only, not immutable identity/content or custody status.
+    source2.runtime.save({ envelope, attempts: 0, lastAt: 0 });
+    const a2 = await f.client(recovered, sender, source2.runtime);
+    const b2 = await f.client(recovered, receiver, target2.runtime);
+    await a2.client.open();
+    await wait(() => expect(a2.events.acks).toEqual(['stored']));
+    expect(deliveryStatus(source2.store, envelope)).toBe('stored');
+    expect(source2.runtime.all().length).toBe(0);
+    await b2.client.open();
+    await wait(() => expect(readCenter(f, envelope).status).toBe('received'));
+    expect(target2.runtime.pending().length).toBe(1);
+    expect(b2.events.legacy).toBe(0);
+    await Promise.all([a2.close(), b2.close()]);
+    await f.stop();
+    f.offline((store) => expect(centerView(store.database, envelope)).toMatchObject({ status: 'received', bytes: 0 }));
+  }, 20_000);
+
+  it('withholds receipt when the receiver inbox COMMIT fails and recovers pending center custody after restart', async () => {
+    const { f, handles, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const a = await f.client(handles, sender, source.runtime);
+    const b = await f.client(handles, receiver, target.runtime);
+    const envelope = offer(sender, receiver);
+    // No node client is connected yet; use this runtime's sole owning connection for injection.
+    failCommit(target.store, 'node_inbox');
+    await a.client.open();
+    source.runtime.save({ envelope, attempts: 0, lastAt: 0 });
+    expect(await a.client.send(envelope, { ackTimeoutMs: 3_000 })).toBe('stored');
+    await b.client.open();
+    await wait(() => expect(b.events.closes[0]).toBe(1011));
+    expect(b.events.faults).toBe(1);
+    expect(b.events.ready).toBe(0);
+    expect(b.events.legacy).toBe(0);
+    expect(b.client.rejectedInbound).toBe(0); // Signature verified; durable admission failed afterwards.
+    expect(target.store.state).toBe('faulted');
+    expect(inspectSql(target.store.path, (db) => db.prepare('SELECT count(*) AS count FROM node_inbox').get()?.count)).toBe(0);
+    expect(readCenter(f, envelope)).toMatchObject({ status: 'pending', payload: true, entries: 1 });
+    await Promise.all([a.close(), b.close()]);
+    await f.stop();
+    source.store.close();
+    target.store.close();
+    f.offline((store) => expect(centerView(store.database, envelope)).toMatchObject({ status: 'pending', payload: true }));
+    const target2 = f.runtime(receiver, 'open');
+    expect(target2.runtime.pending().length).toBe(0);
+    repairCommit(target2.store);
+    const reopened = await f.start('open');
+    const b2 = await f.client(reopened, receiver, target2.runtime);
+    await b2.client.open();
+    await wait(() => expect(readCenter(f, envelope).status).toBe('received'));
+    expect(b2.events.ready).toBe(1);
+    expect(b2.events.legacy).toBe(0);
+    expect(target2.runtime.pending().length).toBe(1);
+    unexecuted(target2.store);
+    await b2.close();
+    await f.stop();
+    f.offline((store) => expect(centerView(store.database, envelope)).toMatchObject({ status: 'received', payload: false, bytes: 0 }));
+  }, 20_000);
+
+  it('checks real registry signatures before inbox admission and never receipts an envelope signed by another key', async () => {
+    const { f, handles, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const a = await f.client(handles, sender, source.runtime);
+    const b = await f.client(handles, receiver, target.runtime);
+    const forged = signEnvelope(offer(sender, receiver), receiver.pair.priv);
+    await a.client.open();
+    expect(await a.client.send(forged, { ackTimeoutMs: 3_000 })).toBe('stored');
+    await b.client.open();
+    await wait(() => expect(b.client.rejectedInbound > 0).toBe(true));
+    expect(target.runtime.pending().length).toBe(0);
+    expect(b.events.ready).toBe(0);
+    expect(readCenter(f, forged)).toMatchObject({ status: 'pending', payload: true });
+    const valid = offer(sender, receiver);
+    expect(await a.client.send(valid, { ackTimeoutMs: 3_000 })).toBe('stored');
+    await wait(() => expect(readCenter(f, valid).status).toBe('received'));
+    expect(target.runtime.pending().length).toBe(1);
+    expect(envelopeDigest(target.runtime.pending()[0]!) === envelopeDigest(valid)).toBe(true);
+    expect(b.events.legacy).toBe(0);
+    await Promise.all([a.close(), b.close()]);
+    await f.stop();
+    f.offline((store) => {
+      expect(centerView(store.database, forged)).toMatchObject({ status: 'pending', payload: true });
+      expect(centerView(store.database, valid)).toMatchObject({ status: 'received', payload: false });
+    });
+  }, 20_000);
+
+  it('rejects a legacy GatewayClient with 4004 without fallback or loss of its queued message', async () => {
+    const { f, handles, sender, receiver, owner, teamId } = await setup();
+    const legacy = await f.client(handles, sender); // No runtime means the real v1 handshake.
+    legacy.client.outbox.save({ envelope: offer(sender, receiver), attempts: 0, lastAt: 0 });
+    expect(legacy.client.transportVersion).toBe(1);
+    await expect(legacy.client.open()).rejects.toThrow('gateway connection failed');
+    await wait(() => expect(legacy.events.closes).toEqual([4004]));
+    expect(legacy.client.state).toBe('closed');
+    await expect(legacy.client.open()).rejects.toThrow('stopped');
+    expect(legacy.events.acks.length).toBe(0);
+    expect(legacy.client.outbox.all().length).toBe(1);
+    expect((await f.nodes(owner, teamId)).every((node) => !node.online)).toBe(true);
+    await f.stop();
+    f.offline((store) => expect(store.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0));
+  }, 20_000);
+
+  it('appends center schema v2 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
+    const f = new CustodyFixture();
+    const v1 = CENTER_SCHEMA.migrations[0]!;
+    const store = SqliteStore.open({ ...f.options(), filename: 'center.sqlite',
+      schema: { id: CENTER_SCHEMA.id, migrations: [v1] } });
+    let before: string;
+    let owner: Owner;
+    let node: EnrollResult;
+    let pendingInvite: string;
+    try {
+      const registry = new Registry({ storage: store });
+      const auth = new AuthService({ storage: store });
+      const username = 'migration-owner';
+      const password = randomUUID();
+      auth.register(username, password);
+      const login = auth.login(username, password);
+      owner = { username, password, cookie: `${SESSION_COOKIE}=${login.sessionId}`, csrf: login.csrf };
+      const team = registry.createTeam({ name: 'v1-team', owner_user_id: username });
+      node = registry.enroll({ token: registry.issueEnrollToken(team.team_id), pubkey: toBase64(newKeyPair().publicKey) });
+      pendingInvite = registry.issueEnrollToken(team.team_id);
+      before = persistedSnapshot(store); // Contains secrets: equality must only be asserted as a boolean.
+      expect(store.version).toBe(1);
+      expect(store.database.prepare('SELECT checksum FROM _qlong_migrations WHERE version = 1').get()?.checksum === v1.checksum).toBe(true);
+      expect(store.database.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'gateway_custody'").get()?.count).toBe(0);
+    } finally { store.close(); }
+
+    const migrated = await f.start('open');
+    expect(migrated.storageMode).toBe('sqlite');
+    expect(migrated.auth.needsInit).toBe(false);
+    await f.stop();
+    // Check the migration before authenticated HTTP requests can legitimately touch last_seen.
+    f.offline((storage) => {
+      expect(storage.version).toBe(2);
+      expect(persistedSnapshot(storage) === before).toBe(true);
+      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2]);
+      expect(storage.database.prepare('SELECT checksum FROM _qlong_migrations WHERE version = 1').get()?.checksum === v1.checksum).toBe(true);
+      expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0);
+    });
+    await f.start('open');
+    const me = await f.call<{ csrf: string }>('GET', '/v1/auth/me', undefined, ownerHeaders(owner));
+    expect(me.status).toBe(200);
+    expect(me.body.csrf === owner.csrf).toBe(true);
+    expect((await f.teams(owner)).length).toBe(1);
+    expect((await f.call('GET', '/v1/nodes/me', undefined, nodeHeaders(node))).status).toBe(200);
+    expect((await f.call('POST', `/v1/teams/${node.team_id}/enroll-tokens`, {}, ownerHeaders(owner))).status).toBe(200);
+    expect((await f.call('POST', '/v1/enroll', { token: pendingInvite, pubkey: toBase64(newKeyPair().publicKey) })).status).toBe(200);
+    expect((await f.call('POST', '/v1/auth/register', { username: 'must-not-bootstrap', password: randomUUID() })).status).toBe(403);
+  }, 20_000);
+});

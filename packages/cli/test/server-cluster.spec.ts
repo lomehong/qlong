@@ -12,6 +12,7 @@ let base = '';
 
 beforeAll(async () => {
   handles = await startQlongServer({
+    ephemeral: true,
     registryPort: 0,
     gatewayPath: '/gateway',
     seedTeam: false,
@@ -59,7 +60,7 @@ describe('qlong server 集群接线(v0.8)', () => {
   });
 
   it('clusterSecret 缺省:无集群句柄,中继路由 404', async () => {
-    const plain = await startQlongServer({ registryPort: 0, gatewayPath: '/gateway', seedTeam: false });
+    const plain = await startQlongServer({ ephemeral: true, registryPort: 0, gatewayPath: '/gateway', seedTeam: false });
     try {
       expect(plain.cluster).toBeUndefined();
       const res = await fetch(`http://127.0.0.1:${plain.registryPort}/internal/envelope`, {

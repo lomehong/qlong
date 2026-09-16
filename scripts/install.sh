@@ -75,14 +75,14 @@ fi
 rm -f "$INSTALL_DIR/SHA256SUMS.txt"
 chmod +x "$INSTALL_DIR/qlong"
 
-# 运行时检测:unix 产物为 node 单文件包(需 node ≥ 20)
+# 运行时检测:内置 SQLite 需要 Node.js >= 24
 if ! command -v node >/dev/null 2>&1; then
-  echo ">>> 安装中止:未检测到 node,请先安装 Node.js >= 20(https://nodejs.org)" >&2
+  echo ">>> 安装中止:未检测到 node,请先安装 Node.js >= 24(https://nodejs.org)" >&2
   exit 1
 fi
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
-if [ "$NODE_MAJOR" -lt 20 ]; then
-  echo ">>> 安装中止:Node.js 需 >= 20(当前 $(node -v))" >&2
+if [ "$NODE_MAJOR" -lt 24 ]; then
+  echo ">>> 安装中止:Node.js 需 >= 24(当前 $(node -v))" >&2
   exit 1
 fi
 
@@ -93,8 +93,28 @@ if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 入网完成"
 fi
 
-# 服务化自启(纪要 §8.5:装完即在线/重启自动在线)
-"$INSTALL_DIR/qlong" service install
+# 服务化自启(纪要 §8.5:装完即在线/重启自动在线)。
+# 持久节点拒绝隐式启动:自启必须显式准入(open + 本地文件系统确认);
+# create 不能注册为自启(重启即 DATABASE_EXISTS 失败循环)——首次创建须手动完成。
+SERVICE_ARGS=""
+if [ -n "$QLONG_STORAGE_MODE" ] && [ "$QLONG_LOCAL_FS_CONFIRMED" = "1" ]; then
+  if [ "$QLONG_STORAGE_MODE" != "open" ]; then
+    echo ">>> 跳过自启注册:QLONG_STORAGE_MODE=$QLONG_STORAGE_MODE;自启必须 open"
+    echo "    首次手动执行: qlong run --storage-mode create --confirm-local-filesystem"
+    echo "    完成后以 QLONG_STORAGE_MODE=open 重跑安装即可注册自启"
+  else
+    [ -n "$QLONG_DATA_DIR" ] && SERVICE_ARGS="$SERVICE_ARGS --data-dir $QLONG_DATA_DIR"
+    [ -n "$QLONG_DATA_BASE" ] && SERVICE_ARGS="$SERVICE_ARGS --data-base $QLONG_DATA_BASE"
+    SERVICE_ARGS="$SERVICE_ARGS --storage-mode open --confirm-local-filesystem"
+    [ "$QLONG_WINDOWS_ACL_CONFIRMED" = "1" ] && SERVICE_ARGS="$SERVICE_ARGS --confirm-windows-acl"
+    # shellcheck disable=SC2086
+    "$INSTALL_DIR/qlong" service install $SERVICE_ARGS
+  fi
+else
+  echo ">>> 跳过自启注册:未配置持久存储准入(QLONG_STORAGE_MODE=open + QLONG_LOCAL_FS_CONFIRMED=1)"
+  echo "    数据目录须在本机本地磁盘(勿用 NFS/SMB/云同步盘);配置后重跑安装,"
+  echo "    或手动: qlong service install --storage-mode open --confirm-local-filesystem"
+fi
 
 # 装完即在线验收(I-22 清单)
 echo ">>> 验收入网状态..."

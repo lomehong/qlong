@@ -25,7 +25,14 @@ importers:
         specifier: ^3.2.7
         version: 3.2.7(@types/node@24.13.3)
 
-  packages/cli: {}
+  packages/cli:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      vitest:
+        specifier: ^3.2.7
+        version: 3.2.7(@types/node@24.13.3)
 
   packages/console:
     dependencies:
@@ -76,6 +83,8 @@ importers:
   packages/node: {}
 
   packages/registry: {}
+
+  packages/storage: {}
 
 packages:
 

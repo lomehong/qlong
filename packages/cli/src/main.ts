@@ -11,12 +11,20 @@ import { LeadSupervisor } from '../../node/src/lead/supervisor.js';
 import { MemoryStore } from '../../node/src/lead/store.js';
 import { joinAndSave, qlongHome, readConfig } from './join.js';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
+import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
 
+try {
+  assertNodeRuntime(process.versions.node);
+} catch (error) {
+  console.error((error as Error).message);
+  process.exit(2);
+}
 const cmd = process.argv[2] ?? 'demo';
 
 if (cmd === 'demo') {
   const h = new SingleNodeHarness({
     kind: 'project',
+    validateAcceptance: () => true, // 离线冒烟演练;PROJECT 验收闸语义见 machine-safety 测试
     script: [
       { failAfter: { ms: 1_000, body: { reason_code: 'internal_error', retryable: true, summary: '瞬态错误' } } },
       { completeAfterMs: 2_000, resultBody: { summary: '重做成功' } },
@@ -33,13 +41,14 @@ if (cmd === 'demo') {
 
 if (cmd === 'takeover') {
   const store = new MemoryStore();
-  const s1 = new LeadSupervisor({ store });
+  const validateAcceptance = (): boolean => true; // 离线冒烟演练;PROJECT 验收闸语义见 machine-safety 测试
+  const s1 = new LeadSupervisor({ store, validateAcceptance });
   const m1 = s1.create('demo-task', 'project');
   s1.dispatch('demo-task', 'node-b', { kind: 'project', summary: '接管演练', lease_ms: 300000, offer_ttl_ms: 60000 }, 0);
   s1.deliver('demo-task', 'task.accept', 'node-b', 1, { lease_ms: 300000 }, 0);
   console.log('before crash :', m1.rec.state, '| attempt', m1.rec.attempt);
   // —— 进程崩溃:内存全丢,仅检查点存储幸存 ——
-  const s2 = new LeadSupervisor({ store });
+  const s2 = new LeadSupervisor({ store, validateAcceptance });
   s2.restoreAll();
   const m2 = s2.get('demo-task');
   console.log('after restore:', m2?.rec.state, '| attempt', m2?.rec.attempt);
@@ -87,8 +96,10 @@ if (cmd === 'service') {
   const platform = process.platform as ServicePlatform;
   const entrance = process.argv[1] ?? 'qlong';
   const home = qlongHome();
+  // 额外参数原样透传给注册的 `qlong run`(存储准入等);保证自启与手跑同一配置。
+  const runArgs = process.argv.slice(4);
   if (action === 'install') {
-    const r = await serviceInstall(platform, entrance, home);
+    const r = await serviceInstall(platform, entrance, home, runArgs);
     console.log('服务已注册:', r.path || '(计划任务)');
     console.log('自启已启用:重启后节点自动在线');
     process.exit(0);
@@ -120,7 +131,7 @@ if (cmd === 'join') {
     console.log('  node_id :', cfg.node_id);
     console.log('  team_id :', cfg.team_id);
     console.log('  caps    :', cfg.caps.join(', ') || '(无)');
-    console.log('下一步: qlong run');
+    console.log('下一步: qlong run --storage-mode create --confirm-local-filesystem(首次;之后改 open)');
     process.exit(0);
   } catch (e) {
     console.error('入网失败:', e instanceof Error ? e.message : e);
@@ -137,30 +148,55 @@ if (cmd === 'run') {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   }
-  const { createProductionNode } = await import('../../node/src/remote/factory.js');
-  const node = await createProductionNode({
-    registryUrl: cfg.registry_url,
-    gatewayUrl: cfg.gateway_url,
-    nodeToken: cfg.node_token,
-    dataDir: home, // identity.json 同源:join 时生成,run 时恢复(02 §3.2)
-    privKey: process.env.QLONG_PRIV_B64
-      ? new Uint8Array(Buffer.from(process.env.QLONG_PRIV_B64, 'base64'))
-      : undefined, // 缺省由 dataDir/identity.json 提供(02 §3.2)
-    capabilities: () => cfg.caps,
-    reportIntervalMs: 60_000,
-  });
+  // 持久 v2 节点:显式存储准入(与中心同语义);不再默认走旧内存演示链路。
+  const { runStorageOptions } = await import('./run-storage-options.js');
+  const { createDurableNode } = await import('../../node/src/runtime/node.js');
+  const { FencedProcessDriver } = await import('../../node/src/driver/fenced-driver.js');
+  const { loadIdentity } = await import('../../node/src/identity.js');
+  let node: Awaited<ReturnType<typeof createDurableNode>>;
+  try {
+    node = await createDurableNode({
+      registryUrl: cfg.registry_url,
+      gatewayUrl: cfg.gateway_url,
+      nodeToken: cfg.node_token,
+      // identity.json 同源:join 时生成,run 时恢复(02 §3.2);绝不自动生成替代密钥
+      privKey: process.env.QLONG_PRIV_B64
+        ? new Uint8Array(Buffer.from(process.env.QLONG_PRIV_B64, 'base64'))
+        : loadIdentity(home).priv,
+      storage: runStorageOptions(process.argv.slice(3), process.env, home),
+      driver: new FencedProcessDriver({ workdir: home }),
+      driverTimeoutMs: 15_000, // npx 冷启动可能较慢;有界等待仍封顶执行器契约
+      capabilities: () => cfg.caps,
+      reportIntervalMs: 60_000,
+    });
+  } catch (e) {
+    console.error('节点启动失败:', e instanceof Error ? e.message : e);
+    process.exit(1);
+  }
   await node.start();
-  console.log('qlong 节点已启动:', cfg.node_id, '@', cfg.registry_url);
-  console.log('Ctrl+C 退出');
-  process.on('SIGINT', () => {
-    node.stop();
-    process.exit(0);
-  });
+  console.log('qlong 节点已启动(持久 v2):', cfg.node_id, '@', cfg.registry_url);
+  console.log('节点存储:', node.store.path);
+  console.log('Ctrl+C 退出(关停会静默在跑任务并把终态落中心)');
+  let stopping = false;
+  const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
+    void node.stop().then(
+      () => process.exit(0),
+      () => {
+        console.error('关停未完全收口:请保留节点数据目录,恢复后用 open 模式重启');
+        process.exitCode = 1;
+      },
+    );
+  };
+  process.on('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   await new Promise(() => undefined); // 常驻
 }
 
 if (cmd === 'server') {
   const { startQlongServer } = await import('./server.js');
+  const { serverStorageOptions } = await import('./server-storage-options.js');
   const flag = (name: string, def: number): number => {
     const i = process.argv.indexOf(name);
     return i > 0 ? Number(process.argv[i + 1]) : def;
@@ -171,6 +207,7 @@ if (cmd === 'server') {
   };
   // 默认单端口(PORT/7860 兼容容器平台):registry API + 书坊 + 控制台 + 网关 ws(/gateway)
   const handles = await startQlongServer({
+    ...serverStorageOptions(process.argv.slice(3), process.env),
     registryPort: flag('--registry-port', Number(process.env.PORT ?? 3200)),
     gatewayPort: process.argv.includes('--gateway-port') ? flag('--gateway-port', 3100) : undefined,
     gatewayPath: process.argv.includes('--gateway-port') ? undefined : '/gateway',
@@ -186,7 +223,8 @@ if (cmd === 'server') {
       .map((x) => x.trim())
       .filter(Boolean),
   });
-  console.log('qlong server:http://0.0.0.0:' + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
+  console.log('qlong server:http://' + (handles.storageMode === 'ephemeral' ? '127.0.0.1:' : '0.0.0.0:') + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
+  console.log('中心存储:', handles.storageMode, '| 仅 Registry/Auth/任务投影持久化;可靠 mailbox/节点恢复尚未就绪');
   if (handles.cluster) {
     console.log('网关集群:密钥已启用' + (handles.cluster.size > 1 ? ',成员 ' + handles.cluster.size : '(单实例形态)'));
   }
@@ -194,10 +232,14 @@ if (cmd === 'server') {
     console.log('书坊分发 → /install /install.sh /install.ps1 /releases/<版本>/ | 控制台 → /');
   }
   console.log('Ctrl+C 退出');
-  process.on('SIGINT', () => {
-    void handles.close();
-    process.exit(0);
-  });
+  const shutdown = (): void => {
+    void handles.close().then(() => { process.exit(0); }, () => {
+      console.error('中心关闭失败,请保留数据目录并检查恢复状态');
+      process.exitCode = 1;
+    });
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   await new Promise(() => undefined); // 常驻
 }
 
@@ -232,7 +274,7 @@ if (cmd === 'tasks') {
 if (cmd === 'doctor') {
   console.log('qlong doctor(真实联调前检查)');
   const nodeMajor = Number(process.versions.node.split('.')[0]);
-  console.log(nodeMajor >= 20 ? '✓ node ' + process.versions.node + ' >= 20' : '✗ node ' + process.versions.node + ' < 20(需升级)');
+  console.log(nodeMajor >= MIN_NODE_MAJOR ? '✓ node ' + process.versions.node + ' >= 24' : '✗ Node.js 需 >= 24');
   if (process.env.DSH_HARNESS_CMD) {
     console.log('✓ DSH_HARNESS_CMD =', process.env.DSH_HARNESS_CMD);
   } else {
