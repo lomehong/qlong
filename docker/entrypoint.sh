@@ -12,7 +12,11 @@
 set -e
 DATA_DIR="${QLONG_DATA_DIR:-/data/qlong}"
 MODE="${QLONG_STORAGE_MODE:-auto}"
+# 存储层要求数据目录属主私有(0700,UNSAFE_PATH 防线);父目录若世界可写且无 sticky 位
+# 也会被拒——尽力收紧父目录(非属主时失败不致命,由存储层最终裁决)。
 mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
+chmod 700 "$(dirname "$DATA_DIR")" 2>/dev/null || true
 if [ "$MODE" = "auto" ]; then
   if [ -f "$DATA_DIR/center.sqlite" ]; then
     MODE=open
