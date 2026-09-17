@@ -384,4 +384,42 @@ describe('registry HTTP 安全入口', () => {
     expect(me.body).not.toHaveProperty('tokenHash');
     expect(me.body).not.toHaveProperty('node_token');
   });
+
+  it('发送方节点可查自己发出消息的投递终态;查询以认证身份为 from_node,他方/未知 msgId 一律 404', async () => {
+    const msgId = randomUUID();
+    const digest = 'a'.repeat(64);
+    const seen: Array<{ fromNode: string; msgId: string }> = [];
+    // Stub keyed strictly by (from_node, msg_id): only the authentic sender's own delivery resolves.
+    opts.deliveryOutcome = (fromNode, id) => {
+      seen.push({ fromNode, msgId: id });
+      return fromNode === target.node_id && id === msgId
+        ? { status: 'received', digest, toNode: member.node_id }
+        : undefined;
+    };
+    const sender = { Authorization: `Bearer ${target.node_token}` };
+    const ok = await call('GET', `/v1/nodes/me/deliveries/${msgId}`, sender);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ msg_id: msgId, to_node: member.node_id, status: 'received', digest });
+    // Another node querying the same msgId is scoped to its own identity → 404, no cross-sender leak.
+    expect((await call('GET', `/v1/nodes/me/deliveries/${msgId}`, { Authorization: `Bearer ${member.node_token}` })).status).toBe(404);
+    // Unknown msgId for the legitimate sender is also 404 (no existence oracle).
+    expect((await call('GET', `/v1/nodes/me/deliveries/${randomUUID()}`, sender)).status).toBe(404);
+    // from_node is always an authenticated identity, never attacker-controlled.
+    expect(seen).toEqual([{ fromNode: target.node_id, msgId }, { fromNode: member.node_id, msgId }, { fromNode: target.node_id, msgId: seen[2]!.msgId }]);
+  });
+
+  it('伪造/缺失 token 在 custody 查询前即拒绝;deliveryOutcome 未配置时失败关闭 503', async () => {
+    const msgId = randomUUID();
+    let queried = false;
+    opts.deliveryOutcome = () => { queried = true; return undefined; };
+    // Forged and missing tokens are rejected by authByToken BEFORE any custody lookup.
+    expect((await call('GET', `/v1/nodes/me/deliveries/${msgId}`, { Authorization: 'Bearer forged' })).status).toBe(401);
+    expect((await call('GET', `/v1/nodes/me/deliveries/${msgId}`)).status).toBe(401);
+    expect(queried).toBe(false);
+    // Without a custody backend the route fails closed rather than pretending "not found".
+    opts.deliveryOutcome = undefined;
+    const res = await call('GET', `/v1/nodes/me/deliveries/${msgId}`, { Authorization: `Bearer ${target.node_token}` });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: { code: 'bad_request' } });
+  });
 });

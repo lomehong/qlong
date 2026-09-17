@@ -163,6 +163,8 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
           return gw.internalDeliver(toNodeId, envelope as EnvelopeV1, Date.now());
         }
       : undefined,
+    // 投递结果查询(A2):接线中心 custody outcome();无中心 SQLite(ephemeral)时保持 undefined → 路由 503 失败关闭。
+    deliveryOutcome: custody ? (fromNode, msgId) => custody.outcome(fromNode, msgId) : undefined,
   });
 
   const sync = (): void => {

@@ -23,6 +23,12 @@ export interface RegistryServerOptions {
   /** v0.8 网关集群中继(02 §12.1):两者齐备时暴露 POST /internal/envelope(单端口部署形态) */
   clusterSecret?: string;
   onInternalEnvelope?: (toNodeId: string, envelope: unknown) => 'delivered' | 'queued' | 'not_here';
+  /**
+   * 投递结果查询(A2):发送方节点查自己发出消息的 custody 终态。from_node 由路由强制为已
+   * 认证节点身份,据此仅返回该节点为发送方的记录;未配置(如无中心 SQLite 的 ephemeral
+   * 形态)→ 503 失败关闭,绝不伪称“查无此投递”。
+   */
+  deliveryOutcome?: (fromNode: string, msgId: string) => undefined | { status: string; digest: string; toNode: string };
 }
 
 const MAX_BODY = 1 << 20;
@@ -380,6 +386,18 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
             sig: typeof body.sig === 'string' ? body.sig : undefined,
           }, verifier);
           sendJson(res, 200, r);
+          return;
+        }
+
+        // 投递结果查询(A2):发送方查自己发出消息的终态。from_node 强制为认证身份(self.node_id),
+        // 绝不取自请求,故他方查同一 msgId 必得 404;custody 后端缺失时 503 失败关闭而非伪称查无。
+        if (seg[2] === 'me' && seg[3] === 'deliveries' && seg.length === 5 && method === 'GET') {
+          const self = registry.authByToken(token);
+          if (!opts.deliveryOutcome) throw new ApiError('bad_request', '投递结果查询未配置', 503);
+          const msgId = seg[4] as string;
+          const result = opts.deliveryOutcome(self.node_id, msgId);
+          if (!result) throw new ApiError('bad_request', '投递不存在', 404);
+          sendJson(res, 200, { msg_id: msgId, to_node: result.toNode, status: result.status, digest: result.digest });
           return;
         }
 

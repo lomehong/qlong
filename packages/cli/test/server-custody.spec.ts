@@ -296,6 +296,38 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await a.close();
   }, 20_000);
 
+  it('exposes GET /v1/nodes/me/deliveries/:msgId so the sender alone reads the real custody outcome', async () => {
+    const { f, handles, sender, receiver } = await setup();
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const a = await f.client(handles, sender, source.runtime);
+    const b = await f.client(handles, receiver, target.runtime);
+    await a.client.open();
+    const envelope = offer(sender, receiver);
+    const msgId = envelope.msg_id;
+    const digest = envelopeDigest(envelope);
+    const path = `/v1/nodes/me/deliveries/${msgId}`;
+    const asSender = nodeHeaders(sender.credentials);
+    // Nothing offered yet: the center holds no custody record, so the sender gets 404 (no existence oracle).
+    expect((await f.call('GET', path, undefined, asSender)).status).toBe(404);
+    expect(await a.client.send(envelope, { ackTimeoutMs: 3_000 })).toBe('stored');
+    // Receiver is still offline, so the sender's own query reflects the real pending custody row.
+    const pending = await f.call('GET', path, undefined, asSender);
+    expect(pending.status).toBe(200);
+    expect(pending.body).toEqual({ msg_id: msgId, to_node: receiver.credentials.node_id, status: 'pending', digest });
+    await b.client.open();
+    await wait(() => expect(readCenter(f, envelope).status).toBe('received'));
+    // outcome() reads the same committed center DB, so the query now reports the receipted terminal state.
+    const received = await f.call('GET', path, undefined, asSender);
+    expect(received.status).toBe(200);
+    expect(received.body).toEqual({ msg_id: msgId, to_node: receiver.credentials.node_id, status: 'received', digest });
+    // The receiver never sent this msgId: the route scopes from_node to the authenticated identity → 404.
+    expect((await f.call('GET', path, undefined, nodeHeaders(receiver.credentials))).status).toBe(404);
+    // An unknown msgId for the legitimate sender is also 404.
+    expect((await f.call('GET', `/v1/nodes/me/deliveries/${randomUUID()}`, undefined, asSender)).status).toBe(404);
+    await Promise.all([a.close(), b.close()]);
+  }, 20_000);
+
   it('appends center schema v2 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
     const f = new CustodyFixture();
     const v1 = CENTER_SCHEMA.migrations[0]!;
