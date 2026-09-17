@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { envelopeDigest, newKeyPair, signEnvelope, toBase64, type EnvelopeV1 } from '@qlong/core';
+import { envelopeDigest, newId, newKeyPair, signEnvelope, toBase64, type EnvelopeV1 } from '@qlong/core';
 import { AuthService, SESSION_COOKIE } from '../../registry/src/auth.js';
 import { CENTER_SCHEMA, Registry, type EnrollResult } from '../../registry/src/index.js';
+import type { TaskRecord } from '../../registry/src/state-store.js';
 import { SqliteStore } from '../../storage/src/index.js';
+import { createDurableNode } from '../../node/src/runtime/node.js';
 import {
   cleanupServerFixtures, nodeHeaders, ownerHeaders, persistedSnapshot, type Owner,
 } from './server-durable-fixtures.js';
@@ -375,5 +377,67 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     expect((await f.call('POST', `/v1/teams/${node.team_id}/enroll-tokens`, {}, ownerHeaders(owner))).status).toBe(200);
     expect((await f.call('POST', '/v1/enroll', { token: pendingInvite, pubkey: toBase64(newKeyPair().publicKey) })).status).toBe(200);
     expect((await f.call('POST', '/v1/auth/register', { username: 'must-not-bootstrap', password: randomUUID() })).status).toBe(403);
+  }, 20_000);
+});
+
+describe('startQlongServer v2 lead projection through the node default HTTP sink (B1e)', () => {
+  // B1 全链收尾:真实 createDurableNode 作牵头方,使用默认 HTTP 上报汇(不注入 taskReportSink),
+  // 经真实网关与中心把整条生命周期投影到 POST /v1/teams/:id/tasks。覆盖 b1d 默认汇此前无测试的缺口。
+  it('projects a led task lifecycle (offered→running→done) to the real center via the default report sink', async () => {
+    const { f, handles, owner, teamId, sender, receiver } = await setup();
+    const leadNode = await createDurableNode({
+      registryUrl: `http://127.0.0.1:${handles.registryPort}`,
+      gatewayUrl: `ws://127.0.0.1:${handles.registryPort}${handles.gatewayPath}`,
+      nodeToken: sender.credentials.node_token,
+      privKey: sender.pair.priv,
+      storage: {
+        allowedBase: f.root, dataDir: sender.dataDir, mode: 'create', filename: 'node.sqlite',
+        localFilesystemConfirmed: true, windowsAclConfirmed: true, busyTimeoutMs: 25,
+      },
+      validateAcceptance: () => true,
+      reportIntervalMs: 0,
+      tickIntervalMs: 50,
+      shutdownFlushMs: 2_000,
+    });
+    try {
+      await leadNode.start();
+      const path = `/v1/teams/${teamId}/tasks`;
+      const taskId = newId();
+      const readTask = async (): Promise<TaskRecord> =>
+        (await f.call<TaskRecord>('GET', `${path}/${taskId}`, undefined, ownerHeaders(owner))).body;
+      const receipt = (type: string, body: Record<string, unknown>): EnvelopeV1 => signEnvelope({
+        v: 1, type, msg_id: newId(), task_id: taskId, attempt: 1, hops: 0,
+        ts: new Date().toISOString(), exp: new Date(Date.now() + 120_000).toISOString(),
+        from: { node_id: receiver.credentials.node_id, team_id: receiver.credentials.team_id, key_epoch: receiver.credentials.key_epoch },
+        to: { node_id: sender.credentials.node_id, team_id: sender.credentials.team_id },
+        trace: { trace_id: newId(), parent_span: null, origin_node: receiver.credentials.node_id },
+        body,
+      }, receiver.pair.priv);
+
+      // 牵头方发起并派发;泵经默认汇把 'offered' 修订 POST 到真实中心。
+      expect(leadNode.lead.originate(taskId, 'project')).toBe(true);
+      expect(leadNode.lead.dispatch(taskId, receiver.credentials.node_id, {
+        kind: 'project', summary: 'led end-to-end', offer_ttl_ms: 60_000, lease_ms: 60_000,
+      })).toBe(true);
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('offered');
+      expect(await readTask()).toMatchObject({
+        task_id: taskId, type: 'project', team_id: teamId, lead: sender.credentials.node_id,
+        exec: receiver.credentials.node_id, attempt: 1, status: 'offered', task_seq: 1,
+      });
+
+      // 执行方(真实签名)经真实网关回执 accept;牵头方消费后投影单调递增的 'running' 修订。
+      const exec = await f.rawSender(handles, receiver);
+      await exec.send(receipt('task.accept', { lease_ms: 60_000 }), 'stored');
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('running');
+      expect(await readTask()).toMatchObject({ status: 'running', task_seq: 2, attempt: 1 });
+
+      // 执行方回传 result;牵头方验收通过投影终态 'done',中心按 task_seq 单调见到全部修订。
+      await exec.send(receipt('task.result', { summary: 'delivered' }), 'stored');
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('done');
+      expect(await readTask()).toMatchObject({ status: 'done', task_seq: 3, attempt: 1 });
+      await exec.close();
+    } finally {
+      await leadNode.stop().catch(() => { /* 已故障/已停的 stop 在部分断言失败路径下属预期 */ });
+    }
   }, 20_000);
 });
