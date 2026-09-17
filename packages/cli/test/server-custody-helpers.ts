@@ -14,7 +14,7 @@ import { NODE_SCHEMA } from '../../node/src/runtime/schema.js';
 import { NodeRuntimeStore } from '../../node/src/runtime/store.js';
 import type { EnrollResult } from '../../registry/src/index.js';
 import { SqliteStore } from '../../storage/src/index.js';
-import type { ServerHandles } from '../src/server.js';
+import type { ServerHandles, ServerOptions } from '../src/server.js';
 import { DurableServerFixture, type Owner } from './server-durable-fixtures.js';
 
 export const wait = (check: () => void) => vi.waitFor(check, { timeout: 4_000, interval: 10 });
@@ -133,9 +133,9 @@ export class CustodyFixture extends DurableServerFixture {
   }
 }
 
-export async function setup() {
+export async function setup(overrides: ServerOptions = {}) {
   const f = new CustodyFixture();
-  const handles = await f.start('create', { seedTeam: { name: 'custody-team' } });
+  const handles = await f.start('create', { seedTeam: { name: 'custody-team' }, ...overrides });
   const owner = await f.register();
   const teamId = (await f.teams(owner))[0]!.team_id;
   const sender = await f.enrollKey(owner, teamId, 'sender');

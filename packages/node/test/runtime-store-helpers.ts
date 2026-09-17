@@ -21,7 +21,7 @@ export function open(options: SqliteStoreOptions): SqliteStore {
   return store;
 }
 
-export function fixture(limits: { maxEntries?: number; maxBytes?: number } = {}) {
+export function fixture(limits: { maxEntries?: number; maxBytes?: number; retentionMs?: number; now?: () => number } = {}) {
   const root = mkdtempSync(join(tempBase, 'qlong-runtime-'));
   roots.add(root);
   const options: SqliteStoreOptions = {

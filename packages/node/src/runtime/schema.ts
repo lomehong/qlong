@@ -59,5 +59,15 @@ export const NODE_SCHEMA: StorageSchema = Object.freeze({
           UNION ALL SELECT 128 + length(CAST(effect_id || state_key || kind || payload AS BLOB)) FROM node_effects
         );
     `,
+  }), defineMigration({
+    version: 2,
+    name: 'delivery-tombstone-retention',
+    sql: `
+      -- Retention GC needs a terminal-age timestamp on node_delivery. stored_at is stamped exactly when a
+      -- delivery turns 'stored'; a pending row leaves it NULL and is never reclaimed. Pre-existing 'stored'
+      -- tombstones keep NULL on purpose: a migration must not fabricate an age that could instantly delete
+      -- committed custody, so legacy tombstones persist until operational intervention.
+      ALTER TABLE node_delivery ADD COLUMN stored_at INTEGER;
+    `,
   })]),
 });

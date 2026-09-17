@@ -29,7 +29,7 @@ CREATE INDEX gateway_custody_expiry ON gateway_custody(expires_at) WHERE status 
 
 type OfferResult = 'stored' | 'full' | 'conflict' | 'expired' | 'invalid';
 type Status = 'pending' | 'received' | 'expired';
-interface CustodyOptions { maxEntries?: number; maxBytes?: number; perNodeEntries?: number }
+interface CustodyOptions { maxEntries?: number; maxBytes?: number; perNodeEntries?: number; retentionMs?: number }
 interface Row extends DeliveryIdentity {
   to_node: string;
   status: Status;
@@ -162,20 +162,31 @@ function quota(value: number | undefined, fallback: number): number {
   return limit;
 }
 
+/** undefined disables retention GC (tombstones persist forever); 0 prunes terminal rows immediately. */
+function retentionWindow(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError('Custody retentionMs must be a nonnegative safe integer');
+  return value;
+}
+
 /**
  * Durable custody, not task acceptance. Caller verifies signatures/ACLs and authenticates receipts.
- * No connection-state distinction, cache, eviction or tombstone GC. Does not own/close storage.
- * Defaults: 10,000 total identities, 64 MiB pending payloads, 1,000 pending per recipient.
+ * No connection-state distinction or cache. Tombstones persist forever unless a retentionMs window is
+ * configured, in which case prune() reclaims received/expired rows; pending payloads are never evicted.
+ * Does not own/close storage.
+ * Defaults: 10,000 total identities, 64 MiB pending payloads, 1,000 pending per recipient, GC disabled.
  */
 export class SqliteCustodyStore {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
   private readonly perNodeEntries: number;
+  private readonly retentionMs: number | undefined;
 
   constructor(private readonly store: SqliteStore, options: CustodyOptions = {}) {
     this.maxEntries = quota(options.maxEntries, 10_000);
     this.maxBytes = quota(options.maxBytes, 64 * 1024 * 1024);
     this.perNodeEntries = quota(options.perNodeEntries, 1_000);
+    this.retentionMs = retentionWindow(options.retentionMs);
     store.transaction((db) => {
       for (const row of db.prepare('SELECT * FROM gateway_custody').iterate()) load(row);
     });
@@ -239,6 +250,22 @@ export class SqliteCustodyStore {
     return this.store.transaction((db) => {
       const row = find(db, fromNode, msgId);
       return row ? { status: row.status, digest: row.digest, toNode: row.to_node } : undefined;
+    });
+  }
+
+  /**
+   * Retention GC: delete terminal (received/expired) tombstones whose age reached the configured window.
+   * Disabled (returns 0) unless retentionMs was set; an invalid clock is a no-op, never a delete.
+   * Pending rows are NEVER touched regardless of age. Each tombstone is validated before deletion, so a
+   * corrupt row faults the store rather than being silently dropped. Returns the number of rows deleted.
+   */
+  prune(now: number): number {
+    if (this.retentionMs === undefined || !validTime(now)) return 0;
+    const cutoff = now - this.retentionMs;
+    return this.store.transaction((db) => {
+      const rows = db.prepare("SELECT * FROM gateway_custody WHERE status IN ('received', 'expired') AND stored_at <= ?").all(cutoff);
+      for (const raw of rows) load(raw); // validate before release; corruption must not be concealed by GC
+      return Number(db.prepare("DELETE FROM gateway_custody WHERE status IN ('received', 'expired') AND stored_at <= ?").run(cutoff).changes);
     });
   }
 }

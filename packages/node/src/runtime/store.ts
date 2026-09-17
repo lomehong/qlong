@@ -129,6 +129,26 @@ function storedInteger(value: unknown, minimum = 0): number {
   return number;
 }
 
+function validTime(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 8_640_000_000_000_000;
+}
+
+/** undefined disables retention GC (tombstones persist forever); 0 reclaims terminal rows immediately. */
+function retentionWindow(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError('Runtime retentionMs must be a nonnegative safe integer');
+  return value;
+}
+
+/** Terminal-age stamp read back from node_delivery; NULL for pending rows and pre-feature tombstones. */
+function storedTime(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  valid(typeof value === 'bigint' || typeof value === 'number');
+  const number = Number(value);
+  valid(Number.isSafeInteger(number) && number >= 0 && number <= 8_640_000_000_000_000);
+  return number;
+}
+
 function storedKey(value: unknown): asserts value is string {
   valid(typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 1024);
 }
@@ -150,20 +170,26 @@ function storedJson(value: unknown): RuntimeJson {
  * One node identity per SQLite database. Every read is detached, every mutation is committed
  * before returning. Capacity includes ALL domain rows (including tombstones, state and effects),
  * with logical bytes as defined by node_runtime_usage; SQLite/WAL disk usage needs external limits.
- * No TTL/eviction: exhausted retention requires explicit operational intervention, never data loss.
+ * Terminal 'stored' delivery tombstones persist until an optional retentionMs window drives prune();
+ * pending deliveries, undelivered payloads, inbox/state/dedup/effects are NEVER reclaimed, so an
+ * exhausted budget still requires explicit operational intervention rather than silent data loss.
  * This API does NOT make the existing RemoteNodeSession atomic.
  */
 export class NodeRuntimeStore implements OutboxStore {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
+  private readonly retentionMs: number | undefined;
+  private readonly clock: () => number;
 
   constructor(private readonly store: SqliteStore, readonly nodeId: string,
-    options: { maxEntries?: number; maxBytes?: number } = {}) {
+    options: { maxEntries?: number; maxBytes?: number; retentionMs?: number; now?: () => number } = {}) {
     if (!isUuid(nodeId)) throw new TypeError('Runtime nodeId must be a UUID');
     this.maxEntries = options.maxEntries ?? 10_000;
     this.maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
     integer(this.maxEntries, 'maxEntries');
     integer(this.maxBytes, 'maxBytes');
+    this.retentionMs = retentionWindow(options.retentionMs);
+    this.clock = options.now ?? (() => Date.now());
     store.transaction((db) => {
       if (db.prepare('SELECT schema_id FROM _qlong_storage WHERE id = 1').get()?.schema_id !== 'qlong.node') {
         throw new TypeError('NodeRuntimeStore requires NODE_SCHEMA');
@@ -210,6 +236,10 @@ export class NodeRuntimeStore implements OutboxStore {
     storedIdentity(row);
     valid(row.sender === this.nodeId && (row.status === 'pending' || row.status === 'stored'));
     valid((row.status === 'pending') === (row.outbox_sender !== null));
+    // stored_at is stamped exactly when a delivery turns terminal: a pending row must not carry it, while a
+    // 'stored' tombstone may be NULL only for pre-feature rows migrated in (never reclaimed by retention GC).
+    const storedAt = storedTime(row.stored_at);
+    if (row.status === 'pending') valid(storedAt === null);
     if (row.status === 'stored') {
       valid(row.payload === null && row.attempts === null && row.last_at === null);
       return;
@@ -318,7 +348,7 @@ export class NodeRuntimeStore implements OutboxStore {
         .run(entry.attempts, entry.lastAt, this.nodeId, env.msg_id);
       return;
     }
-    db.prepare("INSERT INTO node_delivery VALUES (?, ?, ?, 'pending')").run(this.nodeId, env.msg_id, digest);
+    db.prepare("INSERT INTO node_delivery (sender, msg_id, digest, status) VALUES (?, ?, ?, 'pending')").run(this.nodeId, env.msg_id, digest);
     db.prepare('INSERT INTO node_outbox VALUES (?, ?, ?, ?, ?)')
       .run(this.nodeId, env.msg_id, payload, entry.attempts, entry.lastAt);
   }
@@ -344,9 +374,31 @@ export class NodeRuntimeStore implements OutboxStore {
       // Validate the joined payload before either updating metadata or releasing custody.
       const row = this.findDelivery(db, fromNode, msgId);
       if (!row || row.digest !== digest) return false;
-      db.prepare("UPDATE node_delivery SET status = 'stored' WHERE sender = ? AND msg_id = ?").run(fromNode, msgId);
+      const now = this.clock();
+      if (!validTime(now)) throw new TypeError('Runtime clock must return a nonnegative safe-integer epoch millisecond');
+      // Stamp the terminal age once, guarded on the pending->stored transition, so a replayed verified
+      // custody frame cannot reset it and starve retention GC.
+      db.prepare("UPDATE node_delivery SET status = 'stored', stored_at = ? WHERE sender = ? AND msg_id = ? AND status = 'pending'")
+        .run(now, fromNode, msgId);
       db.prepare('DELETE FROM node_outbox WHERE sender = ? AND msg_id = ?').run(fromNode, msgId);
       return true;
+    });
+  }
+
+  /**
+   * Retention GC: reclaim 'stored' delivery tombstones whose terminal age reached the configured window.
+   * Disabled (returns 0) without retentionMs or on an invalid clock; a pending delivery is NEVER reclaimed.
+   * Each tombstone is validated before deletion, so corruption faults the store instead of being concealed.
+   */
+  prune(): number {
+    if (this.retentionMs === undefined) return 0;
+    const now = this.clock();
+    if (!validTime(now)) return 0;
+    const cutoff = now - this.retentionMs;
+    return this.store.transaction((db) => {
+      const rows = query(db, `${OUTBOUND_ROWS} WHERE d.status = 'stored' AND d.stored_at IS NOT NULL AND d.stored_at <= ?`).all(cutoff);
+      for (const row of rows) this.readDelivery(row); // validate before release; corruption must not be concealed by GC
+      return Number(db.prepare("DELETE FROM node_delivery WHERE status = 'stored' AND stored_at IS NOT NULL AND stored_at <= ?").run(cutoff).changes);
     });
   }
 

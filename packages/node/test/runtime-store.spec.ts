@@ -8,10 +8,10 @@ import {
 } from './runtime-store-helpers.js';
 
 describe('NodeRuntimeStore custody', () => {
-  it('uses the v1 node schema and pins the local identity across restart', () => {
+  it('uses the v2 node schema and pins the local identity across restart', () => {
     const { options, store, runtime } = fixture();
     expect(NODE_SCHEMA.id).toBe('qlong.node');
-    expect(store.version).toBe(1);
+    expect(store.version).toBe(2);
     expect(runtime.usage()).toEqual({ entries: 0, bytes: 0 });
     expect(() => new NodeRuntimeStore(store, OTHER)).toThrow('another node');
     store.close();
@@ -686,5 +686,72 @@ describe('NodeRuntimeStore atomic consume', () => {
       expect(reopened.all()).toEqual([{ envelope: value, attempts: 1, lastAt: 10 }]);
       expect(reopenedStore.database.prepare('SELECT status FROM node_delivery').get()).toEqual({ status: 'pending' });
     }
+  });
+});
+
+describe('NodeRuntimeStore delivery tombstone retention GC', () => {
+  it('retains delivery tombstones forever when no retention window is configured', () => {
+    const { runtime } = fixture();
+    const outbound = transition().outbox![0]!;
+    runtime.save({ envelope: outbound, attempts: 0, lastAt: 0 });
+    expect(runtime.stored(LOCAL, outbound.msg_id, envelopeDigest(outbound))).toBe(true);
+    expect(runtime.usage().entries).toBe(1); // Delivery tombstone retained, outbox released.
+    expect(runtime.prune()).toBe(0); // GC disabled without a window.
+    expect(runtime.usage().entries).toBe(1);
+    expect(runtime.delivery(outbound.msg_id)).toMatchObject({ status: 'stored' });
+  });
+
+  it('reclaims stored tombstones outside the window and never touches a pending delivery', () => {
+    let clock = 1_000_000;
+    const { runtime } = fixture({ retentionMs: 5_000, now: () => clock });
+    const delivered = transition().outbox![0]!;
+    runtime.save({ envelope: delivered, attempts: 0, lastAt: 0 });
+    expect(runtime.stored(LOCAL, delivered.msg_id, envelopeDigest(delivered))).toBe(true); // Stamped at clock.
+    const queued = transition().outbox![0]!;
+    runtime.save({ envelope: queued, attempts: 0, lastAt: 0 }); // Stays pending: delivery row + outbox row.
+    expect(runtime.usage().entries).toBe(3); // 1 tombstone + 1 pending delivery + its outbox.
+    clock = 1_004_999; // Inside the window: age 4999 < 5000.
+    expect(runtime.prune()).toBe(0);
+    expect(runtime.usage().entries).toBe(3);
+    clock = 1_005_000; // Window reached: age 5000 >= 5000.
+    expect(runtime.prune()).toBe(1);
+    expect(runtime.usage().entries).toBe(2);
+    expect(runtime.delivery(delivered.msg_id)).toBeUndefined();
+    expect(runtime.delivery(queued.msg_id)).toMatchObject({ status: 'pending' });
+    expect(runtime.all().map((entry) => entry.envelope.msg_id)).toEqual([queued.msg_id]);
+  });
+
+  it('refuses to reclaim a corrupt tombstone and faults rather than concealing it', () => {
+    let clock = 1_000_000;
+    const { store, runtime } = fixture({ retentionMs: 0, now: () => clock });
+    const outbound = transition().outbox![0]!;
+    runtime.save({ envelope: outbound, attempts: 0, lastAt: 0 });
+    expect(runtime.stored(LOCAL, outbound.msg_id, envelopeDigest(outbound))).toBe(true);
+    rawDatabase(store, (db) => db.prepare("UPDATE node_delivery SET digest = replace(digest, substr(digest, 1, 1), 'g')").run());
+    clock = 2_000_000;
+    expectCorrupt(store, () => runtime.prune());
+  });
+
+  it('persists tombstone reclamation across a runtime reopen', () => {
+    let clock = 1_000_000;
+    const { options, store, runtime } = fixture({ retentionMs: 0, now: () => clock });
+    const outbound = transition().outbox![0]!;
+    runtime.save({ envelope: outbound, attempts: 0, lastAt: 0 });
+    expect(runtime.stored(LOCAL, outbound.msg_id, envelopeDigest(outbound))).toBe(true);
+    clock = 2_000_000;
+    expect(runtime.prune()).toBe(1);
+    store.close();
+    const reopened = open({ ...options, mode: 'open' });
+    const runtime2 = new NodeRuntimeStore(reopened, LOCAL, { retentionMs: 0, now: () => clock });
+    expect(runtime2.delivery(outbound.msg_id)).toBeUndefined();
+    expect(runtime2.usage().entries).toBe(0);
+  });
+
+  it('rejects an invalid retention window at construction', () => {
+    const { store } = fixture();
+    expect(() => new NodeRuntimeStore(store, LOCAL, { retentionMs: -1 })).toThrow(RangeError);
+    expect(() => new NodeRuntimeStore(store, LOCAL, { retentionMs: 1.5 })).toThrow(RangeError);
+    expect(() => new NodeRuntimeStore(store, LOCAL, { retentionMs: Number.MAX_SAFE_INTEGER + 1 })).toThrow(RangeError);
+    expect(new NodeRuntimeStore(store, LOCAL, { retentionMs: 0 }).prune()).toBe(0);
   });
 });

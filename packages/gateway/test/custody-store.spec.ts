@@ -472,3 +472,75 @@ describe('custody rollback and fail-closed recovery', () => {
     expect(() => f.reopen()).toThrow(expect.objectContaining({ code: 'DATABASE_CORRUPT' }));
   });
 });
+
+describe('custody tombstone retention GC', () => {
+  it('is disabled by default and never deletes terminal rows without an explicit retention window', () => {
+    const f = fixture(), env = message();
+    expect(f.custody.offer(env, NOW)).toBe('stored');
+    expect(receipt(f.custody, env, NOW)).toBe(true);
+    expect(f.custody.prune(NOW + 10_000_000)).toBe(0);
+    expect(usage(f.storage)?.entries).toBe(1);
+    expect(f.custody.outcome(FROM, env.msg_id)?.status).toBe('received');
+  });
+
+  it('deletes received/expired tombstones only outside the retention window and never deletes pending', () => {
+    const f = fixture({ retentionMs: 60_000 });
+    const received = message(), expiring = message(), live = message({ exp: new Date(NOW + 10_000_000).toISOString() });
+    expect(f.custody.offer(received, NOW)).toBe('stored');
+    expect(f.custody.offer(expiring, NOW)).toBe('stored');
+    expect(f.custody.offer(live, NOW)).toBe('stored');
+    expect(receipt(f.custody, received, NOW)).toBe(true);
+    expect(f.custody.pending(TO, NOW + 1_000, 0)).toHaveLength(0); // force expiring -> expired @ stored_at NOW
+    expect(status(f.custody, expiring)).toBe('expired');
+    expect(f.custody.prune(NOW + 30_000)).toBe(0); // age 30s < 60s window: nothing prunable
+    expect(usage(f.storage)?.entries).toBe(3);
+    expect(f.custody.prune(NOW + 60_000)).toBe(2); // boundary age == window: both terminal tombstones go
+    expect(usage(f.storage)?.entries).toBe(1);
+    expect(f.custody.outcome(FROM, received.msg_id)).toBeUndefined();
+    expect(f.custody.outcome(FROM, expiring.msg_id)).toBeUndefined();
+    expect(status(f.custody, live)).toBe('pending'); // pending survives regardless of age
+  });
+
+  it('frees capacity so a full center accepts offers again after pruning terminal tombstones', () => {
+    const f = fixture({ maxEntries: 1, retentionMs: 1_000 }), env = message();
+    expect(f.custody.offer(env, NOW)).toBe('stored');
+    expect(receipt(f.custody, env, NOW)).toBe(true);
+    expect(f.custody.offer(message(), NOW)).toBe('full');
+    expect(f.custody.prune(NOW + 999)).toBe(0); // inside window
+    expect(f.custody.offer(message(), NOW)).toBe('full');
+    expect(f.custody.prune(NOW + 1_000)).toBe(1); // boundary -> pruned
+    expect(f.custody.offer(message({ exp: new Date(NOW + 5_000).toISOString() }), NOW + 1_000)).toBe('stored');
+  });
+
+  it('treats an invalid clock as a no-op and validates retentionMs at construction', () => {
+    const f = fixture({ retentionMs: 1_000 }), env = message();
+    expect(f.custody.offer(env, NOW)).toBe('stored');
+    expect(receipt(f.custody, env, NOW)).toBe(true);
+    for (const now of [NaN, Infinity, -Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(f.custody.prune(now)).toBe(0);
+    }
+    expect(f.custody.outcome(FROM, env.msg_id)?.status).toBe('received');
+    expect(f.storage.state).toBe('open');
+    for (const bad of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => new SqliteCustodyStore(f.storage, { retentionMs: bad })).toThrow(RangeError);
+    }
+    expect(() => new SqliteCustodyStore(f.storage, { retentionMs: 0 })).not.toThrow();
+  });
+
+  it('refuses to prune a corrupt tombstone and faults rather than silently dropping it', () => {
+    const f = fixture({ retentionMs: 1_000 }), env = message();
+    expect(f.custody.offer(env, NOW)).toBe('stored');
+    expect(receipt(f.custody, env, NOW)).toBe(true);
+    f.storage.transaction((db) => db.prepare('UPDATE gateway_custody SET to_node = ?').run('x'.repeat(36)));
+    expect(() => f.custody.prune(NOW + 1_000)).toThrow(expect.objectContaining({ code: 'DATABASE_CORRUPT' }));
+    expect(f.storage.state).toBe('faulted');
+  });
+
+  it('persists pruning across reopen', () => {
+    const f = fixture({ retentionMs: 1_000 }), env = message();
+    expect(f.custody.offer(env, NOW)).toBe('stored');
+    expect(receipt(f.custody, env, NOW)).toBe(true);
+    expect(f.custody.prune(NOW + 1_000)).toBe(1);
+    expect(f.reopen().outcome(FROM, env.msg_id)).toBeUndefined();
+  });
+});

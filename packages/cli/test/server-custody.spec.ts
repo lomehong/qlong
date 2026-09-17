@@ -271,6 +271,31 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     f.offline((store) => expect(store.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0));
   }, 20_000);
 
+  it('drives custody retention GC from the server timer: reclaims received tombstones, never pending custody', async () => {
+    // retentionMs 0 makes every terminal row eligible immediately; a 20ms GC cadence proves the timer runs.
+    const { f, handles, sender, receiver } = await setup({ custodyRetentionMs: 0, gcIntervalMs: 20 });
+    const source = f.runtime(sender);
+    const target = f.runtime(receiver);
+    const a = await f.client(handles, sender, source.runtime);
+    const b = await f.client(handles, receiver, target.runtime);
+    await a.client.open();
+    await b.client.open();
+    const delivered = offer(sender, receiver);
+    expect(await a.client.send(delivered, { ackTimeoutMs: 3_000 })).toBe('stored');
+    await wait(() => expect(readCenter(f, delivered).status).toBe('received'));
+    // The retention GC cycle reclaims the received tombstone, freeing center capacity.
+    await wait(() => expect(readCenter(f, delivered).entries).toBe(0));
+    expect(readCenter(f, delivered).status).toBeUndefined();
+    // Take the receiver offline so the next offer stays pending; pending custody must survive every GC cycle.
+    await b.close();
+    const queued = offer(sender, receiver);
+    expect(await a.client.send(queued, { ackTimeoutMs: 3_000 })).toBe('stored');
+    await wait(() => expect(readCenter(f, queued).status).toBe('pending'));
+    await new Promise((resolve) => setTimeout(resolve, 80)); // Several gcIntervalMs ticks elapse.
+    expect(readCenter(f, queued)).toMatchObject({ status: 'pending', payload: true, entries: 1 });
+    await a.close();
+  }, 20_000);
+
   it('appends center schema v2 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
     const f = new CustodyFixture();
     const v1 = CENTER_SCHEMA.migrations[0]!;

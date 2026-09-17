@@ -68,6 +68,13 @@ export interface DurableNodeOptions {
   shutdownFlushMs?: number;
   /** caps/load 周期上报 ms(03 §4),0 = 关闭;默认 60000 */
   reportIntervalMs?: number;
+  /**
+   * 持久投递墓碑保留窗口 ms:终态 'stored' 投递记录超过该窗口由 GC 周期回收;
+   * 缺省 undefined = 关闭(墓碑永久保留),0 = 立即回收。pending 投递与未投递载荷永不回收。
+   */
+  custodyRetentionMs?: number;
+  /** 投递墓碑 GC 周期 ms(默认 6h;0 = 关闭);仅在 custodyRetentionMs 配置后生效 */
+  gcIntervalMs?: number;
   /** 显式身份注入(默认经 registry /v1/nodes/me 发现;测试/替代信任根用) */
   identity?: RegistryIdentity;
   /** 入站授权钩子注入(默认 registry 验签;测试/替代信任根用) */
@@ -120,13 +127,14 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     windowsAclConfirmed: opts.storage.windowsAclConfirmed,
     busyTimeoutMs: opts.storage.busyTimeoutMs,
   });
-  const runtime = new NodeRuntimeStore(store, me.node_id);
+  const runtime = new NodeRuntimeStore(store, me.node_id, { retentionMs: opts.custodyRetentionMs });
 
   const params: QlongParams = { ...(opts.params ?? DEFAULT_PARAMS) };
   const tickIntervalMs = bounded(opts.tickIntervalMs, 1_000, 50, 60_000, 'tickIntervalMs');
   const verifyRetryMs = bounded(opts.verifyRetryMs, 5_000, 100, 600_000, 'verifyRetryMs');
   const shutdownFlushMs = bounded(opts.shutdownFlushMs, 5_000, 0, 600_000, 'shutdownFlushMs');
   const reportIntervalMs = bounded(opts.reportIntervalMs, 60_000, 0, 2_147_483_647, 'reportIntervalMs');
+  const gcIntervalMs = bounded(opts.gcIntervalMs, 6 * 3_600_000, 0, 2_147_483_647, 'gcIntervalMs');
 
   // 3) 出站签名(与旧 session 同一信封装配);executor 事务内不签名——这里预先闭包。
   const seal = (out: Outbound): EnvelopeV1 => {
@@ -158,10 +166,12 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   let nextVerifyRetryAt = 0;
   let tickTimer: NodeJS.Timeout | undefined;
   let reportTimer: NodeJS.Timeout | undefined;
+  let gcTimer: NodeJS.Timeout | undefined;
 
   const stopTimers = (): void => {
     if (tickTimer !== undefined) { clearInterval(tickTimer); tickTimer = undefined; }
     if (reportTimer !== undefined) { clearInterval(reportTimer); reportTimer = undefined; }
+    if (gcTimer !== undefined) { clearInterval(gcTimer); gcTimer = undefined; }
   };
 
   const failClosed = (): void => {
@@ -295,6 +305,15 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
         reportLoad();
         reportTimer = setInterval(reportLoad, reportIntervalMs);
         reportTimer.unref();
+      }
+      // Retention GC reclaims terminal 'stored' delivery tombstones; a corrupt tombstone faults the store,
+      // which must fail the node closed rather than be concealed by the sweep.
+      if (opts.custodyRetentionMs !== undefined && gcIntervalMs > 0) {
+        gcTimer = setInterval(() => {
+          if (stopped || faulted) return;
+          try { runtime.prune(); } catch { failClosed(); }
+        }, gcIntervalMs);
+        gcTimer.unref();
       }
     },
     stop: (): Promise<void> => {

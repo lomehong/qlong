@@ -41,6 +41,11 @@ export interface ServerOptions {
     enrollRatePerMinPerIp?: number;
     /** GC 周期(默认 6h;0 = 关闭) */
     gcIntervalMs?: number;
+    /**
+     * 持久 custody 墓碑保留窗口 ms:终态(received/expired)记录超过该窗口由 GC 周期回收;
+     * 缺省 undefined = 关闭回收(墓碑永久保留),0 = 立即回收。pending 载荷永不回收。
+     */
+    custodyRetentionMs?: number;
     /** 书坊分发目录(纪要 §3):提供 /install.sh、/install.ps1、/install、/releases/<版本>/<文件> */
     distDir?: string;
     /** Legacy test/migration option; forbidden alongside center SQLite. */
@@ -118,9 +123,10 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
       );
     }
   }
+  const custody = storage ? new SqliteCustodyStore(storage, { retentionMs: opts.custodyRetentionMs }) : undefined;
   const gw = new WsGateway({
     core,
-    custody: storage ? new SqliteCustodyStore(storage) : undefined,
+    custody,
     cluster,
     clusterSecret,
     assertAuthorityAvailable: () => { if (storage) void storage.database; },
@@ -209,7 +215,9 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     });
     syncTimer = setInterval(guarded(sync), 60_000);
     const gcIntervalMs = opts.gcIntervalMs ?? 6 * 3_600_000;
-    if (gcIntervalMs > 0) gcTimer = setInterval(guarded(() => { gcResult = registry.gc(); }), gcIntervalMs);
+    // One housekeeping cadence reclaims both directory orphans and terminal custody tombstones.
+    // A corrupt tombstone faults prune(), which guarded() turns into a fail-closed shutdown.
+    if (gcIntervalMs > 0) gcTimer = setInterval(guarded(() => { gcResult = registry.gc(); custody?.prune(Date.now()); }), gcIntervalMs);
     return {
       registryPort, gatewayPort, gatewayPath: opts.gatewayPath, auth, cluster, close,
       storageMode: storage ? 'sqlite' : 'ephemeral',
