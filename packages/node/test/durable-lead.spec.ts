@@ -343,3 +343,55 @@ describe('DurableLead timers/reclaim/escalate/redispatch (B1c: durable lifecycle
     expect(() => lead.snapshot(taskId)).toThrow('Invalid durable lead state');
   });
 });
+
+describe('DurableLead 业务续租生产半(B2a: task.progress → 密封 task.lease.renew + 持久 renewalSeq)', () => {
+  it('running 收到带 msg_id 的 v2 task.progress → 密封 task.lease.renew 并持久化单调 renewalSeq(不产上报修订)', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const generation = 3;
+    const runId = newId();
+    const progress = receipt('task.progress', taskId, 1, { state: 'working', seq: 1, generation, run_id: runId });
+    f.deliver(progress);
+    const renews = f.outputs('task.lease.renew');
+    expect(renews).toHaveLength(1);
+    expect(renews[0]).toMatchObject({
+      type: 'task.lease.renew', to: { node_id: EXEC }, task_id: taskId, attempt: 1, reply_to: progress.msg_id,
+    });
+    // progress_msg_id 绑定信封 msg_id;deadline_ms = now + 执行方实际 leaseMs(= EPOCH + LEASE)
+    expect(renews[0]!.body).toEqual({
+      generation, run_id: runId, progress_msg_id: progress.msg_id, progress_seq: 1,
+      renewal_seq: 1, deadline_ms: EPOCH + LEASE,
+    });
+    expect(f.lead.snapshot(taskId)?.renewalSeq).toBe(1);
+    // progress 不改牵头状态 → 不追加上报修订(仍只有 offered/running)
+    expect(f.reports().map((r) => r.status)).toEqual(['offered', 'running']);
+  });
+
+  it('renewalSeq 跨 store 重启对齐并继续单调递增(绝不重置/伪造)', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const generation = 3;
+    const runId = newId();
+    f.deliver(receipt('task.progress', taskId, 1, { seq: 1, generation, run_id: runId }));
+    expect(f.lead.snapshot(taskId)?.renewalSeq).toBe(1);
+    f.store.close();
+
+    const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
+    const lead = new DurableLead({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal });
+    expect(lead.snapshot(taskId)?.renewalSeq).toBe(1); // 持久对齐,重启不重置
+    const p2 = receipt('task.progress', taskId, 1, { seq: 2, generation, run_id: runId });
+    expect(['new', 'duplicate']).toContain(runtime.receive(p2));
+    lead.consume(p2, true);
+    const renews = runtime.all().map((i) => i.envelope).filter((i) => i.type === 'task.lease.renew');
+    expect(renews.at(-1)?.body).toMatchObject({
+      progress_msg_id: p2.msg_id, progress_seq: 2, renewal_seq: 2, deadline_ms: EPOCH + LEASE,
+    });
+    expect(lead.snapshot(taskId)?.renewalSeq).toBe(2);
+  });
+});

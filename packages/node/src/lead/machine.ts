@@ -5,7 +5,7 @@
  * 依据:R0/R2/R3/R4/R5/R6/R7/R8/D25;终态优先级 done > closed > failed > escalated。
  */
 import type { AuditEvent, FailCode, QlongParams } from '@qlong/core';
-import { DEFAULT_PARAMS, defaultOfferTtlMs, lostAfterMs, normalizeFailCode, normalizeRejectCode } from '@qlong/core';
+import { DEFAULT_PARAMS, defaultOfferTtlMs, isUuid, lostAfterMs, normalizeFailCode, normalizeRejectCode } from '@qlong/core';
 import type { Outbound } from '../wire.js';
 
 export type LeadState =
@@ -40,6 +40,8 @@ export interface LeadRecord {
   acceptedFailedBudget: number;
   /** R7:未被接受过的改派轮次预算 */
   dispatchRounds: number;
+  /** B2a:已发出 task.lease.renew 的单调序号(持久、重启对齐;绑定 canApplyLeaseRenewal 的 renewal_seq)。 */
+  renewalSeq: number;
   /** R8:节点排除(持久=本 task 生命周期;once=瞬时失败排除一次) */
   excluded: Record<string, 'permanent' | 'once'>;
   history: LeadHistoryEntry[];
@@ -103,6 +105,7 @@ export class LeadTaskMachine {
       acceptedThisAttempt: false,
       acceptedFailedBudget: 0,
       dispatchRounds: 0,
+      renewalSeq: 0,
       excluded: {},
       history: [],
     };
@@ -164,8 +167,8 @@ export class LeadTaskMachine {
       { kind: 'schedule', timer: 'offer_ttl', atMs: this.rec.offerTtlUntil },
     ];
   }
-  /** 入站 task.*:调用方验签并绑定 task_id;所有状态统一绑定当前 peer/attempt。 */
-  onMessage(type: string, fromNode: string, attempt: number, body: Record<string, unknown>, now: number): LeadAction[] {
+  /** 入站 task.*:调用方验签并绑定 task_id;所有状态统一绑定当前 peer/attempt。msgId 为信封 msg_id(B2a 续租绑定用)。 */
+  onMessage(type: string, fromNode: string, attempt: number, body: Record<string, unknown>, now: number, msgId?: string): LeadAction[] {
     if (this.terminal || fromNode !== this.rec.target) return [];
     // R0:attempt 不符
     if (attempt !== this.rec.attempt) {
@@ -182,7 +185,7 @@ export class LeadTaskMachine {
       case 'offered':
         return this.onOfferedMessage(type, fromNode, body, now);
       case 'running':
-        return this.onRunningMessage(type, fromNode, body, now);
+        return this.onRunningMessage(type, fromNode, body, now, msgId);
       case 'reclaiming':
         return this.onReclaimingMessage(type, body, now);
       case 'cancelling':
@@ -216,15 +219,19 @@ export class LeadTaskMachine {
     return [];
   }
 
-  private onRunningMessage(type: string, fromNode: string, body: Record<string, unknown>, now: number): LeadAction[] {
+  private onRunningMessage(type: string, fromNode: string, body: Record<string, unknown>, now: number, msgId?: string): LeadAction[] {
     if (type === 'task.progress') {
       // 心跳即续租(R3);progress 不驱动状态机,seq/乱序由去重层与展示层处理。
       // 评审 M1-DIST-1:必须先取消旧 lease 定时器,否则存活超首个死线的健康长任务被误判 lost
       this.rec.leaseDeadline = now + lostAfterMs(this.rec.leaseMs, this.params);
-      return [
+      const actions: LeadAction[] = [
         { kind: 'cancelTimers', timers: ['lease'] },
         { kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline },
       ];
+      // B2a 生产半:回发 task.lease.renew,把执行方的业务租约死线推进到 now+leaseMs(与本地 lost 死线分离)。
+      const renew = this.leaseRenewal(fromNode, body, now, msgId);
+      if (renew) actions.push(renew);
+      return actions;
     }
     if (type === 'task.result') {
       this.rec.resultBody = body;
@@ -258,6 +265,27 @@ export class LeadTaskMachine {
       return [];
     }
     return [];
+  }
+
+  /**
+   * 组装 task.lease.renew 发送动作(B2a 生产半)。仅当调用方传入 progress 信封 msg_id 且 progress body
+   * 携带 v2 fence(generation/run_id)与 seq 时才发,以绑定 canApplyLeaseRenewal 要求的 progress_msg_id/
+   * progress_seq;legacy 无 msg_id 或 v1 progress 无 fence → 返回 null(只续本地死线,不发续租)。
+   * renewal_seq 每次发出严格 +1(持久单调,重启对齐);deadline_ms = now + 执行方实际 leaseMs。
+   */
+  private leaseRenewal(to: string, body: Record<string, unknown>, now: number, msgId?: string): LeadAction | null {
+    if (typeof msgId !== 'string' || !isUuid(msgId)) return null;
+    const generation = body.generation;
+    const runId = body.run_id;
+    const progressSeq = body.seq;
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation <= 0) return null;
+    if (typeof runId !== 'string' || !isUuid(runId)) return null;
+    if (typeof progressSeq !== 'number' || !Number.isSafeInteger(progressSeq) || progressSeq <= 0) return null;
+    this.rec.renewalSeq += 1;
+    return this.out('task.lease.renew', to, {
+      generation, run_id: runId, progress_msg_id: msgId, progress_seq: progressSeq,
+      renewal_seq: this.rec.renewalSeq, deadline_ms: now + this.rec.leaseMs,
+    }, msgId);
   }
 
   private onReclaimingMessage(type: string, body: Record<string, unknown>, now: number): LeadAction[] {

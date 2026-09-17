@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { newId } from '@qlong/core';
 import { LeadTaskMachine, type LeadAction } from '../src/lead/machine.js';
 
 const TASK = '66666666-6666-4666-8666-666666666666';
@@ -161,5 +162,54 @@ describe('牵头方状态机:R4/R7/R8/D25', () => {
     m3.cancelByUser(1_000);
     m3.onMessage('task.result', B, 1, { status: 'done', summary: '抢在取消前完成' }, 1_050);
     expect(m3.rec.state).toBe('done');
+  });
+});
+
+describe('牵头方状态机:R3 业务续租生产半(B2a)', () => {
+  it('running 收到带 msg_id 的 v2 task.progress → 回发 task.lease.renew(fence/progress 绑定 + 单调 renewal_seq + now+lease 死线)', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 100);
+    const progressMsgId = newId();
+    const runId = newId();
+    const acts = m.onMessage(
+      'task.progress', B, 1, { state: 'working', seq: 1, generation: 7, run_id: runId }, 200_000, progressMsgId,
+    );
+    const renew = sends(acts).find((s) => s.type === 'task.lease.renew');
+    expect(renew).toBeDefined();
+    expect(renew!.to_node).toBe(B);
+    expect(renew!.task_id).toBe(TASK);
+    expect(renew!.attempt).toBe(1);
+    expect(renew!.reply_to).toBe(progressMsgId);
+    // 业务续租死线 = now + leaseMs(执行方 maxLeaseMs 上限),与本地 lost 死线(lostAfterMs)分离
+    expect(renew!.body).toEqual({
+      generation: 7, run_id: runId, progress_msg_id: progressMsgId, progress_seq: 1,
+      renewal_seq: 1, deadline_ms: 200_000 + 300_000,
+    });
+    // 仍重置本地 lost 死线并重排 lease 定时器(R3/评审 M1-DIST-1)
+    expect(m.rec.leaseDeadline).toBe(200_000 + 230_000);
+    expect(acts.some((a) => a.kind === 'schedule' && a.timer === 'lease')).toBe(true);
+    // renewal_seq 跨多条 progress 严格单调递增
+    const acts2 = m.onMessage(
+      'task.progress', B, 1, { state: 'working', seq: 2, generation: 7, run_id: runId }, 210_000, newId(),
+    );
+    expect(sends(acts2).find((s) => s.type === 'task.lease.renew')!.body.renewal_seq).toBe(2);
+    expect(m.rec.renewalSeq).toBe(2);
+  });
+
+  it('task.progress 缺 msg_id 或缺 v2 fence(legacy)→ 只续本地死线,不发 task.lease.renew', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 100);
+    // 无 msg_id(legacy 调用方 5 参):即便 body 带 fence 也不发
+    const noMsgId = m.onMessage(
+      'task.progress', B, 1, { state: 'working', seq: 1, generation: 7, run_id: newId() }, 200_000,
+    );
+    expect(sends(noMsgId).some((s) => s.type === 'task.lease.renew')).toBe(false);
+    // 有 msg_id 但 body 无 v2 fence(v1 progress):不发
+    const noFence = m.onMessage('task.progress', B, 1, { state: 'working', seq: 1 }, 200_000, newId());
+    expect(sends(noFence).some((s) => s.type === 'task.lease.renew')).toBe(false);
+    expect(m.rec.renewalSeq).toBe(0);
+    expect(m.rec.leaseDeadline).toBe(200_000 + 230_000);
   });
 });

@@ -88,7 +88,8 @@ function validTask(value: unknown): value is DurableLeadTask {
       !LEAD_STATES.includes(value.state as string) || !nonnegative(value.attempt) ||
       (value.target !== null && !isUuid(value.target)) || !positive(value.leaseMs) ||
       typeof value.acceptedThisAttempt !== 'boolean' || !nonnegative(value.acceptedFailedBudget) ||
-      !nonnegative(value.dispatchRounds) || !record(value.excluded) || !Array.isArray(value.history)) return false;
+      !nonnegative(value.dispatchRounds) || !nonnegative(value.renewalSeq) ||
+      !record(value.excluded) || !Array.isArray(value.history)) return false;
   if (!optionalDeadline(value.offerTtlUntil) || !optionalDeadline(value.leaseDeadline) ||
       !optionalDeadline(value.drainUntil) || !optionalDeadline(value.cancelWaitUntil)) return false;
   if (value.drainClosed !== undefined && typeof value.drainClosed !== 'boolean') return false;
@@ -314,7 +315,7 @@ export class DurableLead {
       if (allowed && fresh) {
         const result = this.runEvent(
           task,
-          (machine) => machine.onMessage(envelope.type, envelope.from.node_id, envelope.attempt ?? 0, envelope.body, now),
+          (machine) => machine.onMessage(envelope.type, envelope.from.node_id, envelope.attempt ?? 0, envelope.body, now, envelope.msg_id),
           now,
         );
         value = result.value;
