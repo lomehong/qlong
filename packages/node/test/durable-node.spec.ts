@@ -12,6 +12,7 @@ import { SqliteStore, StorageError, type SqliteStoreOptions } from '../../storag
 import { NODE_SCHEMA } from '../src/runtime/schema.js';
 import { NodeRuntimeStore } from '../src/runtime/store.js';
 import { createDurableNode, type DurableNode } from '../src/runtime/node.js';
+import { TASK_REPORT_KIND, type TaskReport } from '../src/runtime/report.js';
 import type { FencedDriver, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 
 const tempBase = realpathSync(tmpdir());
@@ -333,6 +334,81 @@ describe('DurableNode v2 task loop', () => {
     expect(f.sent('task.accept')).toHaveLength(0);
     expect(() => node.executor.snapshot()).toThrow(); // executor refuses further work
     expect(node.store.state).toBe('faulted');
+  });
+});
+
+describe('DurableNode v2 lead role + persistent projection (B1d)', () => {
+  const ledOffer = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    ({ kind: 'aid', summary: 'led task', offer_ttl_ms: 30_000, lease_ms: 60_000, ...over });
+  const pendingReports = (node: DurableNode): number =>
+    node.runtime.pendingEffects(undefined, true).filter((e) => e.kind === TASK_REPORT_KIND).length;
+
+  it('originates and dispatches a led task through the pump, projecting each revision to the center sink', async () => {
+    const reports: TaskReport[] = [];
+    const taskReportSink = vi.fn(async (report: TaskReport) => { reports.push(report); return { ok: true, status: 200 }; });
+    const f = await fixture({ onFrame: autoStored });
+    const node = await f.makeNode({ taskReportSink, validateAcceptance: () => true });
+    await node.start();
+
+    const taskId = newId();
+    expect(node.lead.originate(taskId, 'aid')).toBe(true);
+    expect(node.lead.dispatch(taskId, f.peerId, ledOffer())).toBe(true);
+
+    // The pump seals the offer into the outbox and flushes it to the gateway.
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+    expect(f.sent('task.offer')[0]).toMatchObject({ task_id: taskId, attempt: 1, to: { node_id: f.peerId } });
+    // The pump's reporter projects the 'offered' revision to the center sink.
+    await wait(() => expect(reports.map((r) => r.status)).toContain('offered'));
+    expect(reports[0]).toMatchObject({
+      task_id: taskId, lead: f.identity.node_id, exec: f.peerId, attempt: 1, status: 'offered', type: 'aid', task_seq: 1,
+    });
+
+    // The executor accepts; drain routes the receipt to the lead (not this node's executor).
+    f.send(delivery(f.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(reports.map((r) => r.status)).toContain('running'));
+    expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running', task_seq: 2 });
+
+    // The executor returns a result; the lead projects the terminal 'done' revision, in task_seq order.
+    f.send(delivery(f.signPeer({ type: 'task.result', task_id: taskId, attempt: 1 }, { status: 'done', summary: 'ok' })));
+    await wait(() => expect(reports.map((r) => r.status)).toContain('done'));
+    expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'done', task_seq: 3 });
+    expect(reports.map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['running', 2], ['done', 3]]);
+    // The led task never engaged this node's executor slot.
+    expect(node.executor.snapshot().slot).toBeNull();
+  });
+
+  it('re-flushes an undelivered lead report across a node restart without fabricating a revision', async () => {
+    const delivered: TaskReport[] = [];
+    let reachable = false;
+    const taskReportSink = vi.fn(async (report: TaskReport) => {
+      if (!reachable) return { ok: false, status: 0 }; // center unreachable -> stays pending, never dropped
+      delivered.push(report);
+      return { ok: true, status: 200 };
+    });
+    const f = await fixture({ onFrame: autoStored });
+    const node = await f.makeNode({ taskReportSink, validateAcceptance: () => true, shutdownFlushMs: 200 });
+    await node.start();
+    const taskId = newId();
+    node.lead.originate(taskId, 'aid');
+    node.lead.dispatch(taskId, f.peerId, ledOffer());
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+    await wait(() => expect(taskReportSink).toHaveBeenCalled()); // pump tried, center down
+    expect(pendingReports(node)).toBe(1); // the 'offered' revision survives as a pending intent
+    await node.stop();
+
+    // Reopen the same runtime with the center reachable: the pump re-flushes the persisted revision.
+    reachable = true;
+    const reopened = await f.makeNode({
+      storage: {
+        allowedBase: f.root, dataDir: f.dataDir, mode: 'open', filename: 'runtime.sqlite',
+        localFilesystemConfirmed: true, windowsAclConfirmed: true, busyTimeoutMs: 25,
+      },
+      taskReportSink, validateAcceptance: () => true,
+    });
+    await reopened.start();
+    await wait(() => expect(delivered.map((r) => [r.status, r.task_seq])).toEqual([['offered', 1]]));
+    expect(reopened.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 1, target: f.peerId, task_seq: 1 });
+    await wait(() => expect(pendingReports(reopened)).toBe(0));
   });
 });
 

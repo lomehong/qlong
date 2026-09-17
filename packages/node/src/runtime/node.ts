@@ -21,6 +21,8 @@ import type { FencedDriver } from '../driver/run-handle.js';
 import { GatewayClient } from '../gateway-client.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { DurableExecutor } from './executor.js';
+import { DurableLead, leadStateKey, type TargetSelector } from './lead.js';
+import { DurableTaskReporter, type TaskReportSink } from './report.js';
 import { NODE_SCHEMA } from './schema.js';
 import { NodeRuntimeStore } from './store.js';
 import { createRegistryVerifier, loadRegistryIdentity, type RegistryIdentity } from '../remote/registry-verifier.js';
@@ -79,6 +81,12 @@ export interface DurableNodeOptions {
   identity?: RegistryIdentity;
   /** 入站授权钩子注入(默认 registry 验签;测试/替代信任根用) */
   verifyInbound?: (env: EnvelopeV1) => Promise<boolean>;
+  /** 牵头方改派目标选择器(响应 reclaim 后的 requestDispatch);缺省则任务停留 drafting 等注入 */
+  selectTarget?: TargetSelector;
+  /** PROJECT 验收判据注入(牵头方判定 task.result);缺省用机器默认(project 拒绝、aid 兼容规则) */
+  validateAcceptance?: (resultBody: Record<string, unknown>) => boolean;
+  /** 持久任务上报投递汇注入(默认 POST /v1/teams/:id/tasks);测试/替代中心用 */
+  taskReportSink?: TaskReportSink;
   /** 存储或执行器故障:节点已停止接入,保留现场等待显式恢复 */
   onFault?: () => void;
 }
@@ -87,6 +95,8 @@ export interface DurableNode {
   readonly identity: RegistryIdentity;
   readonly runtime: NodeRuntimeStore;
   readonly executor: DurableExecutor;
+  /** v2 牵头方角色:显式 originate/dispatch 触发;选举/归属仲裁延后 C2 */
+  readonly lead: DurableLead;
   readonly client: GatewayClient;
   /** 恢复孤儿 → 消费重启 pending → v2 建连 → 启动 pump */
   start(): Promise<void>;
@@ -163,6 +173,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   let faulted = false;
   let stopping: Promise<void> | undefined;
   let draining = false;
+  let flushing = false;
   let nextVerifyRetryAt = 0;
   let tickTimer: NodeJS.Timeout | undefined;
   let reportTimer: NodeJS.Timeout | undefined;
@@ -208,6 +219,41 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     onFault: failClosed,
   });
 
+  // 6b) v2 牵头方角色(生产半)+ 持久上报消费半(B1d)。
+  // 牵头方与执行方共享同一 runtime/seal;lead 状态键前缀隔离,绝不与本机执行槽混淆。
+  // 触发是显式的(调用方 node.lead.originate/dispatch);自动选举/归属仲裁延后 C2。
+  const lead = new DurableLead({
+    store: runtime,
+    nodeId: me.node_id,
+    teamId: me.team_id,
+    params,
+    seal,
+    selectTarget: opts.selectTarget,
+    validateAcceptance: opts.validateAcceptance,
+    onFault: failClosed,
+  });
+
+  // 默认上报汇:POST /v1/teams/:id/tasks(Bearer nodeToken)。传输失败按可重试处理(status 0),
+  // 绝不伪造状态码;中心 409(已达该/更高修订)由 reporter 视为完成而非无限重试。
+  const defaultTaskReportSink: TaskReportSink = async (report) => {
+    try {
+      const res = await fetch(
+        opts.registryUrl.replace(/\/+$/, '') + `/v1/teams/${encodeURIComponent(report.team_id)}/tasks`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
+          body: JSON.stringify(report),
+          signal: AbortSignal.timeout(5_000),
+          redirect: 'error',
+        },
+      );
+      return { ok: res.ok, status: res.status };
+    } catch {
+      return { ok: false, status: 0 };
+    }
+  };
+  const reporter = new DurableTaskReporter({ store: runtime, post: opts.taskReportSink ?? defaultTaskReportSink });
+
   const verifySafely = async (env: EnvelopeV1): Promise<boolean> => {
     try { return (await verify(env)) === true; } catch { return false; }
   };
@@ -227,8 +273,14 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
         for (const env of batch) {
           if (stopped || faulted) return;
           if (!(await verifySafely(env))) { skipped = true; continue; }
-          executor.consume(env, true); // 故障在执行器内闭锁并回调;错误向调用方传播
-          await executor.settle();
+          // 路由:本节点牵头该任务 → 回执走牵头方(绝不落入本机执行槽);否则 → 执行方消费。
+          const ledByUs = env.task_id !== undefined && runtime.state(leadStateKey(env.task_id)) !== undefined;
+          if (ledByUs) {
+            lead.consume(env, true); // 故障在牵头方内闭锁并回调;错误向调用方传播
+          } else {
+            executor.consume(env, true); // 故障在执行器内闭锁并回调;错误向调用方传播
+            await executor.settle();
+          }
         }
         nextVerifyRetryAt = skipped ? Date.now() + verifyRetryMs : 0;
         if (batch.length < PUMP_BATCH) return;
@@ -236,11 +288,22 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     } finally { draining = false; }
   }
 
+  /** 单所有者、带重入守卫的持久上报泵送:传输失败留在 pending 等下次;损坏/存储故障 fail-closed。 */
+  const flushReports = (): void => {
+    if (flushing) return;
+    flushing = true;
+    void reporter.flush()
+      .catch(() => { failClosed(); }) // 仅畸形 intent/存储故障会 reject;传输失败已被 reporter 内部吞掉
+      .finally(() => { flushing = false; });
+  };
+
   const pumpTick = (): void => {
     if (stopped || faulted) return;
     try { executor.tick(); } catch { /* 故障已闭锁 */ }
+    try { lead.tick(); } catch { /* 故障已闭锁:牵头方内部已 fail-closed 并回调 */ }
     void executor.settle().catch(() => { /* 故障已闭锁 */ });
-    client.flush();
+    client.flush(); // 执行方/牵头方事务内密封的 outbox 一并发出
+    flushReports();
     if (nextVerifyRetryAt !== 0 && Date.now() >= nextVerifyRetryAt) {
       nextVerifyRetryAt = 0;
       void drain().catch(() => { /* 故障已闭锁 */ });
@@ -283,6 +346,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     identity: me,
     runtime,
     executor,
+    lead,
     client,
     store,
     drain,
@@ -336,6 +400,8 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
         client.close();
+        // 有界排空持久上报:未投递的 task.report 修订须在关库前尽力送达;超时也绝不丢弃(留待下次进程)。
+        try { await reporter.close(shutdownFlushMs); } catch (error) { failure = failure ?? error; }
         try { store.close(); } catch (error) { failure = failure ?? error; }
         if (failure !== undefined) throw failure;
       })();
