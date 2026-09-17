@@ -5,7 +5,9 @@ import { sha256Hex } from './hash.js';
 import { isPlainObject } from './validate-utils.js';
 
 export const TRANSPORT_VERSION = 2;
-export const CUSTODY_FEATURES = Object.freeze(['durable-custody', 'receiver-receipt']);
+// lease-renewal(B2):牵头方回发 task.lease.renew 续业务租约的能力位。生产半落地后才宣称,
+// 两端引用同一常量、全量协商(hasCustodyFeatures 要求全部);陈旧对端缺此位即 4004,无静默回退。
+export const CUSTODY_FEATURES = Object.freeze(['durable-custody', 'receiver-receipt', 'lease-renewal']);
 export const MAX_TRANSPORT_BYTES = 256 * 1024;
 export const MAX_TRANSPORT_LIFETIME_MS = 24 * 60 * 60 * 1000;
 

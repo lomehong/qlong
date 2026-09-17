@@ -282,7 +282,9 @@ describe('transport v2 durable gateway (raw WS and real SQLite)', () => {
     { transport_version: 2 }, { transport_version: 2, features: [] },
     { transport_version: 2, features: ['durable-custody'] },
     { transport_version: 2, features: ['receiver-receipt'] },
-  ])('requires explicit v2 and both custody features (%j)', async (fields) => {
+    // b2b:旧完整集缺 lease-renewal → 网关拒绝陈旧客户端(诚实版本跃迁,无静默回退)
+    { transport_version: 2, features: ['durable-custody', 'receiver-receipt'] },
+  ])('requires explicit v2 and all custody features (%j)', async (fields) => {
     const f = await setup();
     const peer = await rawPeer(f);
     peer.auth(source, fields);

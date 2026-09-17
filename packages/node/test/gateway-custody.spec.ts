@@ -32,6 +32,8 @@ describe('GatewayClient transport negotiation', () => {
     { frame: 'auth_ok' },
     { ...authOk, transport_version: 1 },
     { ...authOk, features: ['durable-custody'] },
+    // b2b:陈旧网关只回显旧完整集(缺 lease-renewal)→ 客户端 fail-closed,不静默降级
+    { ...authOk, features: ['durable-custody', 'receiver-receipt'] },
     { ...authOk, node_id: SENDER },
   ])('fails closed on incompatible auth_ok %# without flushing or retrying', async (response) => {
     const c = await fixture({}, { auth: (ws) => write(ws, response) });

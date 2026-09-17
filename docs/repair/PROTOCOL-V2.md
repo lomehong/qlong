@@ -6,8 +6,8 @@
 
 - 业务签名仍为 `EnvelopeV1`；保留 D23 全安全整数约束，不更改签名语义。
 - `auth` 在首帧携带 node token、`transport_version: 2` 和 `features`，不可把 token 放 URL。
-- 本批能力只有 `durable-custody`、`receiver-receipt`；未实现的 `lease-renewal` 不宣称支持。
-- 中心有 SQLite custody 时必须同时满足 v2 与两项能力。`auth_ok` 携带版本、能力、节点身份，先于任何补投。
+- 能力集为 `durable-custody`、`receiver-receipt`、`lease-renewal`；`lease-renewal`（B2 业务续租：牵头方回发 `task.lease.renew` 续租）在生产半落地后宣称，两端引用同一常量 `CUSTODY_FEATURES` 全量协商。
+- 中心有 SQLite custody 时必须同时满足 v2 与三项能力（缺任一即 4004，陈旧对端只宣旧两位也拒）。`auth_ok` 携带版本、能力、节点身份，先于任何补投。
 - 缺能力、版本不符或节点身份不符均拒绝；关闭码 4004 表示不兼容，无旧 `queued/delivered` 降级。
 - 正式 `startQlongServer` 持久模式已启用 v2。显式回环 `--ephemeral` 使用旧演示协议，拒绝 v2。
 - `GatewayClient({ runtime })` 要求 `NodeRuntimeStore`，不能同时传旧 `outbox/dataDir`。持久节点装配 `createDurableNode`（runtime/node.ts）已把生产链路接到事务任务 runtime：显式 SQLite 准入 + 收件箱 pump（逐条重授权后消费）+ `DurableExecutor` + 关停 flush；`qlong run` 已默认走该装配，须 `--storage-mode create|open` 与本地文件系统准入。旧 `createProductionNode` / 旧 `RemoteNodeSession` 仍为 v1 演示链路，不能连接持久 v2 中心完成任务。

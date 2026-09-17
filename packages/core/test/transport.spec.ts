@@ -9,11 +9,11 @@ import {
 } from '../src/transport.js';
 
 describe('custody feature negotiation', () => {
-  it('requires both advertised features, independent of order and extensions', () => {
-    expect(CUSTODY_FEATURES).toEqual(['durable-custody', 'receiver-receipt']);
+  it('requires all advertised features, independent of order and extensions', () => {
+    expect(CUSTODY_FEATURES).toEqual(['durable-custody', 'receiver-receipt', 'lease-renewal']);
     expect(hasCustodyFeatures(CUSTODY_FEATURES)).toBe(true);
-    expect(hasCustodyFeatures(['receiver-receipt', 'future-feature', 'durable-custody'])).toBe(true);
-    expect(hasCustodyFeatures(['durable-custody', 'durable-custody', 'receiver-receipt'])).toBe(true);
+    expect(hasCustodyFeatures(['receiver-receipt', 'future-feature', 'durable-custody', 'lease-renewal'])).toBe(true);
+    expect(hasCustodyFeatures(['durable-custody', 'durable-custody', 'receiver-receipt', 'lease-renewal'])).toBe(true);
   });
 
   it.each([
@@ -22,6 +22,8 @@ describe('custody feature negotiation', () => {
     ['durable-custody'], ['receiver-receipt'], ['durable-custody', 'durable-custody'],
     ['durable-custody', null], ['durable-custody', ['receiver-receipt']],
     ['durable-custody', 'RECEIVER-RECEIPT'],
+    // b2b:续租特性位落地后,旧完整集(durable-custody+receiver-receipt)缺 lease-renewal → 拒绝(诚实版本跃迁)
+    ['durable-custody', 'receiver-receipt'],
   ].map((value) => ({ value })))('rejects missing or malformed features %#', ({ value }) => {
     expect(hasCustodyFeatures(value)).toBe(false);
   });
