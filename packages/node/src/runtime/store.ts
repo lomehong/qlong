@@ -106,6 +106,9 @@ type Row = Record<string, unknown>;
 const DOMAIN_TABLES = ['node_inbox', 'node_delivery', 'node_outbox', 'node_state', 'node_dedup', 'node_effects'] as const;
 const OUTBOUND_ROWS = `SELECT d.*, o.sender AS outbox_sender, o.payload, o.attempts, o.last_at
   FROM node_delivery d LEFT JOIN node_outbox o USING (sender, msg_id)`;
+// node:sqlite returns TEXT columns truncated at the first NUL, but state keys may embed NULs.
+// Every node_state read projects the key as a BLOB so decodeState can recover the exact bytes.
+const STATE_ROWS = `SELECT *, CAST(state_key AS BLOB) AS state_key_bytes FROM node_state`;
 
 function valid(condition: unknown): asserts condition {
   // Never expose persisted payloads/values in recovery errors.
@@ -185,7 +188,7 @@ export class NodeRuntimeStore implements OutboxStore {
     valid(!query(db, 'PRAGMA foreign_key_check').get());
     // Stream one row at a time: no full-table arrays or retained payload/state caches at startup.
     for (const row of query(db, OUTBOUND_ROWS).iterate()) this.readDelivery(row);
-    for (const row of query(db, 'SELECT * FROM node_state').iterate()) this.decodeState(row);
+    for (const row of query(db, STATE_ROWS).iterate()) this.decodeState(row);
     for (const row of query(db, 'SELECT * FROM node_inbox').iterate()) this.readInbox(db, row);
     for (const row of query(db, 'SELECT * FROM node_dedup').iterate()) this.readDedup(db, row);
     for (const row of query(db, 'SELECT * FROM node_effects').iterate()) this.readEffect(db, row);
@@ -237,8 +240,12 @@ export class NodeRuntimeStore implements OutboxStore {
   }
 
   private decodeState(row: Row): RuntimeState {
-    storedKey(row.state_key);
-    return { key: row.state_key, revision: storedInteger(row.revision, 1), value: storedJson(row.value) };
+    // Recover the key from its BLOB projection: the TEXT column is truncated at any embedded NUL.
+    const bytes = row.state_key_bytes;
+    valid(bytes instanceof Uint8Array);
+    const stateKey = Buffer.from(bytes).toString('utf8');
+    storedKey(stateKey);
+    return { key: stateKey, revision: storedInteger(row.revision, 1), value: storedJson(row.value) };
   }
 
   private readDedup(db: DatabaseSync, row: Row): void {
@@ -387,8 +394,8 @@ export class NodeRuntimeStore implements OutboxStore {
       const states: RuntimeState[] = [];
       // Byte comparison is literal/case-sensitive, including %, _, quotes and embedded NULs.
       // Empty prefixes skip filtering entirely, so even invalid empty keys reach validation.
-      const rows = prefix === '' ? query(db, 'SELECT * FROM node_state ORDER BY state_key LIMIT ?').iterate(limit) :
-        query(db, `SELECT * FROM node_state
+      const rows = prefix === '' ? query(db, `${STATE_ROWS} ORDER BY state_key LIMIT ?`).iterate(limit) :
+        query(db, `${STATE_ROWS}
           WHERE substr(CAST(state_key AS BLOB), 1, ?) = CAST(? AS BLOB) ORDER BY state_key LIMIT ?`)
           .iterate(Buffer.byteLength(prefix), prefix, limit);
       for (const row of rows) states.push(this.decodeState(row));
@@ -398,7 +405,7 @@ export class NodeRuntimeStore implements OutboxStore {
 
   private readState(db: DatabaseSync, stateKey: string): RuntimeState | undefined {
     key(stateKey);
-    const row = query(db, 'SELECT * FROM node_state WHERE state_key = ?').get(stateKey);
+    const row = query(db, `${STATE_ROWS} WHERE state_key = ?`).get(stateKey);
     return row ? this.decodeState(row) : undefined;
   }
 

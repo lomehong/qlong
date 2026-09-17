@@ -62,6 +62,8 @@
 
 任务 pump 接线批次最终验证：全仓 **1350 项通过、2 项平台跳过**，7 包类型检查、CLI 构建/离线 demo（demo/takeover）、Console 构建通过。完整测试命令为 `pnpm -r --workspace-concurrency=1 --if-present run test --exclude '**/dsh-e2e.spec.ts' --retry 0 --maxWorkers=2`，退出码 0。默认高并发曾出现 Vitest `ERR_IPC_CHANNEL_CLOSED`；降低 runner 并发完成全量检查，没有启用失败测试自动重试或新增排除。另修复 gateway `routeAsync` 兜底入箱与连接补投的竞态（节点在判离线后、入箱前上线会滞留信封到下次重连；入箱后同一步复查连接表并立即补投），`bus.spec` 单文件重复运行回归通过。
 
+> 更正：上述“退出码 0”在提交时并不成立——`node/test/runtime-local.spec.ts` 的 2 项 state 列举用例实为失败。根因是 `node:sqlite` 读回 TEXT 列时在首个 NUL 字节处截断（库内字节完整，仅读回被截断），而 `NodeRuntimeStore` 契约允许 state key 含 embedded NUL。已在 `runtime/store.ts` 修复：所有 node_state 读取改走 `CAST(state_key AS BLOB)` 投影，`decodeState` 从 blob 精确还原 key。修复后按同一命令全仓 **1353 项通过、2 项平台跳过**，7 包类型检查通过，退出码 0。
+
 ## 仍待完成
 
 任务 pump：单 executor aid 闭环已接通（`createDurableNode` + `FencedProcessDriver`：offer→accept→progress 心跳→result/fail/lease_expired/cancel 全事务，重启 pending 逐条重授权消费，关停 flush 后断连；CLI `qlong run` 已接入并要求显式 create/open 存储）。仍待完成：业务续租（多网关接续）、多 lead/单 exec、RunHandle/orphan 恢复产品化（当前 recover 恒 unknown → recovery_required）、Docker/Podman network-none 与模型 broker、产物可信验收、IPC/owner 命令、持久状态上报、节点跨队能力授权、gateway-only/authority 连接登记、投递结果查询 API、保留窗口/GC/收尾预算、旧数据显式迁移与全链故障矩阵。
