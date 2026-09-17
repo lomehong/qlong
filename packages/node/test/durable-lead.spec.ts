@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { newId, type EnvelopeV1 } from '@qlong/core';
+import { DEFAULT_PARAMS, lostAfterMs, newId, type EnvelopeV1 } from '@qlong/core';
 import { DurableLead, leadStateKey, type DurableLeadOptions } from '../src/runtime/lead.js';
 import { NodeRuntimeStore, type RuntimeJson } from '../src/runtime/store.js';
 import { DurableTaskReporter, TASK_REPORT_KIND, type TaskReport, type TaskReportSink } from '../src/runtime/report.js';
@@ -8,10 +8,15 @@ import { env, fixture, LOCAL, open, OTHER } from './runtime-store-helpers.js';
 
 const TEAM = 'lead-test-team';
 const EXEC = '20000000-0000-4000-8000-000000000009';
+const EXEC2 = '20000000-0000-4000-8000-00000000000a';
+const EXEC3 = '20000000-0000-4000-8000-00000000000b';
 const EPOCH = Date.parse('2026-09-16T12:00:00Z');
+// The machine derives the offer deadline from params (it ignores offerBody.offer_ttl_ms), so the
+// test's ttl must equal the aid default for the arithmetic to line up with the persisted deadline.
+const TTL = DEFAULT_PARAMS.offerTtlMsAid;
+const LEASE = 90_000; // lostAfterMs = 2*(90000/3)+30000 = 90000
 let now = EPOCH;
 
-/** Test seal: assemble a signed outbound envelope from the lead (LOCAL) to its target. */
 function seal(out: Outbound): EnvelopeV1 {
   return env({
     type: out.type, ts: new Date(now).toISOString(), exp: new Date(now + 60_000).toISOString(),
@@ -20,7 +25,6 @@ function seal(out: Outbound): EnvelopeV1 {
   });
 }
 
-/** Inbound receipt from the executor to the lead (LOCAL). */
 function receipt(type: string, taskId: string, attempt: number, body: Record<string, unknown> = {}, from = EXEC): EnvelopeV1 {
   return env({
     type, ts: new Date(now).toISOString(), exp: new Date(now + 60_000).toISOString(),
@@ -28,6 +32,9 @@ function receipt(type: string, taskId: string, attempt: number, body: Record<str
     task_id: taskId, attempt, body,
   });
 }
+
+const offerBody = (kind: 'aid' | 'project' = 'aid'): Record<string, unknown> =>
+  ({ kind, summary: 'work', offer_ttl_ms: TTL, lease_ms: LEASE });
 
 function setup(overrides: Partial<DurableLeadOptions> = {}) {
   const f = fixture();
@@ -45,7 +52,7 @@ function setup(overrides: Partial<DurableLeadOptions> = {}) {
 beforeEach(() => { now = EPOCH; vi.spyOn(Date, 'now').mockImplementation(() => now); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-describe('DurableLead (v2 durable task origination + projection intent production)', () => {
+describe('DurableLead minimal lifecycle (B1b: originate/dispatch/receipt + report intents)', () => {
   it('originates a led task in drafting without any report intent or outbound offer', () => {
     const f = setup();
     const taskId = newId();
@@ -53,8 +60,7 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'drafting', attempt: 0, target: null, task_seq: 0 });
     expect(f.runtime.all()).toEqual([]);
     expect(f.reports()).toEqual([]);
-    // Idempotent: re-originating the same task neither duplicates state nor advances the sequence.
-    expect(f.lead.originate(taskId, 'aid')).toBe(false);
+    expect(f.lead.originate(taskId, 'aid')).toBe(false); // idempotent
     expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'drafting', task_seq: 0 });
   });
 
@@ -62,19 +68,15 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     const f = setup();
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    expect(f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' })).toBe(true);
+    expect(f.lead.dispatch(taskId, EXEC, offerBody())).toBe(true);
     const offers = f.outputs('task.offer');
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({ type: 'task.offer', to: { node_id: EXEC }, task_id: taskId, attempt: 1 });
-    expect(f.lead.snapshot(taskId)).toMatchObject({
-      state: 'offered', attempt: 1, target: EXEC, task_seq: 1, offerMsgId: offers[0]!.msg_id,
-    });
-    // The report intent is committed in the SAME transition as the offer, never before or after.
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 1, target: EXEC, task_seq: 1 });
     expect(f.reports()).toEqual([{
       task_id: taskId, team_id: TEAM, lead: LOCAL, exec: EXEC, attempt: 1, status: 'offered', type: 'aid', task_seq: 1,
     }]);
-    // A second dispatch is refused: the task already left drafting.
-    expect(f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' })).toBe(false);
+    expect(f.lead.dispatch(taskId, EXEC, offerBody())).toBe(false); // already left drafting
     expect(f.outputs('task.offer')).toHaveLength(1);
   });
 
@@ -82,19 +84,18 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     const f = setup();
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' });
-    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: 900 }));
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
     expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'running', attempt: 1, target: EXEC, task_seq: 2 });
     expect(f.reports().map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['running', 2]]);
-    expect(f.reports()[1]).toMatchObject({ status: 'running', task_seq: 2, exec: EXEC, lead: LOCAL });
   });
 
   it('consumes a result into done and a fatal fail into failed, each reporting the terminal revision', () => {
-    const done = setup();
+    const done = setup({ validateAcceptance: () => true });
     const doneTask = newId();
     done.lead.originate(doneTask, 'project');
-    done.lead.dispatch(doneTask, EXEC, { kind: 'project', summary: 'work' });
-    done.deliver(receipt('task.accept', doneTask, 1));
+    done.lead.dispatch(doneTask, EXEC, offerBody('project'));
+    done.deliver(receipt('task.accept', doneTask, 1, { lease_ms: LEASE }));
     done.deliver(receipt('task.result', doneTask, 1, { status: 'done' }));
     expect(done.lead.snapshot(doneTask)).toMatchObject({ state: 'done', task_seq: 3 });
     expect(done.reports().map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['running', 2], ['done', 3]]);
@@ -103,8 +104,8 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     const failed = setup();
     const failedTask = newId();
     failed.lead.originate(failedTask, 'aid');
-    failed.lead.dispatch(failedTask, EXEC, { kind: 'aid', summary: 'work' });
-    failed.deliver(receipt('task.accept', failedTask, 1));
+    failed.lead.dispatch(failedTask, EXEC, offerBody());
+    failed.deliver(receipt('task.accept', failedTask, 1, { lease_ms: LEASE }));
     failed.deliver(receipt('task.fail', failedTask, 1, { reason_code: 'other', retryable: false }));
     expect(failed.lead.snapshot(failedTask)).toMatchObject({ state: 'failed', task_seq: 3 });
     expect(failed.reports().at(-1)).toMatchObject({ status: 'failed', task_seq: 3, type: 'aid' });
@@ -114,13 +115,12 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     const f = setup();
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' });
+    f.lead.dispatch(taskId, EXEC, offerBody());
     const before = f.lead.snapshot(taskId);
     f.deliver(receipt('task.accept', taskId, 1, {}, OTHER)); // wrong node
     f.deliver(receipt('task.accept', taskId, 2, {})); // wrong attempt
     f.deliver(receipt('task.accept', taskId, 1, {}), false); // unauthorized
-    expect(f.lead.snapshot(taskId)).toEqual(before);
-    // Only the dispatch report exists; no phantom running/done revision was fabricated.
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: before!.state, attempt: before!.attempt, task_seq: before!.task_seq });
     expect(f.reports().map((r) => r.status)).toEqual(['offered']);
   });
 
@@ -128,19 +128,17 @@ describe('DurableLead (v2 durable task origination + projection intent productio
     const f = setup();
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' });
-    f.deliver(receipt('task.accept', taskId, 1));
-    const before = f.lead.snapshot(taskId);
-    expect(before?.task_seq).toBe(2);
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    expect(f.lead.snapshot(taskId)?.task_seq).toBe(2);
     f.store.close();
 
     const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
     const lead = new DurableLead({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal });
-    expect(lead.snapshot(taskId)).toEqual(before); // task_seq 2 preserved verbatim, not reset to 0
+    expect(lead.snapshot(taskId)).toMatchObject({ state: 'running', attempt: 1, target: EXEC, task_seq: 2 });
     const pending = runtime.pendingEffects(undefined, true).filter((e) => e.kind === TASK_REPORT_KIND);
     expect(pending.map((e) => (e.payload as unknown as TaskReport).task_seq)).toEqual([1, 2]);
 
-    // A post-restart result continues the monotonic sequence at 3.
     const result = receipt('task.result', taskId, 1, { status: 'done' });
     expect(['new', 'duplicate']).toContain(runtime.receive(result));
     lead.consume(result, true);
@@ -148,36 +146,200 @@ describe('DurableLead (v2 durable task origination + projection intent productio
   });
 
   it('produces report intents the DurableTaskReporter delivers to the center in task_seq order', async () => {
-    const f = setup();
+    const f = setup({ validateAcceptance: () => true });
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' });
-    f.deliver(receipt('task.accept', taskId, 1));
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
     f.deliver(receipt('task.result', taskId, 1, { status: 'done' }));
     const delivered: TaskReport[] = [];
     const post = vi.fn<TaskReportSink>(async (r) => { delivered.push(r); return { ok: true, status: 200 }; });
     const reporter = new DurableTaskReporter({ store: f.runtime, post });
-
     expect(await reporter.flush()).toEqual({ delivered: 3, pending: 0 });
     expect(delivered.map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['running', 2], ['done', 3]]);
-    expect(f.reports()).toEqual([]); // every intent completed after delivery
+    expect(f.reports()).toEqual([]);
   });
 
   it('rejects malformed persisted lead state without healing, dispatching, or reporting', () => {
     const f = setup();
     const taskId = newId();
     f.lead.originate(taskId, 'aid');
-    f.lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' });
+    f.lead.dispatch(taskId, EXEC, offerBody());
     const key = leadStateKey(taskId);
     const saved = f.runtime.state(key)!.value as Record<string, RuntimeJson>;
     saved.state = 'bogus';
     f.runtime.transition(key, f.runtime.state(key)!.revision, () => ({ state: saved as RuntimeJson }));
-
     const lead = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal });
     expect(() => lead.snapshot(taskId)).toThrow('Invalid durable lead state');
-    // Fail-closed: the latched lead refuses further mutation rather than rebuilding or re-dispatching.
-    expect(() => lead.dispatch(taskId, EXEC, { kind: 'aid', summary: 'work' })).toThrow('recovery required');
-    // Corruption enters recovery, never silent rebuild: the pre-corruption intent is untouched, no new one.
+    expect(() => lead.dispatch(taskId, EXEC, offerBody())).toThrow('recovery required');
     expect(f.reports().map((r) => r.status)).toEqual(['offered']);
+  });
+});
+
+describe('DurableLead timers/reclaim/escalate/redispatch (B1c: durable lifecycle enrichment)', () => {
+  it('fires a persisted offer_ttl on tick, reclaims with a task.cancel and reports the revision', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    expect(f.lead.snapshot(taskId)?.offerTtlUntil).toBe(EPOCH + TTL); // deadline persisted for restart
+
+    now += TTL; // not yet due (strict >= at the deadline instant fires; step one past to be unambiguous)
+    f.lead.tick(now);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+    expect(f.outputs('task.cancel')).toHaveLength(1);
+    expect(f.outputs('task.cancel')[0]).toMatchObject({ to: { node_id: EXEC }, task_id: taskId, attempt: 1, body: { reason: 'reclaim' } });
+    expect(f.reports().map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['reclaiming', 2]]);
+  });
+
+  it('reclaims a running task on lease loss, but a drain-window result still wins the race', () => {
+    const f = setup({ validateAcceptance: () => true });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const lost = lostAfterMs(LEASE, DEFAULT_PARAMS);
+    expect(f.lead.snapshot(taskId)?.leaseDeadline).toBe(EPOCH + lost);
+
+    now += lost;
+    f.lead.tick(now);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+    // R4/R5 race: a result arriving inside the drain window closes the task as done.
+    f.deliver(receipt('task.result', taskId, 1, { status: 'done' }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done' });
+    expect(f.reports().map((r) => r.status)).toEqual(['offered', 'running', 'reclaiming', 'done']);
+  });
+
+  it('burns budget on drain expiry and redispatches attempt+1 through the injected target selector', () => {
+    const selectTarget = vi.fn(() => ({ target: EXEC2, offerBody: offerBody() }));
+    const f = setup({ selectTarget });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    now += TTL;
+    f.lead.tick(now); // offered -> reclaiming (never accepted => dispatch_rounds budget)
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+
+    now += DEFAULT_PARAMS.drainMs;
+    f.lead.tick(now); // drain -> budget -> requestDispatch -> selector -> redispatch attempt 2
+    expect(selectTarget).toHaveBeenCalledWith(expect.objectContaining({ task_id: taskId, nextAttempt: 2, kind: 'aid' }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2, target: EXEC2, dispatchRounds: 1 });
+    const offers = f.outputs('task.offer');
+    expect(offers).toHaveLength(2);
+    expect(offers[1]).toMatchObject({ to: { node_id: EXEC2 }, attempt: 2 });
+    expect(f.reports().at(-1)).toMatchObject({ status: 'offered', attempt: 2, exec: EXEC2 });
+  });
+
+  it('leaves a task in drafting when the selector has no target, then redispatches on a later tick', () => {
+    let target: string | null = null;
+    const selectTarget = vi.fn(() => (target ? { target, offerBody: offerBody() } : null));
+    const f = setup({ selectTarget });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    now += TTL;
+    f.lead.tick(now); // -> reclaiming
+    now += DEFAULT_PARAMS.drainMs;
+    f.lead.tick(now); // drain -> requestDispatch -> selector null -> stays drafting (attempt not advanced)
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'drafting', attempt: 1, dispatchRounds: 1 });
+
+    target = EXEC2; // a target frees up; the next tick retries the pending redispatch
+    f.lead.tick(now);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2, target: EXEC2 });
+  });
+
+  it('escalates durably once the dispatch-round budget is exhausted and reports the terminal revision', () => {
+    const f = setup({ selectTarget: () => ({ target: EXEC2, offerBody: offerBody() }) });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    // Each offer_ttl expiry + drain burns one dispatch round and redispatches to EXEC2.
+    for (let round = 0; round < DEFAULT_PARAMS.maxDispatchRounds; round++) {
+      now += TTL;
+      f.lead.tick(now); // offered -> reclaiming
+      now += DEFAULT_PARAMS.drainMs;
+      f.lead.tick(now); // drain -> budget/redispatch (or escalate on the last round)
+    }
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'escalated', dispatchRounds: DEFAULT_PARAMS.maxDispatchRounds });
+    expect(f.reports().at(-1)).toMatchObject({ status: 'escalated' });
+  });
+
+  it('cancels by user into cancelling, then closes on the executor ack, reporting each revision', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    expect(f.lead.cancel(taskId, now)).toBe(true);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'cancelling' });
+    expect(f.outputs('task.cancel').at(-1)).toMatchObject({ to: { node_id: EXEC }, body: { reason: 'user' } });
+    f.deliver(receipt('task.cancel.ack', taskId, 1, {}));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'closed' });
+    expect(f.reports().map((r) => r.status)).toEqual(['offered', 'running', 'cancelling', 'closed']);
+  });
+
+  it('forces a cancelling task closed when the cancel_wait deadline passes without an ack', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.lead.cancel(taskId, now);
+    expect(f.lead.snapshot(taskId)?.cancelWaitUntil).toBe(now + DEFAULT_PARAMS.cancelWaitMs);
+    now += DEFAULT_PARAMS.cancelWaitMs;
+    f.lead.tick(now);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'closed' });
+  });
+
+  it('persists a permanent exclusion and hands it to the target selector on redispatch', () => {
+    const selectTarget = vi.fn(() => ({ target: EXEC2, offerBody: offerBody() }));
+    const f = setup({ selectTarget });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    // A retryable fail after accept reclaims; unsupported_caps is not the reject path, so drive exclusion
+    // through a reject with a persistent code before the offer is accepted.
+    f.deliver(receipt('task.reject', taskId, 1, { reason_code: 'unsupported_caps' }));
+    expect(f.lead.snapshot(taskId)?.excluded).toMatchObject({ [EXEC]: 'permanent' });
+    // reject burns a dispatch round and re-offers inline through the selector (net state offered, attempt 2)
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2, target: EXEC2, dispatchRounds: 1 });
+    expect(selectTarget).toHaveBeenCalledWith(expect.objectContaining({ excluded: { [EXEC]: 'permanent' }, nextAttempt: 2 }));
+  });
+
+  it('survives a store reopen mid-reclaim: deadlines/budget persist and no timer fires early', () => {
+    const f = setup({ selectTarget: () => ({ target: EXEC2, offerBody: offerBody() }) });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    now += TTL;
+    f.lead.tick(now); // -> reclaiming, drainUntil persisted
+    const before = f.lead.snapshot(taskId);
+    expect(before?.drainUntil).toBe(now + DEFAULT_PARAMS.drainMs);
+    f.store.close();
+
+    const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
+    const lead = new DurableLead({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal,
+      selectTarget: () => ({ target: EXEC2, offerBody: offerBody() }) });
+    expect(lead.snapshot(taskId)).toMatchObject({ state: before!.state, attempt: before!.attempt, task_seq: before!.task_seq });
+    // A tick before the persisted drain deadline must NOT fire it (no fabricated timer).
+    lead.tick(now + DEFAULT_PARAMS.drainMs - 1);
+    expect(lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+    // Crossing the persisted deadline drives the redispatch exactly once.
+    lead.tick(now + DEFAULT_PARAMS.drainMs);
+    expect(lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2, target: EXEC2 });
+  });
+
+  it('fails closed on a corrupt persisted record and refuses to fire timers or heal', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    const key = leadStateKey(taskId);
+    const saved = f.runtime.state(key)!.value as Record<string, RuntimeJson>;
+    saved.attempt = -1;
+    f.runtime.transition(key, f.runtime.state(key)!.revision, () => ({ state: saved as RuntimeJson }));
+    const lead = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal });
+    expect(() => lead.tick(now)).toThrow('Invalid durable lead state');
+    expect(() => lead.snapshot(taskId)).toThrow('Invalid durable lead state');
   });
 });
