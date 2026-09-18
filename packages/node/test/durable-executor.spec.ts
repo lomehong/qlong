@@ -551,7 +551,7 @@ describe('DurableExecutor single slot on real temporary SQLite', () => {
     const input = offer();
     f.deliver(input);
     const saved = f.executor.snapshot();
-    saved.last = { fence: saved.slot!.fence, lead: SENDER, outcome: result };
+    saved.last = { fence: saved.slot!.fence, lead: SENDER, outcome: structuredClone(result) };
     saved.slot = null;
     const corrupted = saved as unknown as RuntimeJson;
     corruptField(corrupted, path, value);
@@ -750,5 +750,75 @@ describe('DurableExecutor single slot on real temporary SQLite', () => {
     await f.executor.settle();
     expect(f.executor.snapshot().slot).toBeNull();
     expect(f.outputs('task.cancel.ack')).toHaveLength(1);
+  });
+});
+
+describe('DurableExecutor 单 exec 归属仲裁(C2b: 接管 fence 后陈旧 lead offer/control 被拒)', () => {
+  it('fence 抬升 attempt 后拒绝被取代 lead 的陈旧 attempt offer,并放行更高 attempt', async () => {
+    const f = await setup();
+    const taskId = newId();
+    // 接管后的新 lead(OTHER)以 fence 抬升的 attempt=2 重派,运行并结算。
+    const fenced = offer({ task_id: taskId, attempt: 2, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } });
+    f.deliver(fenced);
+    await f.executor.settle();
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.executor.snapshot()).toMatchObject({
+      generation: 1, slot: null, last: { fence: { task_id: taskId, attempt: 2 }, lead: OTHER },
+    });
+    // 被取代的旧 lead(SENDER)迟到重放 attempt=1 与相等的 attempt=2:皆 stale_attempt 且不可重试。
+    f.deliver(offer({ task_id: taskId, attempt: 1 }));
+    f.deliver(offer({ task_id: taskId, attempt: 2 }));
+    const rejects = f.outputs('task.reject');
+    expect(rejects.map((e) => e.body.reason_code)).toEqual(['stale_attempt', 'stale_attempt']);
+    expect(rejects.every((e) => e.body.retryable === false)).toBe(true);
+    expect(f.executor.snapshot().slot).toBeNull();
+    expect(f.driver.start).toHaveBeenCalledTimes(1); // 陈旧 attempt 绝不二次执行
+    // 真正更高的 attempt(下一轮 fence)仍可被接纳,generation 单调推进。
+    f.deliver(offer({ task_id: taskId, attempt: 3, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(f.executor.snapshot().slot).toMatchObject({ fence: { task_id: taskId, attempt: 3, generation: 2 }, lead: OTHER });
+  });
+
+  it('忽略非当前 lead/attempt 的取消控制,而真正属主仍可取消(守卫基于身份而非一律拒绝)', async () => {
+    const f = await setup();
+    const input = offer(); // from SENDER, attempt=1
+    f.deliver(input);
+    await f.executor.settle();
+    expect(f.executor.snapshot().slot?.phase).toBe('running');
+    const before = f.executor.snapshot();
+    const outbox = f.runtime.all();
+    // 同队但非属主的 lead(OTHER)即便精确命中 task_id/attempt 也不能取消该运行。
+    f.deliver({ ...control(input, 'task.cancel'), from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } });
+    // 当前 lead 针对被 fence 取代的 attempt(2≠1)同样被忽略。
+    f.deliver({ ...control(input, 'task.cancel'), attempt: 2 });
+    expect(f.executor.snapshot()).toEqual(before); // 运行未受影响:仍 running,无 stopping,无 cancel.ack
+    expect(f.runtime.all()).toEqual(outbox);
+    // 反证:真正属主(SENDER, attempt=1)的取消照常生效,证明守卫基于身份而非把取消整体禁用。
+    f.deliver(control(input, 'task.cancel'));
+    expect(f.executor.snapshot().slot?.phase).toBe('stopping');
+  });
+
+  it('单槽串行归属:在途运行期间被 fence 的更高 attempt offer 得 busy(可重试),结算后方可接管', async () => {
+    const f = await setup();
+    const taskId = newId();
+    const first = offer({ task_id: taskId, attempt: 1 }); // 旧 lead SENDER
+    f.deliver(first);
+    await f.executor.settle();
+    expect(f.executor.snapshot().slot).toMatchObject({ fence: { task_id: taskId, attempt: 1, generation: 1 }, lead: SENDER });
+    // 后继 lead 的 fence offer 无法抢占在途单槽 → busy(可重试),归属不变。
+    f.deliver(offer({ task_id: taskId, attempt: 2, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(f.outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'busy', retryable: true });
+    expect(f.executor.snapshot().slot!.lead).toBe(SENDER);
+    // 旧运行结算 → last 记录 SENDER/attempt=1。
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.executor.snapshot()).toMatchObject({ generation: 1, slot: null, last: { fence: { attempt: 1 }, lead: SENDER } });
+    // 后继 lead 抬升 attempt 后重派(attempt=3,与 busy 那发 attempt=2 不同 → 不触发 R1 去重)→ 接纳、
+    // generation 单调推进(1→2)、归属移交 OTHER;accept 路由到新 lead。
+    f.deliver(offer({ task_id: taskId, attempt: 3, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(f.executor.snapshot().slot).toMatchObject({ fence: { task_id: taskId, attempt: 3, generation: 2 }, lead: OTHER });
+    expect(f.outputs('task.accept').at(-1)!.to).toMatchObject({ node_id: OTHER });
   });
 });
