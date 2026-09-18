@@ -1,9 +1,10 @@
 /**
  * FencedProcessDriver:把 harness 命令执行包装成 FencedDriver(RunHandle 协议)。
- * 一次 headless 进程 = 一个 fence 精确的 Run;句柄只存活于本进程,
- * recover 无法跨重启证明静默 → 一律 'unknown',由 DurableExecutor 安全转为
- * recovery_required(recover 绝不重放 start)。这是"受信内嵌驱动"的 fence 语义,
- * 不是进程/产物隔离(见 docs/repair/PROTOCOL-V2.md)。
+ * 一次 headless 进程 = 一个 fence 精确的 Run。注入 RunHandleStore 后,句柄(fence→pid+
+ * 启动证据)落盘、跨驱动重启存活:recover 据持久 pid 探测——pid 已释放即证明该精确
+ * fence 静默 → 'stopped';pid 仍存活则无法跨平台核验身份(防 PID 复用误杀)→ 'unknown',
+ * 由 DurableExecutor 安全转为 recovery_required(recover 绝不重放 start)。未注入端口时
+ * 退回恒 'unknown'。这是"受信内嵌驱动"的 fence 语义,不是进程/产物隔离(见 PROTOCOL-V2.md)。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { buildHarnessCommand, composeTaskPrompt, type HarnessDriverOptions } from './harness-driver.js';
@@ -35,6 +36,25 @@ interface LiveProc {
 
 function failed(summary: string, retryable = false): RunOutcome {
   return { kind: 'failed', body: { reason_code: 'other', retryable, summary } };
+}
+
+/** 精确 fence 相等(四段全等):防止把不同 attempt/generation/run_id 的 run 混为一谈。 */
+function sameFence(a: Readonly<RunFence>, b: Readonly<RunFence>): boolean {
+  return a.task_id === b.task_id && a.attempt === b.attempt &&
+    a.generation === b.generation && a.run_id === b.run_id;
+}
+
+/**
+ * process.kill(pid, 0) 抛 ESRCH = 该 pid 已释放:我们记录的进程确已退出,且 pid 未被
+ * 复用(复用会使 pid 存活 → 探测成功)。EPERM/其它错误 = 进程存在但不可信号,保守视为未消失。
+ */
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
 }
 
 /**
@@ -160,10 +180,17 @@ export class FencedProcessDriver implements FencedDriver {
     });
   };
 
-  /** 一次性进程无跨重启句柄:永远无法证明静默。 */
-  recover = async (_fence: Readonly<RunFence>): Promise<'stopped' | 'unknown'> => {
-    void _fence;
-    return 'unknown';
+  /**
+   * C1b:据持久句柄把恒 'unknown' 收敛为可判定。仅当记录的 pid 已释放(processGone)才可
+   * 证明该精确 fence 的进程已退出且未被复用 → 'stopped'。pid 仍占用时无法跨平台核验身份
+   * (PID 可能被无关进程复用),绝不杀不可证进程 → 'unknown'(fail-closed 交运维)。无端口 /
+   * 无句柄 / fence 不符 / pid 非法 → 'unknown'。
+   */
+  recover = async (fence: Readonly<RunFence>): Promise<'stopped' | 'unknown'> => {
+    const handle = this.opts.runHandles?.load(fence);
+    if (!handle || !sameFence(handle.fence, fence) ||
+        !Number.isInteger(handle.pid) || handle.pid <= 0) return 'unknown';
+    return processGone(handle.pid) ? 'stopped' : 'unknown';
   };
 
   /** 宿主硬退出兜底:终止所有未静默进程(不影响执行器事务状态)。 */

@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import { newId } from '@qlong/core';
 import { FencedProcessDriver } from '../src/driver/fenced-driver.js';
@@ -24,6 +25,17 @@ function recordingStore() {
     },
     clear(fence: Readonly<RunFence>): void { cleared.push(fence); },
   } satisfies RunHandleStore & { recorded: PersistedRunHandle[]; cleared: RunFence[]; setFailRecord(v: boolean): void };
+}
+
+/** C1b:spawn 一个立即退出的子进程,await 其 close 后返回已释放的 pid(孤儿已退出的重启场景)。 */
+async function exitedChildPid(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(node, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    if (child.pid === undefined) { reject(new Error('spawn 未返回 pid')); return; }
+    const pid = child.pid;
+    child.on('error', reject);
+    child.on('close', () => resolve(pid));
+  });
 }
 
 describe('FencedProcessDriver(RunHandle 协议包装)', () => {
@@ -99,7 +111,7 @@ describe('FencedProcessDriver(RunHandle 协议包装)', () => {
     expect(workdir).toBe('C:/definitely-unused-cwd-marker');
   });
 
-  it('recover 永远 unknown(一次性进程无跨重启句柄)', async () => {
+  it('未注入持久句柄端口 → recover unknown(无跨重启证据可核验)', async () => {
     const d = new FencedProcessDriver({});
     await expect(d.recover(fence())).resolves.toBe('unknown');
   });
@@ -174,5 +186,43 @@ describe('FencedProcessDriver run-handle 持久化(C1a)', () => {
     const outcome = await (await d.start(fence(), offer())).closed;
     expect(outcome.kind).toBe('result');
     expect(String((outcome.body as { summary?: string }).summary)).toContain('compat-marker');
+  });
+});
+
+describe('FencedProcessDriver recover 判定矩阵(C1b)', () => {
+  it('持久句柄 pid 已释放(孤儿已退出)→ stopped,跨重启证明静默', async () => {
+    const store = recordingStore();
+    const f = fence();
+    // 模拟"上一驱动实例落盘句柄后崩溃、孤儿进程随后退出":新实例只余持久句柄。
+    store.record({ fence: f, pid: await exitedChildPid(), startedAt: Date.now() });
+    const restarted = new FencedProcessDriver({ runHandles: store });
+    await expect(restarted.recover(f)).resolves.toBe('stopped');
+  });
+
+  it('持久句柄 pid 仍存活(PID 复用不可证)→ unknown,绝不杀不可证进程', async () => {
+    const store = recordingStore();
+    const d = new FencedProcessDriver({
+      runHandles: store,
+      commandLine: () => ({ cmd: node, args: ['-e', 'setInterval(() => {}, 1000)'] }),
+    });
+    const f = fence();
+    const h = await d.start(f, offer()); // 记录一个活 pid
+    expect(store.recorded).toHaveLength(1);
+    await expect(d.recover(f)).resolves.toBe('unknown');
+    await h.stop();
+  });
+
+  it('端口在但从未记录该 fence → unknown', async () => {
+    const d = new FencedProcessDriver({ runHandles: recordingStore() });
+    await expect(d.recover(fence())).resolves.toBe('unknown');
+  });
+
+  it('句柄 fence 与查询 fence 不符(仅 run_id 同)→ unknown(精确 fence 守卫)', async () => {
+    const store = recordingStore();
+    const recorded = fence();
+    store.record({ fence: recorded, pid: await exitedChildPid(), startedAt: Date.now() });
+    const d = new FencedProcessDriver({ runHandles: store });
+    const impostor = { ...recorded, attempt: recorded.attempt + 1 };
+    await expect(d.recover(impostor)).resolves.toBe('unknown');
   });
 });
