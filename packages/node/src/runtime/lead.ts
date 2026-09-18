@@ -35,6 +35,27 @@ export interface DurableLeadTask extends LeadRecord {
   task_seq: number;
 }
 
+/**
+ * 跨机牵头接管 bundle(C2a;v1 lead/takeover.ts 的持久端口,01 §4.4 / 评审 I-35)。
+ * 携带每个牵头任务的持久快照(含 attempt 高水位 + task_seq),供导入方 fence 与序号续接。
+ */
+export interface DurableLeadTakeoverBundle {
+  v: 1;
+  exported_at: string;
+  /** 导入前必须停止原机 qlong(操作纪律;导入侧再以 attempt 高水位兜底防双主回退)。 */
+  requires_origin_stopped: true;
+  tasks: Array<{ task_id: string; task: DurableLeadTask }>;
+}
+
+export interface DurableLeadImportResult {
+  /** fence 后归位 drafting、待重派的在途任务(含从未派发的 attempt=0)。 */
+  imported: string[];
+  /** 本地 attempt 高水位 ≥ 导入 → 跳过(禁双主回退)。 */
+  fenced: string[];
+  /** 已是终态、仅归档不接管重跑。 */
+  archived: string[];
+}
+
 export interface RedispatchRequest {
   task_id: string;
   /** 机器请求的下一轮次(= 当前 attempt + 1)。 */
@@ -290,6 +311,67 @@ export class DurableLead {
           state: result.value as unknown as RuntimeJson, outbox: result.outbox, effects: result.effects,
         }));
       }
+    });
+  }
+
+  /**
+   * 导出本节点牵头的全部任务为跨机接管 bundle(含 attempt 高水位 + task_seq)。
+   * 任一任务状态损坏即 fail-closed(抛出),绝不导出半损坏现场。
+   */
+  exportTasks(exportedAt: Date = new Date()): DurableLeadTakeoverBundle {
+    return this.checked(() => {
+      this.assertHealthy();
+      const tasks: Array<{ task_id: string; task: DurableLeadTask }> = [];
+      for (const row of this.opts.store.states(LEAD_STATE_PREFIX)) {
+        const task = this.decode(row); // 损坏 → 抛出(fail-closed)
+        if (task) tasks.push({ task_id: task.task_id, task });
+      }
+      return { v: 1, exported_at: exportedAt.toISOString(), requires_origin_stopped: true, tasks };
+    });
+  }
+
+  /**
+   * 导入 + fence(C2a;v1 lead/takeover.ts 的持久端口,01 §4.4 / 评审 I-35):逐任务按 attempt
+   * 高水位仲裁——本地 ≥ 导入 → fenced(禁双主回退);终态 → archived(不重跑);在途 → attempt+1
+   * 归位 drafting(旧执行方迟到消息即刻 R0 stale_attempt),task_seq 原样保留供序号单调续接;
+   * 从未派发(attempt=0,无在途执行权)→ 原样导入待派发。损坏 bundle 或本地状态一律 fail-closed,
+   * 绝不静默跳过、伪造推进或删除现场。导入不产上报:接管后首条修订由后续 tick 重派时续接 task_seq。
+   */
+  importTasks(bundle: DurableLeadTakeoverBundle): DurableLeadImportResult {
+    return this.checked(() => {
+      this.assertHealthy();
+      if (!record(bundle) || bundle.v !== 1 || !Array.isArray(bundle.tasks)) {
+        throw new Error('takeover: 不支持的 bundle;拒绝导入');
+      }
+      const result: DurableLeadImportResult = { imported: [], fenced: [], archived: [] };
+      for (const entry of bundle.tasks) {
+        // 严格校验入站任务(结构 + 跨字段不变量);非法即拒绝整批导入,绝不据坏数据伪造接管。
+        if (!record(entry) || !validTask(entry.task)) {
+          throw new Error('takeover: bundle 任务损坏或非法;拒绝导入(绝不静默跳过或伪造)');
+        }
+        const task = entry.task;
+        const stateKey = leadStateKey(task.task_id);
+        const row = this.opts.store.state(stateKey);
+        if (row) {
+          const local = this.decode(row); // 本地损坏 → 抛出(fail-closed)
+          // fence:本地高水位 ≥ 导入 → 拒绝回退(禁双主);相等亦跳过(本地可能已续跑到更高序号)。
+          if (local && local.attempt >= task.attempt) { result.fenced.push(task.task_id); continue; }
+        }
+        if (TERMINAL_STATES.includes(task.state)) {
+          // 终态归档,接管不重跑;origin 侧上报早已投递,导入不重复产修订。
+          this.opts.store.transition(stateKey, row?.revision ?? 0, () => ({ state: task as unknown as RuntimeJson }));
+          result.archived.push(task.task_id);
+          continue;
+        }
+        // 在途 fence:attempt≥1 → 高水位 +1 归位 drafting(保留 target,满足 validTask 且旧执行权即刻 stale);
+        // attempt=0(从未派发,无 target)→ 原样导入,由后续 dispatch 起 attempt=1,避免越界伪造 target。
+        const fenced: DurableLeadTask = task.attempt === 0
+          ? task
+          : { ...task, attempt: task.attempt + 1, state: 'drafting' };
+        this.opts.store.transition(stateKey, row?.revision ?? 0, () => ({ state: fenced as unknown as RuntimeJson }));
+        result.imported.push(task.task_id);
+      }
+      return result;
     });
   }
 
