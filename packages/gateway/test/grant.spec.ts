@@ -28,7 +28,7 @@ const lookupDir: DirectoryLookup = {
 };
 
 function connFor(nodeId: string, teamId: string): GatewayConnection {
-  return { connId: 'c-' + nodeId, nodeId, teamId, connectedAt: 0 };
+  return { connId: 'c-' + nodeId, nodeId, teamId, connectedAt: 0, generation: 0 };
 }
 
 function mkEnvelope(

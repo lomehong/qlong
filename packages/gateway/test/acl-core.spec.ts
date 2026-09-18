@@ -45,8 +45,8 @@ function envelope(over: Record<string, unknown> = {}, body: Record<string, unkno
 function connectedCore(): GatewayCore {
   const core = new GatewayCore();
   core.setDirectory(snapshot());
-  core.connect({ connId: 'c1', nodeId: B, teamId: TEAM_X, connectedAt: 0 });
-  core.connect({ connId: 'c2', nodeId: C, teamId: TEAM_X, connectedAt: 0 });
+  core.connect({ connId: 'c1', nodeId: B, teamId: TEAM_X, connectedAt: 0, generation: 0 });
+  core.connect({ connId: 'c2', nodeId: C, teamId: TEAM_X, connectedAt: 0, generation: 0 });
   return core;
 }
 
@@ -70,7 +70,7 @@ describe('A0 from 钉扎(D27/A6:伪造静默,无回执)', () => {
 
   it('纯 ACL 裁决函数同判(与 core 引擎一致)', () => {
     const v = evaluateUplink({
-      conn: { connId: 'c', nodeId: B, teamId: TEAM_X, connectedAt: 0 },
+      conn: { connId: 'c', nodeId: B, teamId: TEAM_X, connectedAt: 0, generation: 0 },
       head: {
         ...envelope({ from: { node_id: A, team_id: TEAM_X, key_epoch: 1 } }),
         envelope: envelope({ from: { node_id: A, team_id: TEAM_X, key_epoch: 1 } }),
@@ -130,14 +130,14 @@ describe('A2 与管理断连(A6 close code)', () => {
   it('applyAdminEvent:revoke → 4002 断连;suspend → 4001;断连后 uplink 静默', () => {
     const core = connectedCore();
     core.disconnect(B);
-    core.connect({ connId: 'c-b', nodeId: B, teamId: TEAM_X, connectedAt: 0 });
+    core.connect({ connId: 'c-b', nodeId: B, teamId: TEAM_X, connectedAt: 0, generation: 0 });
     const closed = core.applyAdminEvent(B, 'revoked');
     expect(closed).toEqual([{ nodeId: B, code: 4002, status: 'revoked' }]);
     expect(core.isConnected(B)).toBe(false);
     const r = core.uplink(B, envelope(), 100);
     expect(r.ack).toBeUndefined(); // A6 静默
     const c2 = connectedCore();
-    c2.connect({ connId: 'c-b2', nodeId: B, teamId: TEAM_X, connectedAt: 0 });
+    c2.connect({ connId: 'c-b2', nodeId: B, teamId: TEAM_X, connectedAt: 0, generation: 0 });
     expect(c2.applyAdminEvent(B, 'suspended')).toEqual([{ nodeId: B, code: 4001, status: 'suspended' }]);
   });
 });
@@ -174,7 +174,7 @@ describe('回执帧与收件箱(01 §9/评审 I-11)', () => {
     core.uplink(B, envelope(), 100);
     // 虚拟时钟下的「过期」:exp 为极小绝对时刻,now=700_000 > exp + 漂移预算(600_000)
     core.uplink(B, envelope({ exp: '1970-01-01T00:00:01Z' }), 100);
-    core.connect({ connId: 'c3', nodeId: C, teamId: TEAM_X, connectedAt: 200 });
+    core.connect({ connId: 'c3', nodeId: C, teamId: TEAM_X, connectedAt: 200, generation: 0 });
     const t = core.takeInbox(C, 700_000);
     expect(t.deliveries).toHaveLength(1);
     expect(t.audits).toHaveLength(1);

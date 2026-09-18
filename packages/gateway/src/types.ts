@@ -26,6 +26,8 @@ export interface GatewayConnection {
   nodeId: string;
   teamId: string;
   connectedAt: number;
+  /** D1a:claim fencing token(每 nodeId 单调);跨进程归属仲裁用,单 authority 亦携带(设计 CLUSTER-REGISTRY §4.5)。 */
+  generation: number;
 }
 
 /**

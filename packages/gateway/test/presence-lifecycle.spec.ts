@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { GatewayCore } from '../src/core.js';
 import { AUTH_KEY, WsGateway, type WsGatewayOptions } from '../src/ws.js';
+import { LocalClaimRegistry } from '../src/claim.js';
 import { waitFor } from './wait.js';
 
 const node = { node_id: 'presence-node', team_id: 'presence-team', status: 'active' };
@@ -140,6 +141,31 @@ describe('WsGateway single-instance presence lifecycle', () => {
     expect(fixture.presence.map((event) => [event.online, event.connId])).toEqual([
       [true, fixture.presence[0]!.connId], [true, connId], [false, connId],
     ]);
+  });
+
+  it('claims a monotonic generation on connect, increments on reconnect, releases on disconnect (D1a)', async () => {
+    const claimRegistry = new LocalClaimRegistry();
+    const fixture = makeGateway({ claimRegistry, authorityId: 'gwA' });
+    const port = await fixture.gateway.listen();
+    const first = await connect(fixture.gateway, port);
+    first.sendAuth();
+    await first.waitForFrame('auth_ok');
+    // 连接携带 generation;claim 注册表登记现归属(单 authority 首认领 = gen 1)
+    expect(fixture.core.connections.get(node.node_id)!.generation).toBe(1);
+    expect(claimRegistry.lookup(node.node_id)).toEqual({ nodeId: node.node_id, authorityId: 'gwA', generation: 1 });
+
+    // 重连:新连接超越旧(M2-03 踢旧),generation 单调 +1
+    const second = await connect(fixture.gateway, port);
+    second.sendAuth();
+    await second.waitForFrame('auth_ok');
+    expect(fixture.core.connections.get(node.node_id)!.generation).toBe(2);
+    expect(claimRegistry.lookup(node.node_id)?.generation).toBe(2);
+
+    // 断连:当前连接释放 claim(被踢的旧连接经 M2-03 守卫不释放)
+    second.ws.close();
+    await second.serverClosed;
+    expectOffline(fixture);
+    expect(claimRegistry.lookup(node.node_id)).toBeUndefined();
   });
 
   it.each([{ status: 'suspended', code: 4001 }, { status: 'revoked', code: 4002 }])(

@@ -19,6 +19,7 @@ import type { GatewayCore } from './core.js';
 import type { GatewayDirectorySnapshot } from './types.js';
 import type { GatewayCluster } from './cluster.js';
 import type { SqliteCustodyStore } from './custody-store.js';
+import { LocalClaimRegistry, type ClaimRegistry } from './claim.js';
 
 export const AUTH_KEY = 'node_' + 'token';
 // Allow framing overhead without accepting arbitrarily large JSON or send queues.
@@ -44,6 +45,10 @@ export interface WsGatewayOptions {
   cluster?: GatewayCluster;
   /** 02 §12.1 总线:集群共享密钥(设置后本 server 暴露 POST /internal/envelope 中继端点) */
   clusterSecret?: string;
+  /** D1:连接 claim 注册表(generation 归属仲裁);缺省单 authority 内存实现(LocalClaimRegistry)。 */
+  claimRegistry?: ClaimRegistry;
+  /** D1:本网关进程稳定标识(claim 归属方);缺省 'gw1'。生产须传唯一值(如 clusterName)。 */
+  authorityId?: string;
 }
 
 interface RegistryLike {
@@ -55,6 +60,8 @@ interface ConnState {
   ws: WebSocket;
   nodeId: string;
   connId: string;
+  /** D1a:本连接的 claim fencing token(claim 时分配;disconnect 时据此 release)。 */
+  generation: number;
   ready: boolean;
   /** Opaque ticket → delivery, scoped to this authenticated connection only. */
   inflight: Map<string, { envelope: EnvelopeV1; digest: string; lastSentAt: number }>;
@@ -78,6 +85,9 @@ export class WsGateway {
   private retryTimer?: NodeJS.Timeout;
   private readonly retryIntervalMs: number;
   private readonly window: number;
+  /** D1:claim 注册表(generation 归属)+ 本进程 authorityId;缺省单 authority 内存实现。 */
+  private readonly claimRegistry: ClaimRegistry;
+  private readonly authorityId: string;
   private unavailable = false;
   private started = false;
   private closing = false;
@@ -96,6 +106,8 @@ export class WsGateway {
     }
     this.retryIntervalMs = opts.retryIntervalMs === undefined ? 1_000 : opts.retryIntervalMs;
     this.window = opts.window === undefined ? MAX_WINDOW : opts.window;
+    this.claimRegistry = opts.claimRegistry ?? new LocalClaimRegistry();
+    this.authorityId = opts.authorityId ?? 'gw1';
     if (!Number.isSafeInteger(this.retryIntervalMs) || this.retryIntervalMs < 1 || this.retryIntervalMs > 2_147_483_647) {
       throw new RangeError('retryIntervalMs must be a positive timer interval');
     }
@@ -197,10 +209,13 @@ export class WsGateway {
           }
           connId = newId();
           nodeId = node.node_id;
+          // D1a:认领归属(generation 单调 fencing token)——先于踢旧,新 generation 立即超越旧主。
+          // LocalClaimRegistry.claim 不抛;跨进程 SQLite 实现的 fail-closed 在 d1c 接线。
+          const generation = this.claimRegistry.claim(nodeId, this.authorityId).generation;
           // M2-03:同节点旧连接踢下线(新连接接管;旧 close 由守卫忽略)
           const oldConnId = this.currentConnByNode.get(nodeId);
           this.currentConnByNode.set(nodeId, connId);
-          const state: ConnState = { ws, nodeId, connId, ready: false, inflight: new Map() };
+          const state: ConnState = { ws, nodeId, connId, generation, ready: false, inflight: new Map() };
           this.socketsByConn.set(connId, state);
           if (oldConnId !== undefined) {
             const old = this.socketsByConn.get(oldConnId);
@@ -211,7 +226,7 @@ export class WsGateway {
             }
           }
           try {
-            this.opts.core.connect({ connId, nodeId, teamId: node.team_id, connectedAt: Date.now() });
+            this.opts.core.connect({ connId, nodeId, teamId: node.team_id, connectedAt: Date.now(), generation });
             this.opts.onPresenceChange?.(nodeId, true, connId);
             // 回调可能同步触发管理断连或关闭;不得再确认认证成功。
             if (this.closing || this.currentConnByNode.get(nodeId) !== connId || ws.readyState !== WebSocket.OPEN) return;
@@ -433,6 +448,8 @@ export class WsGateway {
     if (this.currentConnByNode.get(nodeId) !== connId) return;
     this.currentConnByNode.delete(nodeId);
     this.opts.core.disconnect(nodeId);
+    // D1a:释放 claim(仅当前连接经 M2-03 守卫到达此处;被 fence 的旧 generation 由 release 内部拒绝)。
+    if (state) this.claimRegistry.release(nodeId, this.authorityId, state.generation);
     try {
       this.opts.onPresenceChange?.(nodeId, false, connId);
     } catch {
