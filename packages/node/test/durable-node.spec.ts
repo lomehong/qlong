@@ -424,5 +424,52 @@ describe('DurableNode v2 lead role + persistent projection (B1d)', () => {
   });
 });
 
+describe('DurableNode v2 cross-machine lead takeover (C2d)', () => {
+  const ledOffer = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    ({ kind: 'aid', summary: 'led task', offer_ttl_ms: 30_000, lease_ms: 60_000, ...over });
+
+  it('takeover() imports+fences the origin bundle and immediately re-offers at the fenced attempt, without waiting for the periodic pump', async () => {
+    // Origin leads a task to 'running' (attempt 1, task_seq 2), then exports a takeover bundle.
+    const of = await fixture({ onFrame: autoStored });
+    const originSink = vi.fn(async (report: TaskReport) => ({ ok: true, status: 200, report }));
+    const origin = await of.makeNode({ taskReportSink: originSink, validateAcceptance: () => true });
+    await origin.start();
+    const taskId = newId();
+    expect(origin.lead.originate(taskId, 'aid')).toBe(true);
+    expect(origin.lead.dispatch(taskId, of.peerId, ledOffer())).toBe(true);
+    await wait(() => expect(of.sent('task.offer')).toHaveLength(1));
+    of.send(delivery(of.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(origin.lead.snapshot(taskId)).toMatchObject({ state: 'running', attempt: 1, task_seq: 2 }));
+    const bundle = origin.lead.exportTasks();
+
+    // A different node takes over. Its periodic pump is suppressed (large tickIntervalMs), so any
+    // re-offer / center projection observed below is driven by takeover() itself, not the background tick.
+    const EXEC = newId();
+    const targetReports: TaskReport[] = [];
+    const targetSink = vi.fn(async (report: TaskReport) => { targetReports.push(report); return { ok: true, status: 200 }; });
+    const tf = await fixture({ onFrame: autoStored });
+    const target = await tf.makeNode({
+      taskReportSink: targetSink, validateAcceptance: () => true,
+      tickIntervalMs: 60_000, // suppress the periodic pump: isolate takeover's own tick + flush
+      selectTarget: () => ({ target: EXEC, offerBody: ledOffer({ summary: 'redispatched' }) }),
+    });
+    await target.start();
+
+    const result = target.takeover(bundle);
+    expect(result.imported).toEqual([taskId]); // in-flight 'running' fenced to attempt 2 drafting, then re-offered
+    expect(result.fenced).toEqual([]);
+    expect(result.archived).toEqual([]);
+
+    // takeover() immediately re-dispatched (attempt 2 -> 3) and flushed the offer to the gateway.
+    await wait(() => expect(tf.sent('task.offer')).toHaveLength(1));
+    expect(tf.sent('task.offer')[0]).toMatchObject({ task_id: taskId, attempt: 3, to: { node_id: EXEC } });
+    // ...and projected the new 'offered' revision to the center, continuing task_seq from the origin.
+    await wait(() => expect(targetReports.map((r) => [r.status, r.attempt, r.task_seq])).toEqual([['offered', 3, 3]]));
+    expect(target.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 3, task_seq: 3 });
+    // The taken-over task never engaged this node's executor slot.
+    expect(target.executor.snapshot().slot).toBeNull();
+  });
+});
+
 
 

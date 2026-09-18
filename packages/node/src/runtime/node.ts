@@ -21,7 +21,10 @@ import type { FencedDriver } from '../driver/run-handle.js';
 import { GatewayClient } from '../gateway-client.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { DurableExecutor } from './executor.js';
-import { DurableLead, leadStateKey, type TargetSelector } from './lead.js';
+import {
+  DurableLead, leadStateKey,
+  type DurableLeadImportResult, type DurableLeadTakeoverBundle, type TargetSelector,
+} from './lead.js';
 import { DurableTaskReporter, type TaskReportSink } from './report.js';
 import { NODE_SCHEMA } from './schema.js';
 import { NodeRuntimeStore } from './store.js';
@@ -108,6 +111,14 @@ export interface DurableNode {
   stop(): Promise<void>;
   /** 手动泵动:重授权并消费 pending 收件,推进 executor(测试/宿主用) */
   drain(): Promise<void>;
+  /**
+   * 跨机牵头接管(C2d):导入 origin 导出的 bundle 并按 attempt 高水位 fence(禁双主/终态归档),
+   * 随即驱动一次重派——归位 drafting 的在途任务经注入的 selectTarget 立即改派并 flush 新 offer 与
+   * 首条上报修订,无需等待下个周期泵。等价 v1 lead/takeover.ts importCheckpoints 的 onNeedDispatch
+   * 回调,但接线到持久泵。损坏 bundle/本地状态由 importTasks fail-closed;停机/故障时不触发重派/flush
+   * (导入已持久化,重派留待恢复后的周期泵)。
+   */
+  takeover(bundle: DurableLeadTakeoverBundle): DurableLeadImportResult;
   /** 底层 SQLite 句柄(宿主显式重开/诊断用;close 由 stop 负责) */
   readonly store: SqliteStore;
 }
@@ -356,6 +367,17 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     client,
     store,
     drain,
+    takeover: (bundle: DurableLeadTakeoverBundle): DurableLeadImportResult => {
+      // importTasks 内部对损坏 bundle / 本地状态 fail-closed(抛出并回调 onFault),绝不静默接管。
+      const result = lead.importTasks(bundle);
+      // 立即驱动一次重派(在途任务经 selectTarget 改派)+ flush 新 offer/上报,无需等待周期泵。
+      if (!stopped && !faulted) {
+        try { lead.tick(); } catch { /* 故障已闭锁:tick 内已 fail-closed 并回调 */ }
+        client.flush();
+        flushReports();
+      }
+      return result;
+    },
     start: async (): Promise<void> => {
       if (started) throw new Error('durable node already started');
       if (stopped) throw new Error('durable node is stopped');
