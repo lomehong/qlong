@@ -46,7 +46,7 @@
 - `receive` 只持久收件；`pending` 返回待消费条目；重启 auth_ok 会通知已有 pending，而非再次执行。
 - `consume` 在一个短事务内提交 inbox 决议、任务消息 dedup、state revision CAS、固定签名 outbox 和 effect intent。失败全回滚，回调不得进行网络、容器、Git 等外部 IO。
 - 启动及相关读/写路径验证摘要、规范化 JSON、身份、delivery/outbox 配对、状态修订及关联。损坏状态拒绝恢复；不能隐藏损坏 payload 后继续确认。
-- effect 由 `DurableExecutor` 以 RunHandle fence（task/attempt/generation/run_id）防陈旧完成；提交后由节点 pump 驱动 fenced driver（`FencedDriver`），`FencedProcessDriver` 提供进程级 start/stop 与恒为 unknown 的 recover（重启在跑任务 → recovery_required，绝不重放 start）。
+- effect 由 `DurableExecutor` 以 RunHandle fence（task/attempt/generation/run_id）防陈旧完成；提交后由节点 pump 驱动 fenced driver（`FencedDriver`）。`FencedProcessDriver` 提供进程级 start/stop；注入持久 `RunHandleStore` 后于 start 返回前落盘 fence→pid+启动证据，recover 据此可判定：所记录 pid 已释放（`ESRCH`）即证明该精确 fence 跨重启静默 → `stopped`（执行器安全 settle 为 `execution_interrupted`，绝不重放 start）；pid 仍存活或无法跨平台核验身份（防 PID 复用误杀）、无句柄、fence 不符 → `unknown`（fail-closed → recovery_required）。未注入端口时退回恒 `unknown`。
 - v2 不调用旧 `onEnvelope`；旧 `RemoteNodeSession` 构造时拒绝 v2 client。旧演示链路仅保留 delivered 续租兼容；stored/queued/rejected/receipt 都不续租。
 - 下一阶段须把实际 task reducer、计时器、命令、业务续租与恢复 pump 接入同事务，提交后执行 fenced intent。不能消费 inbox 后再异步写状态，也不能先开容器再补意图。
 
@@ -57,7 +57,8 @@
 - node `runtime-store.spec.ts`、`gateway-custody.spec.ts`、`session-custody-boundary.spec.ts`：事务与恢复损坏、收件失败不 receipt、stored 丢失/错误 ACK 不删、本地重复 send、串行验证、窗口/背压与会话阻断。
 - cli `server-custody.spec.ts`：正式中心 + 真实 Registry 验签 + 实际 client/runtime，中心/节点重开、接管与收件 COMMIT 故障、v1→v2 追加迁移保留原数据/校验和。
 - node `durable-node.spec.ts`：`createDurableNode` 全链 pump——v2 闭环（offer→accept→driver→result→stored 释放）、无 driver 拒单、重启 pending 重授权消费、验证失败留 pending 重试、cancel/租约到期、关停 flush、create/open 准入与身份不匹配拒绝、consume COMMIT 故障 fail-closed。
-- node `fenced-driver.spec.ts`：`FencedProcessDriver` 的 exit 0/非零、stop 静默、任务超时、spawn 失败、workdir 装配与恒 unknown 的 recover。
+- node `fenced-driver.spec.ts`：`FencedProcessDriver` 的 exit 0/非零、stop 静默、任务超时、spawn 失败、workdir 装配、run handle 落盘/清除，以及 recover 判定矩阵（持久 pid 已释放 → stopped；存活/无端口/无句柄/fence 不符/pid 非法 → unknown，防 PID 复用误判）。
+- node `run-handle-store.spec.ts`：`PersistentRunHandleStore`（`node_state` 单键 `runhandle:v2` 背书）record/load/clear 往返、精确 fence 隔离、墓碑复用、损坏值 fail-closed，以及句柄跨真实 SQLite 重开的 e2e（已退出孤儿 → recover stopped，存活孤儿 → recover unknown）；`durable-node.spec.ts` 另固化 driver 工厂形式装配（`createDurableNode` 用持久 runtime 解析工厂并接线执行器）。
 - node `durable-lease-loop.spec.ts`：B2 业务续租端到端闭环——牵头方 `DurableLead` 生产半与执行方 `DurableExecutor` 消费半经双独立 store + 手动中继信封互操作（offer→accept→跨心跳 progress→`task.lease.renew`→业务租约死线延长），并验证延长死线跨 store 重开持久（多网关接续的唯一事实基础）。生产半/消费半的单元边界另由 `durable-lead.spec.ts`（B2a）与 `durable-executor.spec.ts` 固化。
 - gateway `grant.spec.ts`：D2 跨队能力授权——`grantLookup` 返回活跃 grant 的 `caps_visible` 并集（`undefined` = 无 grant）；跨队派发强制 `required_caps ⊆ caps_visible`（复用 core `matchCaps`，§3.2/D31 单一实现防派发/执行语义分叉），覆盖/不覆盖、版本段语义、AND 全覆盖、`caps_visible` 空、畸形 `required_caps` fail-closed、无 grant 优先于 caps 判定。registry `directory.spec.ts` 的 `grantCaps` describe 固化并集/双向对称/过期失效/revoke 回落。
 - 本批接管集成是回环 WS/SQLite 重开及故障注入；不是双机、容器、真实模型、进程全链强杀或掉电验收。storage 包已有的子进程强杀测试不能代替这些验证。
@@ -66,9 +67,11 @@
 
 > 更正：上述“退出码 0”在提交时并不成立——`node/test/runtime-local.spec.ts` 的 2 项 state 列举用例实为失败。根因是 `node:sqlite` 读回 TEXT 列时在首个 NUL 字节处截断（库内字节完整，仅读回被截断），而 `NodeRuntimeStore` 契约允许 state key 含 embedded NUL。已在 `runtime/store.ts` 修复：所有 node_state 读取改走 `CAST(state_key AS BLOB)` 投影，`decodeState` 从 blob 精确还原 key。修复后按同一命令全仓 **1353 项通过、2 项平台跳过**，7 包类型检查通过，退出码 0。
 
+> C1（RunHandle/orphan 恢复产品化）收尾验证：`FencedProcessDriver` 注入持久 `RunHandleStore`（`PersistentRunHandleStore` 以 `node_state` 单键 `runhandle:v2` 背书，`createDurableNode` 用 driver 工厂形式装配），recover 由恒 `unknown` 收敛为可判定——已退出孤儿跨真实 SQLite 重开可证静默 → `stopped`（执行器安全 settle 为 `execution_interrupted`，绝不重放 start），存活孤儿因 PID 复用无法跨平台核验身份 → `unknown`（fail-closed）。按同一命令全仓 **1434 项通过、2 项平台跳过**，7 包类型检查通过，退出码 0。
+
 ## 仍待完成
 
-任务 pump：单 executor aid 闭环已接通（`createDurableNode` + `FencedProcessDriver`：offer→accept→progress 心跳→result/fail/lease_expired/cancel 全事务，重启 pending 逐条重授权消费，关停 flush 后断连；CLI `qlong run` 已接入并要求显式 create/open 存储）。**业务续租（B2）已端到端接通**：牵头方在 running 收到带 v2 fence 的 `task.progress` 时回发 `task.lease.renew`（生产半，`renewalSeq` 持久单调、重启对齐），执行方经 `canApplyLeaseRenewal` 绑定 fence 与 progress 身份后延长业务租约死线（消费半）；`lease-renewal` 能力位两端引用同一 `CUSTODY_FEATURES` 全量协商，陈旧对端缺此位即 4004。延长死线跨 store 重开持久，多网关/进程接续只读执行方持久 `leaseDeadline`，无需专门的网关租约逻辑。持久状态上报（`DurableTaskReporter` 经真实 HTTP 汇把牵头任务生命周期投影到中心）、投递结果查询 API（`GET /v1/nodes/me/deliveries/:msgId`，仅发送方可读）、保留窗口/tombstone GC（回收终态 stored 墓碑、绝不删 pending）亦已落地。**节点跨队能力授权（D2）已接通**：`GrantRecord.caps_visible` 从死字段变为执法依据——注册中心 `grantCaps(from,to)` 取活跃 grant 的 `caps_visible` 并集（双向对称、过期失效、无 grant → `undefined`），网关上行 ACL 跨队派发强制 `required_caps ⊆ caps_visible`（复用 core `matchCaps`，与执行侧闸3 单一实现防语义分叉），不覆盖即 `routing_denied(acl_caps_not_granted)` + 跨队审计；派发侧授权与执行侧自评构成双层防御。仍待完成：多 lead/单 exec 归属仲裁、RunHandle/orphan 恢复产品化（当前 recover 恒 unknown → recovery_required）、Docker/Podman network-none 与模型 broker、产物可信验收、IPC/owner 命令、gateway-only/authority 连接登记、旧数据显式迁移与全链故障矩阵。
+任务 pump：单 executor aid 闭环已接通（`createDurableNode` + `FencedProcessDriver`：offer→accept→progress 心跳→result/fail/lease_expired/cancel 全事务，重启 pending 逐条重授权消费，关停 flush 后断连；CLI `qlong run` 已接入并要求显式 create/open 存储）。**业务续租（B2）已端到端接通**：牵头方在 running 收到带 v2 fence 的 `task.progress` 时回发 `task.lease.renew`（生产半，`renewalSeq` 持久单调、重启对齐），执行方经 `canApplyLeaseRenewal` 绑定 fence 与 progress 身份后延长业务租约死线（消费半）；`lease-renewal` 能力位两端引用同一 `CUSTODY_FEATURES` 全量协商，陈旧对端缺此位即 4004。延长死线跨 store 重开持久，多网关/进程接续只读执行方持久 `leaseDeadline`，无需专门的网关租约逻辑。持久状态上报（`DurableTaskReporter` 经真实 HTTP 汇把牵头任务生命周期投影到中心）、投递结果查询 API（`GET /v1/nodes/me/deliveries/:msgId`，仅发送方可读）、保留窗口/tombstone GC（回收终态 stored 墓碑、绝不删 pending）亦已落地。**节点跨队能力授权（D2）已接通**：`GrantRecord.caps_visible` 从死字段变为执法依据——注册中心 `grantCaps(from,to)` 取活跃 grant 的 `caps_visible` 并集（双向对称、过期失效、无 grant → `undefined`），网关上行 ACL 跨队派发强制 `required_caps ⊆ caps_visible`（复用 core `matchCaps`，与执行侧闸3 单一实现防语义分叉），不覆盖即 `routing_denied(acl_caps_not_granted)` + 跨队审计；派发侧授权与执行侧自评构成双层防御。仍待完成：多 lead/单 exec 归属仲裁、活孤儿安全接管（RunHandle 恢复产品化 C1 已让**已退出**孤儿跨重启可证静默 → stopped、执行器安全 settle 不重放 start；**存活**孤儿因 PID 复用无法跨平台核验身份仍 → unknown/recovery_required，其安全接管待 E1 强隔离提供进程身份证据）、Docker/Podman network-none 与模型 broker、产物可信验收、IPC/owner 命令、gateway-only/authority 连接登记、旧数据显式迁移与全链故障矩阵。
 
 建议后续修改每个提交边界时先补故障回归，再运行对应测试、全仓类型检查和排除真实模型 E2E 的全仓测试。未完成强隔离前不向不受信节点开放执行。
 
