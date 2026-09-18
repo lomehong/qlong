@@ -52,8 +52,12 @@ export interface DurableNodeOptions {
   /** 显式本地存储准入;与中心同一套 create/open/确认语义 */
   storage: DurableNodeStorageOptions & { localFilesystemConfirmed: true; windowsAclConfirmed?: true };
   params?: QlongParams;
-  /** fence 精确驱动;缺省 = 不执行(offer 一律 policy_denied) */
-  driver?: FencedDriver;
+  /**
+   * fence 精确驱动;缺省 = 不执行(offer 一律 policy_denied)。
+   * 亦可传工厂 (runtime) => FencedDriver:由 createDurableNode 用其持久 NodeRuntimeStore
+   * 解析,便于装配 run-handle 持久化背书(C1c,见 PersistentRunHandleStore)。
+   */
+  driver?: FencedDriver | ((runtime: NodeRuntimeStore) => FencedDriver);
   /** 有界 driver 等待(默认 5s;CLI spawn 建议放宽) */
   driverTimeoutMs?: number;
   /** 静态能力标签(闸3 与 caps 上报共用) */
@@ -138,6 +142,8 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     busyTimeoutMs: opts.storage.busyTimeoutMs,
   });
   const runtime = new NodeRuntimeStore(store, me.node_id, { retentionMs: opts.custodyRetentionMs });
+  // C1c:driver 可为工厂,用刚装配的持久 runtime 解析(如注入 NodeRuntimeStore 背书的 RunHandleStore)。
+  const driver = typeof opts.driver === 'function' ? opts.driver(runtime) : opts.driver;
 
   const params: QlongParams = { ...(opts.params ?? DEFAULT_PARAMS) };
   const tickIntervalMs = bounded(opts.tickIntervalMs, 1_000, 50, 60_000, 'tickIntervalMs');
@@ -212,7 +218,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     teamId: me.team_id,
     params,
     seal,
-    driver: opts.driver,
+    driver,
     driverTimeoutMs: opts.driverTimeoutMs,
     capabilities: opts.capabilities,
     policy: opts.policy,

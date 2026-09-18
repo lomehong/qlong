@@ -11,6 +11,7 @@ export * from './lead/machine.js';
 export * from './local/harness.js';
 export * from './runtime/schema.js';
 export * from './runtime/store.js';
+export * from './runtime/run-handles.js';
 export * from './runtime/executor.js';
 export * from './runtime/node.js';
 export * from './driver/run-handle.js';

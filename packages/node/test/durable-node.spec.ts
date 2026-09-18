@@ -184,6 +184,18 @@ describe('DurableNode v2 task loop', () => {
     expect(node.executor.snapshot().slot).toBeNull();
   });
 
+  it('driver 工厂形式:createDurableNode 用持久 runtime 解析并接线执行器(C1c)', async () => {
+    const driver = new StubDriver();
+    let seen: NodeRuntimeStore | undefined;
+    const f = await fixture({ onFrame: autoStored });
+    const node = await f.makeNode({ driver: (runtime) => { seen = runtime; return driver; } });
+    expect(seen).toBe(node.runtime); // 工厂收到刚装配的持久 store(供 RunHandleStore 背书)
+    await node.start();
+    const env = f.signPeer({}, { kind: 'aid', summary: 'factory driver', lease_ms: 60_000, offer_ttl_ms: 30_000 });
+    f.send(delivery(env));
+    await wait(() => expect(driver.started).toHaveLength(1)); // 解析出的驱动确被执行器使用
+  });
+
   it('rejects a live offer without a driver instead of executing it', async () => {
     const f = await fixture({ onFrame: autoStored });
     const node = await f.makeNode();

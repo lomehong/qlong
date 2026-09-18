@@ -152,6 +152,7 @@ if (cmd === 'run') {
   const { runStorageOptions } = await import('./run-storage-options.js');
   const { createDurableNode } = await import('../../node/src/runtime/node.js');
   const { FencedProcessDriver } = await import('../../node/src/driver/fenced-driver.js');
+  const { PersistentRunHandleStore } = await import('../../node/src/runtime/run-handles.js');
   const { loadIdentity } = await import('../../node/src/identity.js');
   let node: Awaited<ReturnType<typeof createDurableNode>>;
   try {
@@ -164,7 +165,12 @@ if (cmd === 'run') {
         ? new Uint8Array(Buffer.from(process.env.QLONG_PRIV_B64, 'base64'))
         : loadIdentity(home).priv,
       storage: runStorageOptions(process.argv.slice(3), process.env, home),
-      driver: new FencedProcessDriver({ workdir: home }),
+      // 工厂形式:用 createDurableNode 内部装配的持久 runtime 背书 run handle(C1c),
+      // 使 fence→pid+启动证据跨进程重启存活,recover 得以据持久句柄判定静默。
+      driver: (runtime) => new FencedProcessDriver({
+        workdir: home,
+        runHandles: new PersistentRunHandleStore(runtime),
+      }),
       driverTimeoutMs: 15_000, // npx 冷启动可能较慢;有界等待仍封顶执行器契约
       capabilities: () => cfg.caps,
       reportIntervalMs: 60_000,
