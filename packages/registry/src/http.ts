@@ -270,7 +270,16 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           if (!isUuid(toNodeId) || !Number.isSafeInteger(generation) || (generation as number) < 1) {
             throw new Error('bad body');
           }
-          sendJson(res, 200, { pumped: opts.onPumpNotify!(toNodeId, generation as number) });
+          let pumped: boolean;
+          try {
+            pumped = opts.onPumpNotify!(toNodeId, generation as number);
+          } catch {
+            // claim 库故障 = 服务端存储故障,显式 500 fail-closed(与 ws.ts 独立端点同语义);
+            // 绝不能落入外层"畸形请求"catch 伪装成 400,误导运维归因到对端网关。
+            sendJson(res, 500, { error: { code: 'internal_error', message: 'claim registry unavailable' } });
+            return;
+          }
+          sendJson(res, 200, { pumped });
         } catch {
           sendJson(res, 400, { error: { code: 'bad_request', message: 'malformed relay body' } });
         }

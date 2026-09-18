@@ -154,6 +154,47 @@ if (cmd === 'run') {
   const { FencedProcessDriver } = await import('../../node/src/driver/fenced-driver.js');
   const { PersistentRunHandleStore } = await import('../../node/src/runtime/run-handles.js');
   const { loadIdentity } = await import('../../node/src/identity.js');
+  // ---- 第 2 步:牵头生产链路旗标(--originate / --auto-select / --takeover)----
+  const sflag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  const originateFile = sflag('--originate');
+  const takeoverFile = sflag('--takeover');
+  const takeoverKeyHex = sflag('--takeover-key');
+  if (takeoverFile !== undefined && takeoverKeyHex === undefined) throw new Error('--takeover 需要 --takeover-key <64位hex>');
+  if (takeoverFile === undefined && takeoverKeyHex !== undefined) throw new Error('--takeover-key 需要 --takeover <文件>');
+  let originate: Record<string, unknown> | undefined;
+  if (originateFile !== undefined) {
+    originate = JSON.parse((await import('node:fs')).readFileSync(originateFile, 'utf8')) as Record<string, unknown>;
+    if (originate.kind !== 'aid' && originate.kind !== 'project') throw new Error('--originate 文件 kind 必须为 "aid" 或 "project"');
+    if (typeof originate.summary !== 'string' || originate.summary.length === 0) throw new Error('--originate 文件需要非空 summary');
+  }
+  // 目录驱动选择器:后台 30s 刷新 + 同步快照;快照空 → 任务留 drafting 等 tick 重试(绝不瞎派)。
+  const selectorHandle = (process.argv.includes('--auto-select') || originateFile !== undefined)
+    ? (async () => {
+      const { createTargetSelector } = await import('../../node/src/runtime/target-select.js');
+      const template: Record<string, unknown> = {
+        lease_ms: 300_000, offer_ttl_ms: 60_000, ...originate,
+      };
+      delete template.kind;
+      delete template.target;
+      const handle = createTargetSelector({
+        selfNodeId: cfg.node_id,
+        fetchDirectory: async () => {
+          const res = await fetch(cfg.registry_url.replace(/\/+$/, '') + `/v1/teams/${encodeURIComponent(cfg.team_id)}/nodes`, {
+            headers: { Authorization: 'Bearer ' + cfg.node_token },
+            signal: AbortSignal.timeout(5_000),
+            redirect: 'error',
+          });
+          if (!res.ok) throw new Error('directory fetch ' + res.status);
+          return ((await res.json()) as { nodes?: Array<{ node_id: string; status: string; caps?: string[] | null }> }).nodes ?? [];
+        },
+        offerTemplate: template,
+      });
+      return handle;
+    })()
+    : undefined;
   let node: Awaited<ReturnType<typeof createDurableNode>>;
   try {
     node = await createDurableNode({
@@ -174,6 +215,7 @@ if (cmd === 'run') {
       driverTimeoutMs: 15_000, // npx 冷启动可能较慢;有界等待仍封顶执行器契约
       capabilities: () => cfg.caps,
       reportIntervalMs: 60_000,
+      selectTarget: (await selectorHandle)?.selector,
     });
   } catch (e) {
     console.error('节点启动失败:', e instanceof Error ? e.message : e);
@@ -182,6 +224,46 @@ if (cmd === 'run') {
   await node.start();
   console.log('qlong 节点已启动(持久 v2):', cfg.node_id, '@', cfg.registry_url);
   console.log('节点存储:', node.store.path);
+  if (selectorHandle) {
+    const handle = await selectorHandle;
+    await handle.refresh();
+    const refreshTimer = setInterval(() => { void handle.refresh(); }, 30_000);
+    refreshTimer.unref();
+  }
+  if (takeoverFile !== undefined) {
+    const { verifyTakeoverBundle } = await import('../../node/src/runtime/takeover-bundle.js');
+    const { publicKeyFromPrivate } = await import('@qlong/core');
+    const seed = Buffer.from(takeoverKeyHex!, 'hex');
+    if (seed.length !== 32) { console.error('--takeover-key 必须为 64 个 hex 字符(32 字节 ed25519 种子)'); process.exit(1); }
+    const verified = verifyTakeoverBundle(
+      JSON.parse((await import('node:fs')).readFileSync(takeoverFile, 'utf8')),
+      publicKeyFromPrivate(new Uint8Array(seed)),
+    );
+    if (!verified.ok) { console.error('接管 bundle 验签失败:', verified.reason); process.exit(1); }
+    const r = node.takeover(verified.bundle);
+    console.log('跨机接管:重派', r.imported.length, '| fenced(禁双主)', r.fenced.length, '| 归档', r.archived.length);
+  }
+  if (originate) {
+    const { randomUUID } = await import('node:crypto');
+    const taskId = randomUUID();
+    node.lead.originate(taskId, originate.kind as 'aid' | 'project');
+    let target = typeof originate.target === 'string' ? originate.target : undefined;
+    let offerBody: Record<string, unknown> = {
+      kind: originate.kind, summary: originate.summary,
+      lease_ms: originate.lease_ms ?? 300_000, offer_ttl_ms: originate.offer_ttl_ms ?? 60_000,
+      ...(Array.isArray(originate.required_caps) ? { required_caps: originate.required_caps } : {}),
+    };
+    if (target === undefined) {
+      const pick = (await selectorHandle)?.selector({ task_id: taskId, nextAttempt: 1, excluded: {}, kind: originate.kind as 'aid' | 'project' });
+      if (pick) { target = pick.target; offerBody = pick.offerBody; }
+    }
+    if (target !== undefined) {
+      node.lead.dispatch(taskId, target, offerBody);
+      console.log('已发起牵头任务', taskId, '→', target);
+    } else {
+      console.log('已发起牵头任务', taskId, '(暂无合格目标,保留 drafting;目录刷新后由周期泵改派)');
+    }
+  }
   console.log('Ctrl+C 退出(关停会静默在跑任务并把终态落中心)');
   let stopping = false;
   const shutdown = (): void => {
@@ -198,6 +280,61 @@ if (cmd === 'run') {
   process.on('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
   await new Promise(() => undefined); // 常驻
+}
+
+if (cmd === 'lead') {
+  // 第 2 步:跨机接管的运维入口(节点**停止态**独占 runtime.sqlite;运行态接管走 `qlong run --takeover`)。
+  // bundle 为裸 JSON,经 ed25519(JCS 签名域)封套防伪造高 attempt 劫持;key 为操作员种子,与节点身份无关。
+  const sub = process.argv[3] ?? '';
+  if (sub !== 'export' && sub !== 'import') {
+    console.error('用法:');
+    console.error('  qlong lead export --out <文件> --key <64位hex> --data-dir <节点数据目录> --storage-mode open --confirm-local-filesystem');
+    console.error('  qlong lead import --in <文件> --key <64位hex> --data-dir <节点数据目录> --storage-mode open --confirm-local-filesystem');
+    console.error('(须在节点停止后运行;key 为操作员持有的 32 字节 ed25519 种子)');
+    process.exit(1);
+  }
+  const home = qlongHome();
+  const cfg = readConfig(home);
+  const { runStorageOptions } = await import('./run-storage-options.js');
+  const storage = runStorageOptions(process.argv.slice(4), process.env, home);
+  if (storage.mode !== 'open') throw new Error('lead export/import 只作用于既有节点库:请用 --storage-mode open');
+  const sflag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  const keyHex = sflag('--key') ?? '';
+  const seed = Buffer.from(keyHex, 'hex');
+  if (seed.length !== 32) throw new Error('--key 必须为 64 个 hex 字符(32 字节 ed25519 种子)');
+  const { readFileSync, writeFileSync } = await import('node:fs');
+  const { SqliteStore } = await import('../../storage/src/index.js');
+  const { NODE_SCHEMA } = await import('../../node/src/runtime/schema.js');
+  const { NodeRuntimeStore } = await import('../../node/src/runtime/store.js');
+  const { DurableLead } = await import('../../node/src/runtime/lead.js');
+  const { signTakeoverBundle, verifyTakeoverBundle } = await import('../../node/src/runtime/takeover-bundle.js');
+  const { publicKeyFromPrivate } = await import('@qlong/core');
+  const store = SqliteStore.open({ ...storage, schema: NODE_SCHEMA, filename: 'runtime.sqlite' });
+  try {
+    const runtime = new NodeRuntimeStore(store, cfg.node_id);
+    const lead = new DurableLead({
+      store: runtime, nodeId: cfg.node_id, teamId: cfg.team_id,
+      seal: () => { throw new Error('lead export/import 不产生出站消息'); },
+    });
+    if (sub === 'export') {
+      const out = sflag('--out');
+      if (out === undefined) throw new Error('缺少 --out <文件>');
+      const bundle = lead.exportTasks();
+      writeFileSync(out, JSON.stringify(signTakeoverBundle(bundle, new Uint8Array(seed)), null, 2));
+      console.log('已导出', bundle.tasks.length, '个牵头任务 →', out, '(已签名;导入方需同密钥验签)');
+    } else {
+      const inPath = sflag('--in');
+      if (inPath === undefined) throw new Error('缺少 --in <文件>');
+      const verified = verifyTakeoverBundle(JSON.parse(readFileSync(inPath, 'utf8')), publicKeyFromPrivate(new Uint8Array(seed)));
+      if (!verified.ok) { console.error('接管 bundle 验签失败:', verified.reason); process.exit(1); }
+      const r = lead.importTasks(verified.bundle);
+      console.log('已导入:重派', r.imported.length, '| fenced(禁双主)', r.fenced.length, '| 归档', r.archived.length);
+      console.log('提示:重派需节点以 --auto-select(或 --originate)运行以获得目录驱动选择器');
+    }
+  } finally { store.close(); }
 }
 
 if (cmd === 'server') {

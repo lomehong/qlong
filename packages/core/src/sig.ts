@@ -52,6 +52,16 @@ export function verifyEnvelopeSig(
   });
 }
 
+/** 裸字节签名(takeover bundle 等非信封载荷复用同一 ed25519 信任根;算法白名单同 D23) */
+export function signBytes(bytes: Uint8Array, priv: Bytes): Uint8Array {
+  return sign(bytes, priv);
+}
+
+/** 裸字节验签(与 signBytes 配对) */
+export function verifyBytes(sig: Uint8Array, bytes: Uint8Array, pub: Bytes): boolean {
+  return verify(sig, bytes, pub);
+}
+
 /** 入网时生成密钥对:32 字节随机种子;公钥登记于注册中心(02 §3.2) */
 export function newKeyPair(): { priv: Bytes; publicKey: Uint8Array } {
   const priv = new Uint8Array(32);
