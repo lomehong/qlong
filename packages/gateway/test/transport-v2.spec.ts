@@ -196,7 +196,7 @@ describe('transport v2 durable gateway (raw WS and real SQLite)', () => {
     expect((await sender.frame<TransportNack>('nack')).reason).toBe('acl_rejected');
     expect(offer).not.toHaveBeenCalled();
     expect(f.custody.outcome(other.node_id, forged.msg_id)).toBeUndefined();
-    f.core.grantLookup = (from, to) => from === source.team_id && to === foreign.team_id;
+    f.core.grantLookup = (from, to) => (from === source.team_id && to === foreign.team_id ? [] : undefined);
     sender.send({ frame: 'envelope', envelope: crossTeam });
     await sender.frame('stored');
     expect(offer).toHaveBeenCalledTimes(1);

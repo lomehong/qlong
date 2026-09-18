@@ -28,7 +28,11 @@ export interface GatewayConnection {
   connectedAt: number;
 }
 
-/** 网关可见的信封视图:头 + body.kind(01 §9 aid 不暂存是设计明文允许的唯一 body 访问) */
+/**
+ * 网关可见的信封视图:头 + body 的受限访问。
+ * 设计明文允许的 body 访问仅两处:body.kind(01 §9 aid 不暂存判定)与
+ * body.required_caps(D2 跨队派发侧能力闸,与执行侧闸3 同语义)。其余 body 字段网关不读。
+ */
 export interface EnvelopeHeadLite {
   msg_id: string;
   type: string;
@@ -50,4 +54,5 @@ export interface RoutingDenied {
   reason_code: string;
   msg_id: string;
 }
-export type GrantLookup = (fromTeam: string, toTeam: string) => boolean;
+/** D2:跨队 grant 查询返回活跃 grant 的 caps_visible 并集;undefined = 无 grant(失败关闭)。 */
+export type GrantLookup = (fromTeam: string, toTeam: string) => string[] | undefined;

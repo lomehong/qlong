@@ -52,7 +52,7 @@ export class GatewayCore {
   /** 逐节点目录缓存:条目携带快照 epoch,落后即重查(§7.1) */
   private dirCache = new Map<string, { epoch: number; entry?: import('./types.js').GatewayDirectoryEntry }>();
   private readonly params: QlongParams;
-  grantLookup: ((from: string, to: string) => boolean) | undefined = undefined;
+  grantLookup: ((from: string, to: string) => string[] | undefined) | undefined = undefined;
 
   constructor(opts: GatewayCoreOptions = {}) {
     this.params = opts.params ?? DEFAULT_PARAMS;

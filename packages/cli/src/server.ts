@@ -106,7 +106,7 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
       ? new InboxStore<EnvelopeV1>({ capacity: 200, persistFile: opts.inboxPersistFile })
       : undefined,
   });
-  core.grantLookup = (from, to) => registry.hasGrant(from, to);
+  core.grantLookup = (from, to) => registry.grantCaps(from, to);
   // 集群形态(02 §12.1):clusterSecret 存在即注册自身成员;peers 存在再挂跨进程总线。
   // 顺序约束:member 闭包引用 gw,故 cluster 先建、gw 携带 cluster 构造、随后 register。
   const clusterSecret = opts.clusterSecret;
