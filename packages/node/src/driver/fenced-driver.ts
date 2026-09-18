@@ -7,7 +7,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { buildHarnessCommand, composeTaskPrompt, type HarnessDriverOptions } from './harness-driver.js';
-import type { FencedDriver, RunFence, RunHandle, RunOutcome } from './run-handle.js';
+import type { FencedDriver, RunFence, RunHandle, RunHandleStore, RunOutcome } from './run-handle.js';
 
 /** stdout 保留的答案尾部上限(与旧驱动一致的结果体瘦身) */
 const STDOUT_TAIL = 4000;
@@ -19,6 +19,11 @@ export interface FencedProcessDriverOptions extends HarnessDriverOptions {
   workdir?: string;
   /** 单任务硬上限 ms;0 = 不限(仍受执行器租约约束)。默认 30 分钟 */
   taskTimeoutMs?: number;
+  /**
+   * C1:run handle 持久化端口(驱动不拥有存储;由 node/CLI 以持久存储背书装配)。
+   * 缺省 = 不持久化,recover 无法跨重启证明静默(退回恒 'unknown')。
+   */
+  runHandles?: RunHandleStore;
 }
 
 interface LiveProc {
@@ -57,6 +62,8 @@ export class FencedProcessDriver implements FencedDriver {
       state.settled = true;
       clearTimeout(killTimer);
       this.live.delete(state);
+      // 进程已静默:释放持久句柄(幂等)。recover 只在此前(未 settle)才需据句柄判定。
+      this.opts.runHandles?.clear(fence);
       resolveClosed(outcome);
     };
 
@@ -119,6 +126,23 @@ export class FencedProcessDriver implements FencedDriver {
         } });
       }
     });
+
+    if (this.opts.runHandles && proc.pid !== undefined) {
+      // C1a:落盘 fence→pid+启动证据,须在返回句柄前完成(崩溃安全次序)。
+      try {
+        this.opts.runHandles.record({ fence: { ...fence }, pid: proc.pid, startedAt: Date.now() });
+      } catch (error) {
+        // 持久化失败 = 失败关闭:SIGKILL 已 spawn 进程,绝不留下无句柄孤儿;start 拒绝,
+        // 由执行器转 recovery_required + onFault(绝不重放 start)。settled 短路后续 close→finish。
+        state.stopped = true;
+        state.settled = true;
+        clearTimeout(killTimer);
+        this.live.delete(state);
+        try { proc.kill('SIGKILL'); } catch { /* best effort */ }
+        resolveClosed(failed('stopped by request'));
+        throw error;
+      }
+    }
 
     return Object.freeze({
       fence: { ...fence },
