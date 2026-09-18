@@ -488,3 +488,38 @@ describe('startQlongServer D1c: durable cross-process claim registry (center sch
     await second.waitClosed();
   }, 20_000);
 });
+describe('startQlongServer D1d: custody pump relay (single-port /internal/pump)', () => {
+  // 单端口形态的 custody 集群中继:registry http 承载同名路由,fence 守卫在 gw.pumpNotify 内部
+  // (有连接时的 delivered 泵路径由 gateway 级 custody-relay.spec 端到端覆盖)。
+  it('exposes the fenced pump route behind the relay secret', async () => {
+    const f = new CustodyFixture();
+    const handles = await f.start('create', { seedTeam: { name: 'relay-team' }, relaySecret: 'test-relay-secret' });
+    const base = `http://127.0.0.1:${handles.registryPort}`;
+    const post = (secret?: string, body: unknown = { to_node_id: randomUUID(), generation: 1 }): Promise<Response> =>
+      fetch(`${base}/internal/pump`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(secret ? { 'x-qlong-relay-secret': secret } : {}) },
+        body: JSON.stringify(body),
+      });
+    expect((await post('wrong')).status).toBe(403);
+    expect((await post(undefined)).status).toBe(403);
+    expect((await post('test-relay-secret', {})).status).toBe(400);
+    expect((await post('test-relay-secret', { to_node_id: 'not-a-uuid', generation: 1 })).status).toBe(400);
+    const ok = await post('test-relay-secret');
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { pumped: boolean }).pumped).toBe(false); // 无 claim → 非现主
+    await f.stop();
+  });
+
+  it('refuses relay configuration without durable storage and legacy cluster config with storage', async () => {
+    const f = new CustodyFixture();
+    await expect(f.launch({
+      host: '127.0.0.1', registryPort: 0, gatewayPath: '/gateway', seedTeam: false,
+      ephemeral: true, relaySecret: 'x',
+    })).rejects.toThrow(/requires durable storage/i);
+    await expect(f.start('create', { relayPeers: ['http://127.0.0.1:1'] }))
+      .rejects.toThrow(/relayPeers requires relaySecret/i);
+    await expect(f.start('create', { relaySecret: 'x', clusterSecret: 'y' }))
+      .rejects.toThrow(/legacy cluster routing/i);
+  });
+});

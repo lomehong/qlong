@@ -62,14 +62,18 @@ export interface ServerOptions {
     seedTeam?: { name?: string } | false;
     ownerAuth?: (req: import('node:http').IncomingMessage, teamId: string) => boolean | Promise<boolean>;
     /**
-     * 网关集群(02 §12.1,v0.8):设置后开启集群路由 + POST /internal/envelope 中继端点。
-     * peers 非空时跨进程转投(HTTP 总线);空 = 单实例集群形态(仅收件箱 deferOffline 语义)。
+     * 网关集群(02 §12.1,v0.8,仅 ephemeral 演示形态):设置后开启集群路由 + POST /internal/envelope
+     * 中继端点。peers 非空时跨进程转投(HTTP 总线);与持久存储互斥(legacy 分片模型 vs 共享 custody 库)。
      */
     clusterSecret?: string;
-    /** 集群成员名(默认 gw1;分片按成员序列稳定哈希,扩缩容前成员序列须一致) */
+    /** 集群成员名(默认 gw1;持久模式下复用为网关 authorityId,claim 归属方标识) */
     clusterName?: string;
     /** 远端网关基地址列表(如 ['https://gw2:3100']) */
     clusterPeers?: string[];
+    /** d1d custody 集群中继:入站 POST /internal/pump 共享密钥(须配持久存储;多 authority 共享同一中心库) */
+    relaySecret?: string;
+    /** d1d:出站通知的 peer 网关基地址列表(须配 relaySecret) */
+    relayPeers?: string[];
 }
 
 export async function startQlongServer(opts: ServerOptions = {}): Promise<ServerHandles> {
@@ -82,7 +86,14 @@ export async function startQlongServer(opts: ServerOptions = {}): Promise<Server
     throw new Error('Legacy files require explicit migration; refusing mixed storage authorities');
   }
   if (opts.storage && (opts.clusterSecret !== undefined || (opts.clusterPeers?.length ?? 0) > 0)) {
-    throw new Error('Durable center currently supports one authority only; gateway-only transport v2 is not ready');
+    throw new Error('Durable center rejects legacy cluster routing (per-instance InboxStore shards); use relaySecret/relayPeers for multi-authority custody clusters');
+  }
+  // d1d:custody 集群中继只在持久(共享库)形态有意义;relayPeers 需密钥。
+  if (opts.relaySecret !== undefined || (opts.relayPeers?.length ?? 0) > 0) {
+    if (!opts.storage) throw new Error('Custody pump relay requires durable storage (shared center SQLite)');
+    if (opts.relayPeers !== undefined && opts.relaySecret === undefined) {
+      throw new Error('relayPeers requires relaySecret');
+    }
   }
   const storage = opts.storage ? SqliteStore.open({ ...opts.storage, schema: CENTER_SCHEMA, filename: 'center.sqlite' }) : undefined;
   try {
@@ -135,6 +146,8 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     authorityId: opts.clusterName ?? 'gw1',
     cluster,
     clusterSecret,
+    relaySecret: opts.relaySecret,
+    relayPeers: opts.relayPeers,
     assertAuthorityAvailable: () => { if (storage) void storage.database; },
     onPresenceChange: (nodeId, online) => { registry.presence.set(nodeId, online); },
     authenticate: (tok: string) => {
@@ -169,6 +182,9 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
           return gw.internalDeliver(toNodeId, envelope as EnvelopeV1, Date.now());
         }
       : undefined,
+    // d1d custody 集群中继(单端口形态):fence 守卫在 gw.pumpNotify 内部
+    relaySecret: opts.relaySecret,
+    onPumpNotify: opts.relaySecret ? (toNodeId, generation) => gw.pumpNotify(toNodeId, generation) : undefined,
     // 投递结果查询(A2):接线中心 custody outcome();无中心 SQLite(ephemeral)时保持 undefined → 路由 503 失败关闭。
     deliveryOutcome: custody ? (fromNode, msgId) => custody.outcome(fromNode, msgId) : undefined,
   });

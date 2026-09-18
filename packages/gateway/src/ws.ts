@@ -20,6 +20,8 @@ import type { GatewayDirectorySnapshot } from './types.js';
 import type { GatewayCluster } from './cluster.js';
 import type { SqliteCustodyStore } from './custody-store.js';
 import { LocalClaimRegistry, type ClaimRegistry } from './claim.js';
+import { PumpRelay } from './relay.js';
+import { isUuid } from '@qlong/core';
 
 export const AUTH_KEY = 'node_' + 'token';
 // Allow framing overhead without accepting arbitrarily large JSON or send queues.
@@ -54,6 +56,13 @@ export interface WsGatewayOptions {
    * 约束:必须 < claimRegistry 的 leaseTtlMs,否则活连接会在两次续租间被误 reap。测试可调小。
    */
   claimRenewIntervalMs?: number;
+  /**
+   * d1d custody 集群中继(仅 custody 模式):入站 POST /internal/pump 的共享密钥。
+   * 与 legacy clusterSecret 互斥(那是 per-instance InboxStore 分片模型,与共享 custody 库语义冲突)。
+   */
+  relaySecret?: string;
+  /** d1d:出站通知的 peer 网关基地址列表(须配 relaySecret;admitCustody 目标不在本地时逐 peer 通知) */
+  relayPeers?: string[];
 }
 
 interface RegistryLike {
@@ -74,8 +83,10 @@ interface ConnState {
 
 export class WsGateway {
   readonly server = createServer((req, res) => {
-    // 中继端点(registerInternalRelay)认领的请求不在回 426(中继等 body 异步应答)
-    if (this.opts.clusterSecret && req.method === 'POST' && (req.url ?? '').split('?')[0] === '/internal/envelope') {
+    // 中继端点认领的请求不在回 426(registerInternalRelay/registerPumpRelay 等 body 异步应答)
+    const path = (req.url ?? '').split('?')[0];
+    if (req.method === 'POST' && ((this.opts.clusterSecret && path === '/internal/envelope') ||
+        (this.opts.relaySecret && path === '/internal/pump'))) {
       return;
     }
     res.writeHead(426);
@@ -97,6 +108,8 @@ export class WsGateway {
   private readonly claimRenewIntervalMs: number;
   /** D1b:authority-liveness 续租定时器(无条件运行——claim 在 auth/disconnect 无条件接线)。 */
   private renewTimer?: NodeJS.Timeout;
+  /** d1d:出站 pump 通知客户端(relaySecret + relayPeers 齐备才构建)。 */
+  private readonly pumpRelay?: PumpRelay;
   private unavailable = false;
   private started = false;
   private closing = false;
@@ -113,6 +126,16 @@ export class WsGateway {
     if (opts.custody && (opts.cluster !== undefined || opts.clusterSecret !== undefined)) {
       throw new Error('Durable custody does not support cluster routing');
     }
+    // d1d:custody 集群中继只在持久监护模式有意义(通知的是共享库 pump,legacy 模式无共享库可泵)。
+    if (opts.relaySecret !== undefined || opts.relayPeers !== undefined) {
+      if (!opts.custody) throw new Error('Custody pump relay requires durable custody mode');
+      if (opts.cluster !== undefined || opts.clusterSecret !== undefined) {
+        throw new Error('Custody pump relay is exclusive with legacy cluster routing');
+      }
+      if (opts.relayPeers !== undefined && opts.relaySecret === undefined) {
+        throw new RangeError('relayPeers requires relaySecret');
+      }
+    }
     this.retryIntervalMs = opts.retryIntervalMs === undefined ? 1_000 : opts.retryIntervalMs;
     this.window = opts.window === undefined ? MAX_WINDOW : opts.window;
     this.claimRegistry = opts.claimRegistry ?? new LocalClaimRegistry();
@@ -127,6 +150,9 @@ export class WsGateway {
     if (!Number.isSafeInteger(this.claimRenewIntervalMs) || this.claimRenewIntervalMs < 1 || this.claimRenewIntervalMs > 2_147_483_647) {
       throw new RangeError('claimRenewIntervalMs must be a positive timer interval');
     }
+    this.pumpRelay = opts.relaySecret !== undefined && (opts.relayPeers?.length ?? 0) > 0
+      ? new PumpRelay({ secret: opts.relaySecret, peers: opts.relayPeers!.map((url, i) => ({ name: `peer${i + 1}`, url })) })
+      : undefined;
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
     // 独立端口模式:listen() 的 server 上 '/' 即网关入口
     this.bindUpgrade(this.server, '/');
@@ -164,6 +190,7 @@ export class WsGateway {
     if (this.started || this.closing || this.unavailable) return;
     this.started = true;
     this.registerInternalRelay();
+    this.registerPumpRelay();
     this.wss.on('connection', (ws) => {
       let connId: string | null = null;
       let nodeId = '';
@@ -435,7 +462,18 @@ export class WsGateway {
     this.safeSend(state.ws, { frame: 'stored', ...identity });
     const targetConn = this.currentConnByNode.get(envelope.to.node_id);
     const target = targetConn === undefined ? undefined : this.socketsByConn.get(targetConn);
-    if (target) this.pumpCustody(target, now);
+    if (target) {
+      this.pumpCustody(target, now);
+    } else if (this.pumpRelay) {
+      // d1d 跨 authority 推送定向(设计 §4.4):本端无连接 → 查共享 claim 表;
+      // 他 authority 持**现租约** → 通知其立即泵(只传 to_node_id + generation,不传 payload;
+      // 通知丢失由彼方周期泵 ≤100ms 兜底 —— relay 是延迟优化,非正确性依赖)。
+      // 无 claim / 租约已过期(离线)→ 不通知,payload 静置共享库,待归属方认证补投。
+      const claim = this.claimRegistry.lookup(envelope.to.node_id);
+      if (claim && claim.authorityId !== this.authorityId && claim.leaseExpiresAt > now) {
+        void this.pumpRelay.notify(envelope.to.node_id, claim.generation);
+      }
+    }
   }
 
   private pumpCustody(state: ConnState, now: number): void {
@@ -543,6 +581,62 @@ export class WsGateway {
     if (kind === 'aid') return 'not_here';
     this.opts.core.queueInbox(envelope, now);
     return 'queued';
+  }
+
+  /**
+   * d1d custody 集群中继处理端(独立端口由 registerPumpRelay 暴露;单端口由 registry http 路由回调)。
+   * **fence 守卫**:仅当本 authority 现持该 (authorityId, generation) claim 才本地泵 ——
+   * 陈旧主(已被更高 generation 超越)不得响应通知泵其僵尸连接(防双服务,设计 §4.4/§6 d1d 变异要点)。
+   * 返回是否以现主身份执行(true 含"现主但节点无本地连接"——payload 留共享库,无需动作)。
+   */
+  pumpNotify(toNodeId: string, generation: number): boolean {
+    const claim = this.claimRegistry.lookup(toNodeId);
+    if (!claim || claim.authorityId !== this.authorityId || claim.generation !== generation) return false;
+    const connId = this.currentConnByNode.get(toNodeId);
+    const state = connId === undefined ? undefined : this.socketsByConn.get(connId);
+    if (state) this.pumpCustody(state, Date.now());
+    return true;
+  }
+
+  /** d1d:入站 POST /internal/pump 中继端点(独立端口形态;单端口形态走 registry http 同名路由)。 */
+  private registerPumpRelay(): void {
+    if (!this.opts.relaySecret) return;
+    const secret = this.opts.relaySecret;
+    // prepend:先于默认 426 处理器执行
+    this.server.prependListener('request', (req, res) => {
+      const p = (req.url ?? '').split('?')[0];
+      if (p !== '/internal/pump' || req.method !== 'POST') return;
+      let raw = '';
+      req.on('data', (c: Buffer) => (raw += c.toString()));
+      req.on('end', () => {
+        if (req.headers['x-qlong-relay-secret'] !== secret) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw) as { to_node_id?: string; generation?: unknown };
+          if (!isUuid(parsed.to_node_id ?? '') || !Number.isSafeInteger(parsed.generation) ||
+              (parsed.generation as number) < 1) {
+            throw new Error('bad body');
+          }
+          let pumped: boolean;
+          try {
+            pumped = this.pumpNotify(parsed.to_node_id as string, parsed.generation as number);
+          } catch {
+            // claim 库故障:无法仲裁归属,绝不能伪装成"非现主"(fail-closed)
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'internal_error' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ pumped }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'bad_request' }));
+        }
+      });
+    });
   }
 
   private registerInternalRelay(): void {

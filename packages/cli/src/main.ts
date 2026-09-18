@@ -228,11 +228,20 @@ if (cmd === 'server') {
       .split(',')
       .map((x) => x.trim())
       .filter(Boolean),
+    // d1d:custody 集群中继(多 authority 共享同一中心库)——环境变量驱动,容器编排友好
+    relaySecret: sflag('--relay-secret', process.env.QLONG_RELAY_SECRET),
+    relayPeers: (process.env.QLONG_RELAY_PEERS ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean),
   });
   console.log('qlong server:http://' + (handles.storageMode === 'ephemeral' ? '127.0.0.1:' : '0.0.0.0:') + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
   console.log('中心存储:', handles.storageMode, '| 仅 Registry/Auth/任务投影持久化;可靠 mailbox/节点恢复尚未就绪');
   if (handles.cluster) {
     console.log('网关集群:密钥已启用' + (handles.cluster.size > 1 ? ',成员 ' + handles.cluster.size : '(单实例形态)'));
+  }
+  if (process.env.QLONG_RELAY_SECRET) {
+    console.log('custody 集群中继:/internal/pump 已启用,peers ' + (process.env.QLONG_RELAY_PEERS ?? '(无)'));
   }
   if (sflag('--dist-dir', process.env.QLONG_DIST_DIR)) {
     console.log('书坊分发 → /install /install.sh /install.ps1 /releases/<版本>/ | 控制台 → /');

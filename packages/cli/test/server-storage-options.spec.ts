@@ -87,7 +87,7 @@ describe('startQlongServer storage admission', () => {
     ];
     // Loopback peer is never contacted: rejection precedes any store or listener creation.
     for (const options of cluster) {
-      await expect(f.start('create', options)).rejects.toThrow(/one authority/i);
+      await expect(f.start('create', options)).rejects.toThrow(/legacy cluster routing/i);
       expect(readdirSync(f.root).length).toBe(0);
     }
     await f.start();

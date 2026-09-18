@@ -6,6 +6,7 @@
 import { SESSION_COOKIE, AuthError, type SessionRecord } from './auth.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError } from './errors.js';
+import { isUuid } from '@qlong/core';
 import type { NodeRecord, Registry } from './directory.js';
 
 export interface RegistryServerOptions {
@@ -23,6 +24,9 @@ export interface RegistryServerOptions {
   /** v0.8 网关集群中继(02 §12.1):两者齐备时暴露 POST /internal/envelope(单端口部署形态) */
   clusterSecret?: string;
   onInternalEnvelope?: (toNodeId: string, envelope: unknown) => 'delivered' | 'queued' | 'not_here';
+  /** d1d custody 集群中继(单端口形态):两者齐备时暴露 POST /internal/pump(不传 payload,仅通知泵) */
+  relaySecret?: string;
+  onPumpNotify?: (toNodeId: string, generation: number) => boolean;
   /**
    * 投递结果查询(A2):发送方节点查自己发出消息的 custody 终态。from_node 由路由强制为已
    * 认证节点身份,据此仅返回该节点为发送方的记录;未配置(如无中心 SQLite 的 ephemeral
@@ -247,6 +251,26 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           if (!toNodeId || !body.envelope) throw new Error('bad body');
           const result = opts.onInternalEnvelope(toNodeId, body.envelope);
           sendJson(res, 200, { result });
+        } catch {
+          sendJson(res, 400, { error: { code: 'bad_request', message: 'malformed relay body' } });
+        }
+        return;
+      }
+
+      // ---- custody 集群中继(d1d,单端口形态):只传 {to_node_id, generation} 通知,不传 payload ----
+      if (url.pathname === '/internal/pump' && method === 'POST' && opts.relaySecret && opts.onPumpNotify) {
+        if (req.headers['x-qlong-relay-secret'] !== opts.relaySecret) {
+          sendJson(res, 403, { error: { code: 'forbidden', message: 'relay secret mismatch' } });
+          return;
+        }
+        try {
+          const body = await readJson(req);
+          const toNodeId = typeof body.to_node_id === 'string' ? body.to_node_id : '';
+          const generation = body.generation;
+          if (!isUuid(toNodeId) || !Number.isSafeInteger(generation) || (generation as number) < 1) {
+            throw new Error('bad body');
+          }
+          sendJson(res, 200, { pumped: opts.onPumpNotify!(toNodeId, generation as number) });
         } catch {
           sendJson(res, 400, { error: { code: 'bad_request', message: 'malformed relay body' } });
         }
