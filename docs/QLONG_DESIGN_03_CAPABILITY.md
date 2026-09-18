@@ -161,7 +161,7 @@ task.fail(caps_missing) —— 仅允许来自本地确定性检查(评审 I-20�
 
 ## 8. 隐私边界
 
-能力档案是机器画像,可见范围 = **本 team**(02 目录查询本就 team 鉴权);跨 team 不可见,v1 无例外;未来跨团队 grant 生效时,能力可见性必须作为 grant 的显式选项。
+能力档案是机器画像,可见范围 = **本 team**(02 目录查询本就 team 鉴权);跨 team 默认不可见。**跨团队 grant 生效时能力可见性作为 grant 的显式选项已落地(D2,见 §9 D34)**:`GrantRecord.caps_visible` 是该 grant 授权对方团队可见/可请求的能力子集;注册中心 `grantCaps(from,to)` 取活跃 grant 的 `caps_visible` 并集(双向对称、过期即失效、无 grant → undefined);网关上行 ACL 在跨队派发时强制 `required_caps ⊆ caps_visible`(复用 §3.2 `matchCaps`,与执行侧闸3 单一实现防语义分叉),不满足即 `routing_denied(acl_caps_not_granted)` + 跨队审计。未授予的能力跨队不可请求,即便通道(grant)已开启;派发侧(网关授权)与执行侧(闸3 自评)构成双层防御。
 
 **留存与删除**(评审 I-47):节点 `revoked` 后,注册中心即删除其 caps/load 档案(审计日志按另行保留期处理);**标签披露最小化建议**:`net:` / `ext:` 类标签仅声明到类别(如 `net:office-vpn` 而非内网拓扑细节;`ext:github` 而非携带账号标识),降低画像精度。
 
@@ -177,10 +177,11 @@ task.fail(caps_missing) —— 仅允许来自本地确定性检查(评审 I-20�
 | **D31** | **匹配语义** | **无 @ = 类+值段完全相等(非前缀);带 @ = 逐段比较、数字段数值比较;未知类整串精确;值字符集锁定**(评审 I-30) |
 | **D32** | **自愈两段式** | **suspected(软摘,TTL 恢复)→ removed(硬摘,需 ≥2 牵头方命中或本地复核失败);caps_missing 仅限确定性检查;滞回 24h;摘除本地可见 + 审计**(评审 I-20) |
 | **D33** | **workspace 缺省语义** | **未携带 workspace 的远端任务:仅一次性临时目录、产物仅经 payload_ref 回传、禁读写既有路径;或 requires 声明/本地人确认**(评审 I-32) |
+| **D34** | **跨队能力授权(D2)** | **grant 携 `caps_visible` 子集;`grantCaps(from,to)` 取活跃 grant 并集(双向对称、过期失效、无 grant → undefined);网关跨队派发强制 `required_caps ⊆ caps_visible`(复用 D31 `matchCaps`、畸形 fail-closed),不覆盖 → `acl_caps_not_granted` + 跨队审计;与执行侧闸3 双层防御**(03 §8/02 §12.3) |
 
 ## 10. 开放问题
 
 1. **版本区间与组合匹配**:`@>=18`、`hw:ram>=32g` 谓词语法,等真实派单需求出现再定。
 2. **能力实测(probe)**:高价值标签的注册时校验任务;与 §7 两段式自愈的"本地复核"衔接。
 3. **负载之外的因素**:时区/时段偏好、电量、计费——先把 `accepting` 开关与 §6.3 暂停开关跑起来。
-4. **跨团队能力可见性**:与 02 §12.3 的 grant 模型联动设计。
+4. ~~**跨团队能力可见性**:与 02 §12.3 的 grant 模型联动设计。~~ **已落地(D2/D34)**:grant `caps_visible` 子集 + 网关跨队派发 `required_caps ⊆ caps_visible` 强制,能力可见性即 grant 的显式选项。

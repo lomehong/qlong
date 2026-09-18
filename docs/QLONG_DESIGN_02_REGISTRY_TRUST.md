@@ -218,7 +218,7 @@ join 前置检查:存在在途远端租约或未消费 offer 时要求显式确�
 
 1. **网关集群化**(评审 I-12/ARCH):预期节点规模与消息速率?连接注册(Redis pub/sub 或 gossip)、node_id 分片路由、收件箱共享持久存储——三件套与 01 §13.5 同场设计;**网关是有状态组件**(连接表 + 收件箱),有状态横扩是核心架构件,不存在"保持无状态"的便宜路径。
 2. **owner 账号体系与控制台**(纪要 §8.7):登录方式、会话形态(浏览器会话 vs PAT)、成员管理审批流;v1 API-only 起步(§3.2)。
-3. **跨团队授权(grant)模型**:`to.team_id` 已存在,加 grant 表即可;能力可见性作为 grant 显式选项(03 §8)。
+3. **跨团队授权(grant)模型**:`to.team_id` 已存在,grant 表已落地(`createGrant`/`revokeGrant`/`listGrants`,双向对称、带 `expires_at` TTL);能力可见性作为 grant 显式选项**已实现**(D2):`caps_visible` 子集经 `grantCaps(from,to)` 并集暴露(无 grant → undefined),网关跨队派发强制 `required_caps ⊆ caps_visible`、不覆盖即 `acl_caps_not_granted`(03 §8/§9 D34)。
 4. **团队内信任细分**:访客节点的策略标签、per-node 出口限制。
 5. **目录多副本与高可用**:目录与 token 面有状态,需多副本;directory epoch 机制(§7.1)与副本一致性衔接。
 6. **key transparency / 证书链路线图**(评审 I-17③):替代"注册中心 = 事实 CA"的运行期信任方案,列 v1.x+;v1 过渡期信任假设已如实写入 §10。
