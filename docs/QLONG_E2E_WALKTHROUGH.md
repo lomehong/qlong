@@ -1,90 +1,109 @@
-# 群龙双机走查剧本(含真实 dsh 联调记录)
+# 群龙双机走查剧本(v2 持久架构)
 
-> 状态:**剧本定稿 v1;第一幕(npx 通道真实联调)已执行通过,第二幕(双机实物)待执行**。
+> 状态:**剧本 v2 定稿(对应 transport v2 持久栈 + D1 claim 注册表 + 牵头生产链路);双机实物待执行**。
 > 目的:把"拆解 → 派单 → 取码 → 执行 → 产物回传 → 校验整合"在真实设备上跑通一遍,
-> 验证 `QLONG_STATE_MATRIX.md` 的全部预期转移与 §8.4 的文件协同链路。
+> 验证 `QLONG_STATE_MATRIX.md` 的预期转移、§8.4 文件协同链路与跨机接管。
+> 历史:第一幕(npx 通道真实 dsh 联调,2026-09-08)已执行通过,见文末附录。
 
-## 〇、环境准备(两台设备,下称 A=牵头方, B=执行方)
+## 〇、环境准备(两台设备:A=牵头方,B=执行方)
 
 | 步骤 | 设备 | 命令/动作 | 预期 |
 |------|------|-----------|------|
-| 0.1 | 任一 | `node scripts/package.mjs` | dist-release/<版本>/ + latest/ 生成,SHA256SUMS 就绪 |
-| 0.2 | A | `qlong server --dist-dir dist-release/latest --registry-port 3200 --gateway-port 3100` | registry :3200 + 网关 :3100 + 书坊分发就绪 |
-| 0.3 | 控制台 | 团队页 → 生成邀请码(或 Install 页) | 一次性 token(30 分钟 TTL) |
-| 0.4 | A、B | 执行 /install 页对应平台命令(token 走 stdin) | 下载→校验→enroll→自启;`qlong status` 显示已入网 |
-| 0.5 | 控制台 | Agent 管理页 | A、B 均可见且 online=true(I-22 验收清单 ✓) |
+| 0.1 | A、B | `node --version` | ≥ 24(v2 持久栈依赖内置 node:sqlite) |
+| 0.2 | A | `node scripts/package.mjs` → 部署中心(或用线上 `lomehong-qlong.ms.show`) | 首启:`qlong server --storage-mode create --confirm-local-filesystem`;**之后必须 `open`** |
+| 0.3 | 控制台 | 首次打开 → 创建管理员 → 登录;团队页/安装页生成邀请码 | 一次性 token(30 分钟 TTL) |
+| 0.4 | A、B | 执行 /install 安装命令(token 走 stdin) | 下载→校验→enroll→入网;**持久节点自启仅在 open+本地盘确认下注册** |
+| 0.5 | A | `qlong run --storage-mode create --confirm-local-filesystem`(首启)→ 之后 `--storage-mode open` | 节点持久 v2 启动;控制台 Agent 页 online |
+| 0.6 | B | 同 0.5 | 同上 |
+| 0.7 | 双方 | `qlong run` 追加 `--auto-select` | 启用目录驱动改派选择器(牵头方改派/接管续跑所需) |
 
-> 已执行的**第一幕记录**(2026-09-08,本机冒烟):`npx @deepseek-ai/dsh@0.1.2-rc.1 --profile headless "reply with the single word: pong"` → 输出 `pong`,exit 0(31s);
-> 同任务经 `DeepSeekHarnessDriver` 默认 npx 通道(零覆盖)→ complete 收到含 pong 的答案。
-> 上游版本:latest 0.1.2-rc.1 / alpha 0.1.3-alpha.2(npm registry 核实)。
+> 铁律:数据库丢失/损坏走显式恢复,不能改回 `create` "修复"(CENTER-STORAGE.md);
+> 数据目录必须在本地盘(NFS/SMB/云同步盘会拒绝启动)。
 
 ## 一、剧本 1:互助闭环(aid,任务书四要素)
 
+牵头方 A 启动即发起(任务书文件 `task.json`):
+
 ```json
-{ "kind": "aid", "summary": "【目标】在 /tmp/qlong-probe 写入一行 pong 并打印该行\n【边界】仅允许写 /tmp/qlong-probe\n【完成判据】stdout 出现 pong", "lease_ms": 300000, "offer_ttl_ms": 60000 }
+{ "kind": "aid", "summary": "【目标】在 /tmp/qlong-probe 写入一行 pong 并打印该行
+【边界】仅允许写 /tmp/qlong-probe
+【完成判据】stdout 出现 pong", "lease_ms": 300000, "offer_ttl_ms": 60000 }
 ```
 
-| 步骤 | 预期消息(方向) | 对应矩阵断言 |
-|------|------------------|--------------|
-| 1.1 | A→B `task.offer`(attempt=1) | §2.1 五道闸全过 → offered |
-| 1.2 | B→A `task.accept` | §1.1 offered→running,起 lease |
-| 1.3 | B→A `task.progress` ×N | 续租;心跳间隔 ≈ lease/3 |
+```sh
+# A(牵头方):发起并派给 B(显式 target),或省略 target 由选择器按 caps 挑选
+qlong run --storage-mode open --confirm-local-filesystem --auto-select   --originate task.json            # task.json 可加 "target": "<B 的 node_id>"
+```
+
+| 步骤 | 预期消息(方向) | 对应断言 |
+|------|------------------|----------|
+| 1.1 | A→B `task.offer`(attempt=1) | B 闸2/闸3 全过 → offered;中心 custody `stored` |
+| 1.2 | B→A `task.accept` | A offered→running;B 执行租约起算 |
+| 1.3 | B→A `task.progress` ×N | 心跳续租;A(lead)回发 `task.lease.renew`(B2 业务续租) |
 | 1.4 | B 侧真实执行 | dsh headless cwd=工作区,stdout=结果 |
-| 1.5 | B→A `task.result` | 验收通过 → done ✅ |
+| 1.5 | B→A `task.result` | A 验收(aid 兼容规则)→ done ✅;中心任务投影终态 |
+
+观测:控制台 任务管理页(A 的 team)出现任务投影与状态流;`qlong tasks` 查询。
 
 ## 二、剧本 2:三个异常路径
 
-- **2a 拒单改派**:B 无 `tool:ios-sign` 标签,A 派 `required_caps:["tool:ios-sign"]` 单
-  → `reject(unsupported_caps, missing)` → A 能力记忆记录 → 改派有标签节点 → done;
-- **2b 执行中失败**:driver 以 `fail(internal_error, retryable=true)` 报错
-  → cancel(reclaim)→ drain 窗口(或 cancel.ack 提前收口)→ attempt+1 改派 → done;
-- **2c 验收失败**:result 的 `acceptance_results` 不符
-  → cancel(acceptance_failed)→ attempt+1 重做(R4/D25)。
+- **2a 拒单改派**:B 无 `tool:ios-sign` 标签,A 的 task.json 带 `"required_caps": ["tool:ios-sign"]`
+  → B `reject(unsupported_caps, missing)` → A 记录能力记忆 → 选择器避开 B 改派有标签节点 → done;
+- **2b 执行中失败**:执行方 driver `fail(internal_error, retryable=true)`
+  → A cancel(reclaim)→ drain 窗口 → attempt+1 改派(R8 排除表避开失败节点)→ done;
+- **2c 验收失败**:project 任务 result 不符验收判据
+  → A cancel(acceptance_failed)→ attempt+1 重做(R4/D25)。
+  注:project 验收策略当前为机器默认(保守拒绝)——2c 天然可实测;自定义判据注入待 owner/IPC 阶段。
 
-每条均对照 `QLONG_STATE_MATRIX.md` §1.1/§2.1 的对应格;失败即矩阵与实现失配,先改表再改码。
+每条对照 `QLONG_STATE_MATRIX.md` §1.1/§2.1;失配即先改表再改码。
 
-## 三、剧本 3:项目协同(§8.4 文件协同全链)
+## 三、剧本 3:项目协同(§8.4 文件协同)
 
-1. A 生成 offer:`workspace:{repo, base_ref}` + `contract.deliverables:[{path:"dist/report.md"}]`
-   + `acceptance` + `payload_ref`(若需发数据:GitPayloadStore.store → refs/payload/<sha>);
-2. B 接单:WorkspaceManager.clone(worktree)→ fetchPayloadGit 取负载(sha256 校验)→ dsh 执行;
-3. B 完成:`pushArtifacts` 提交 `qlong/<task>` 分支 → result.artifacts 携带引用;
-4. A 校验 acceptance_results → `collectArtifacts` 收取 → done。
+1. A 的 task.json 用 `"kind": "project"` + workspace/deliverables 字段(§8.4);
+2. B 接单:WorkspaceManager.clone(worktree)→ dsh 执行 → `pushArtifacts` 提交 `qlong/<task>` 分支;
+3. B `task.result` 携 artifacts 引用;A 按默认验收策略判定(见 2c 注)。
 
-## 三b、剧本 4:双网关集群(v0.8 跨进程总线,02 §12.1)
+## 四、剧本 4:双网关集群(D1 claim 注册表,v2 形态)
 
-> 前置:v0.8 起 `qlong server` 支持集群环境变量。两台机器(或同机两进程)各起一个中心,
-> 节点就近接入;任一网关收到非本实例目标的信封 → HTTP 总线转投目标 home 网关
-> (在线直投 / 离线落彼收件箱);总线不可达 → 本地兜底入箱(端上 R1/R2 兜底正确性)。
+> v2 的集群 = **多网关进程共享同一中心 SQLite**(custody + claim 表)+ `/internal/pump` 中继。
+> 旧 `QLONG_CLUSTER_SECRET/QLONG_CLUSTER_PEERS` 属 legacy 分片模型,持久模式下**拒绝配置**。
+
+| 步骤 | 动作 | 预期 |
+|------|------|------|
+| 4.1 | 同一中心库,起两个网关进程(gw1、gw2,`--registry-port` 不同;`QLONG_RELAY_SECRET=<共享密钥>`、gw1 另设 `QLONG_RELAY_PEERS=http://127.0.0.1:<gw2端口>`,反之亦然) | 双 authority 共享 custody/claim 表 |
+| 4.2 | a_node 连 gw1,b_node 连 gw2 | 控制台两节点均 online |
+| 4.3 | a_node 给 b_node 发 project 单(b 离线先不入网) | ack=stored;pending 静置共享库 |
+| 4.4 | b_node 连上 gw2 | 认证即补投(pump);再发一条 → gw1 查 claim 发现现主是 gw2 → `/internal/pump` 通知 → 即时推送 |
+| 4.5 | 渗透自检 | 无密钥头 POST /internal/pump → 403;伪造 generation → `pumped:false`(fence 守卫);claim 库停用 → 500 fail-closed |
+| 4.6 | 停 gw1 | 其上连接租约 30s 内过期;节点重连 gw2 → claim gen+1 → gw1 若复活,旧 claim renew 被拒(fence-drop 4000 'superseded') |
+
+## 五、剧本 5:跨机接管(C2 + 运维命令,新)
+
+前置:A 上有一个 running 牵头任务(剧本 1 发起后)。
 
 | 步骤 | 设备 | 命令 | 预期 |
 |------|------|------|------|
-| 4.1 | A | `QLONG_CLUSTER_SECRET=<共享密钥> QLONG_CLUSTER_NAME=gw1 QLONG_CLUSTER_PEERS=https://<B地址>:7860 QLONG_MAILBOX_FILE=./mailbox-a.json qlong server` | 启动日志出现"网关集群:密钥已启用,成员 1" |
-| 4.2 | B | `QLONG_CLUSTER_SECRET=<同一密钥> QLONG_CLUSTER_NAME=gw2 QLONG_CLUSTER_PEERS=https://<A地址>:7860 QLONG_MAILBOX_FILE=./mailbox-b.json qlong server` | 同上;两实例共用同一注册中心目录(共享 registry 存储/或同库) |
-| 4.3 | A、B | 各 enroll 一个节点(a_node 连 A,b_node 连 B) | 控制台两节点均 online |
-| 4.4 | b_node | 给 a_node 发 project 单(离线场景:a_node 先不入网) | ack=queued;`mailbox-b.json`(或 a 侧 home 分片)出现该信封 |
-| 4.5 | a_node | 连上 A 网关 | 认证即补投,收到 4.4 的信封 |
-| 4.6 | 运维 | 停掉 B → b_node 期间收到 project 单 → 重启 B | 总线对 B 不可达 → 落本实例兜底;重启后 `QLONG_MAILBOX_FILE` 恢复,补投不丢 |
-| 4.7 | 渗透 | `curl -X POST https://<B>:7860/internal/envelope -d '{}'`(无密钥头) | 403 forbidden;畸形信封 400 |
+| 5.1 | A | Ctrl+C(等停机 flush 完成) | 在跑任务终态落中心;节点停机 |
+| 5.2 | A | `qlong lead export --out bundle.json --key <操作员32字节hex种子> --data-dir <A数据目录> --storage-mode open --confirm-local-filesystem` | `已导出 N 个牵头任务(已签名)` |
+| 5.3 | 运维 | 把 bundle.json 安全传给 B(scp 等) | — |
+| 5.4 | B | `qlong run --storage-mode open --confirm-local-filesystem --auto-select --takeover bundle.json --takeover-key <同一种子hex>` | `跨机接管:重派 N | fenced M | 归档 K`;在途任务 attempt+1 重派新执行方 |
+| 5.5 | 反向验证 | 把同一 bundle 再次 import 到 A(若 A 复活) | fenced(禁双主回退,attempt 高水位仲裁) |
+| 5.6 | 渗透 | 篡改 bundle 中任一 attempt 后 import | 验签失败 bad_sig,拒绝接管 |
 
-注意:
-- 共享密钥只走环境变量/密管,不进 URL 不进日志(评审 I-16 同源原则);
-- 扩缩容成员前约定成员序列(分片 = FNV-1a(nodeId) % 成员序);
-- Redis pub/sub 等传输按 `ClusterBus` 接口替换,剧本步骤不变。
+种子生成:`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`(操作员自持,勿提交)。
 
-## 四、走查产出(执行后回填本节)
+## 六、走查产出(执行后回填本节)
 
-- [ ] 剧本 1 通过(记录消息时间线);
+- [ ] 剧本 1 通过(记录消息时间线与 custody stored/receipt);
 - [ ] 剧本 2a/2b/2c 通过;
 - [ ] 剧本 3 通过(记录 git 分支与产物校验);
-- [ ] 剧本 4 通过(记录总线转投日志与收件箱落盘文件);
-- [ ] 仅凭双方日志 + trace_id 离线还原一次派单全生命周期(可观测性验收,评审 I-34⑤);
-- [ ] 发现的隐藏决策/偏差回填:`(状态×消息×定时器)矩阵` 与本剧本。
+- [ ] 剧本 4 通过(记录 claim generation 序列与 pump 中继日志);
+- [ ] 剧本 5 通过(记录 attempt 高水位变化与续跑证据);
+- [ ] 仅凭双方日志 + trace_id 离线还原一次派单全生命周期(评审 I-34⑤);
+- [ ] 发现的隐藏决策/偏差回填状态矩阵与本剧本。
 
-## 五、故障注入清单(可选加深)
+## 附录:第一幕记录(历史,2026-09-08)
 
-offer_ttl 过期(执行方长离线后补投 → reject(expired) 批量场景)/
-租约停跳(执行方休眠 5 分钟 → lost → reclaim → 改派)/
-牵头方断线(执行方 lease_self 暂停 → 恢复续跑)/
-中心不可达(outbox 保留,重连补发)/
-吊销节点(B 侧 suspend → 网关 4001 断连)。
+`npx @deepseek-ai/dsh@0.1.2-rc.1 --profile headless "reply with the single word: pong"` → 输出 `pong`,exit 0(31s);
+同任务经 DeepSeekHarnessDriver 默认 npx 通道(零覆盖)→ complete 收到含 pong 的答案。
+上游:latest 0.1.2-rc.1 / alpha 0.1.3-alpha.2(npm registry 核实)。v2 生产驱动为 `FencedProcessDriver`(fence→pid 落盘,recover 据此判定孤儿)。
