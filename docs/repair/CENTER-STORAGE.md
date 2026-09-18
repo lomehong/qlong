@@ -61,7 +61,7 @@
 
 ## 仍未完成 / 不允许的推论
 
-- gateway-only/单 authority 跨进程接线、连接登记 generation/TTL 与跨队节点能力范围执行尚待实现。
+- 连接登记 generation/TTL(D1 claim 注册表)与跨队节点能力范围执行(D2 grant caps)已实现:多 authority 共享同一中心库,经 `/internal/pump` 中继做定向泵通知(不搬 payload);legacy `QLONG_CLUSTER_*` 仅限 ephemeral 演示,持久模式拒绝。仍待实现:多中心 claim 一致性(§12.5)、Redis 传输替换。
 - 单 authority v2 `stored/receipt` 及节点事务存储已接通；节点侧任务 pump 已由 `createDurableNode` + `FencedProcessDriver` 接通（单 executor aid 闭环，见 [协议与节点事务边界](PROTOCOL-V2.md)）；业务续租（多网关接续）、多 lead、产物验收与容器级恢复仍未完成。当前 v2 inbox 保留 pending，不能接旧会话直接执行。
 - Docker/Podman 强隔离、模型 broker、RunHandle、产物采集/可信验收、IPC/owner command 与显式旧数据迁移仍在后续阶段。
 - 当前验证覆盖中心目录/Auth/投影及单 authority 消息接管恢复，**不是任务与外部副作用均可恢复**；不要向不受信节点开放远端执行。tombstone 暂无 GC，计入容量上限，满时拒收而非淘汰。

@@ -236,7 +236,7 @@ if (cmd === 'server') {
       .filter(Boolean),
   });
   console.log('qlong server:http://' + (handles.storageMode === 'ephemeral' ? '127.0.0.1:' : '0.0.0.0:') + handles.registryPort, handles.gatewayPath ? '| 网关 ws 同端口 ' + handles.gatewayPath : '| 网关 ws://127.0.0.1:' + handles.gatewayPort);
-  console.log('中心存储:', handles.storageMode, '| 仅 Registry/Auth/任务投影持久化;可靠 mailbox/节点恢复尚未就绪');
+  console.log('中心存储:', handles.storageMode, handles.storageMode === 'ephemeral' ? '| 内存演示形态' : '| custody mailbox/claim 注册表/任务投影持久化');
   if (handles.cluster) {
     console.log('网关集群:密钥已启用' + (handles.cluster.size > 1 ? ',成员 ' + handles.cluster.size : '(单实例形态)'));
   }

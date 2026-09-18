@@ -216,7 +216,7 @@ join 前置检查:存在在途远端租约或未消费 offer 时要求显式确�
 
 ## 12. 开放问题
 
-1. **网关集群化**(评审 I-12/ARCH):预期节点规模与消息速率?连接注册(Redis pub/sub 或 gossip)、node_id 分片路由、收件箱共享持久存储——三件套与 01 §13.5 同场设计;**网关是有状态组件**(连接表 + 收件箱),有状态横扩是核心架构件,不存在"保持无状态"的便宜路径。
+1. **网关集群化**(评审 I-12/ARCH):**已定稿并兑现 D1**(docs/repair/CLUSTER-REGISTRY.md,与 01 §13.5 同场)——共享 `SqliteCustodyStore` 即"收件箱共享持久存储";分片降为扩容杠杆(非正确性所需);"连接注册"= claim 注册表(`gateway_claim` + `gateway_claim_seq` 中心表,generation 单调 fencing token + TTL 租约,节点零额外帧守 §8);多 authority 经 `/internal/pump` 通知定向泵(不搬 payload);legacy `GatewayCluster`/`HttpClusterBus` 仅存于 ephemeral 演示形态。**仍开放**:Redis 传输替换(端口已预留)、claim 库分片/多中心一致性(§12.5)。
 2. **owner 账号体系与控制台**(纪要 §8.7):登录方式、会话形态(浏览器会话 vs PAT)、成员管理审批流;v1 API-only 起步(§3.2)。
 3. **跨团队授权(grant)模型**:`to.team_id` 已存在,grant 表已落地(`createGrant`/`revokeGrant`/`listGrants`,双向对称、带 `expires_at` TTL);能力可见性作为 grant 显式选项**已实现**(D2):`caps_visible` 子集经 `grantCaps(from,to)` 并集暴露(无 grant → undefined),网关跨队派发强制 `required_caps ⊆ caps_visible`、不覆盖即 `acl_caps_not_granted`(03 §8/§9 D34)。
 4. **团队内信任细分**:访客节点的策略标签、per-node 出口限制。

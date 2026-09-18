@@ -173,6 +173,15 @@ legacy `GatewayCluster`/`clusterSecret`（那是 per-instance InboxStore 分片�
 - **legacy 集群**：`GatewayCluster` + `HttpClusterBus` 非-custody 路径**保持不变**（v0.8 行为）；
   是否让 legacy 路径也采用 claim 注册表以获分裂脑安全，列为后续（非 D1）。
 
+## 7b. 实施收尾（d1a–d1d 全部落地,2026-09-18）
+
+- **d1a**（e73a2ab）:`GatewayConnection.generation` + `LocalClaimRegistry`（单 authority 单调）+ M2-03 升级为 generation 可判定归属;
+- **d1b**（3670508）:claim TTL 租约（`leaseExpiresAt`/`renew`/`reapExpired`）+ 网关侧 renew 定时器与 fence-drop（4000 'superseded'）自愈;节点零额外帧（§8 一致）;
+- **D1c**（6290fc4）:`SqliteClaimStore`（中心共享,`gateway_claim_seq` 高水位跨进程/跨重启单调,事务内原子自增,损坏 fail-closed）+ 中心 schema v3 装配;
+- **d1d**:custody 集群路由解禁 —— `PumpRelay` 出站通知 + `POST /internal/pump`（独立端口 = ws server,单端口 = registry http 路由）+ `pumpNotify` fence 守卫（仅现 (authorityId, generation) 才泵）+ `admitCustody` 推送定向（本端无连接 → 查 claim → 他 authority 持现租约才通知）;relaySecret 与 legacy clusterSecret 互斥且仅 custody 模式;`QLONG_RELAY_SECRET`/`QLONG_RELAY_PEERS` 装配。
+- 验证:`custody-relay.spec`（5 用例:通知内容含正确 generation / fence 守卫 / 离线不通知+认证补投 / 端点鉴权 / peer 不可达不影响 stored）+ `server-custody.spec` D1d 2 用例;变异要点已固化（移除 fence 守卫 → 非现主 pumped:true 为 RED）。
+- §7 开放项不变:claim 库 Redis 实现与分片、多中心一致性、legacy 路径是否采用 claim —— 均 YAGNI 暂缓。
+
 ## 8. 不做（YAGNI 边界）
 
 - gossip 协议、多中心、节点侧任何改动、transport 特性位改动（claim 对节点透明）。

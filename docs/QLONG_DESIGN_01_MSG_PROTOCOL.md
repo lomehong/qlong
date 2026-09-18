@@ -326,6 +326,6 @@
 2. **跨机 leader 接管**(评审 I-35):v1 已钉死为同机进程重启;跨机方案中**手动导出/导入候选已在 v2 持久栈兑现(C2)**:`DurableLead.exportTasks/importTasks` 携 attempt 高水位与在途清单,接管方按 §4.4 前置条件将在途任务 attempt 提到高水位之上再重派(fence;禁双主回退、终态归档),`createDurableNode.takeover` 导入即重派+flush(等价 v1 `importCheckpoints` 的 `onNeedDispatch`)。**仍开放**:自动选举(谁有权触发、免人工)与检查点备份节点方案(端到端加密、不经中心)待 §8.4 走查后定。
 3. ~~payload_ref 解析~~ → 结构与安全基线已定(R10);存储选型仍属纪要 §8.4。
 4. ~~能力报错标准化~~ → 已由 03 篇关闭(reject 附 `missing`)。
-5. **网关集群化**(评审 I-12):规模目标(节点数/消息速率)、连接注册、node_id 分片路由、收件箱共享存储——网关是**有状态**组件,横扩是核心架构件而非"保持无状态";与 02 §12 同场设计。
+5. **网关集群化**(评审 I-12):**已在 D1 定稿并兑现**(docs/repair/CLUSTER-REGISTRY.md,02 §12.1)——三件套中"收件箱共享持久存储"由中心 `SqliteCustodyStore` 兑现、"node_id 分片"因库共享降为扩容杠杆、"连接注册"由 claim 注册表兑现:`generation`(每节点单调 fencing token)+ authority-liveness TTL 租约,分裂脑"高 generation 恒胜"收敛,半开/僵死经 renew fence-drop 自愈;跨进程推送经 `/internal/pump` 中继(只通知不搬 payload,正确性由周期泵兜底)。Redis 传输与 legacy 分片路径迁移列为后续可选。
 6. **单机执行模型**(纪要 §8.4 同场):`offer.summary` 如何实例化为本地会话(基座为原版 deepseek-harness,TypeScript;映射层接口随走查定稿)。
 7. **任务书写作规范模板**(评审 I-24):随 §8.4 双机走查定稿,作为 03 §6.1 注入防线的第一道工程化措施。
