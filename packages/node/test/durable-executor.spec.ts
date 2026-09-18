@@ -822,3 +822,54 @@ describe('DurableExecutor 单 exec 归属仲裁(C2b: 接管 fence 后陈旧 lead
     expect(f.outputs('task.accept').at(-1)!.to).toMatchObject({ node_id: OTHER });
   });
 });
+
+describe('DurableExecutor 接管↔恢复联动(C2c: recover 不复活旧 lead 陈旧 run)', () => {
+  it('运行中重启:recover 可证静默时对账陈旧 run 为终态而绝不复活,清空 slot 后新 lead 更高 attempt 可接管', async () => {
+    const f = await setup();
+    const taskId = newId();
+    f.deliver(offer({ task_id: taskId, attempt: 1 })); // 旧 lead SENDER attempt 1
+    await f.executor.settle();
+    expect(f.executor.snapshot().slot).toMatchObject({ fence: { task_id: taskId, attempt: 1 }, lead: SENDER, phase: 'running' });
+    // 执行方在运行中重启:关闭 store,以持久句柄重开新 executor;C1 recover 据 pid 消失判 stopped(可证静默)。
+    f.store.close();
+    const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
+    const driver = new FakeDriver(runtime);
+    driver.recovery = 'stopped';
+    const executor = new DurableExecutor({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal, driver });
+    const outputs = (type: string) => runtime.all().map((i) => i.envelope).filter((i) => i.type === type);
+    const redeliver = (input: EnvelopeV1) => { expect(['new', 'duplicate']).toContain(runtime.receive(input)); executor.consume(input, true); };
+    await executor.recover();
+    // 不复活:recover 绝不重新 start 陈旧 run;对账为终态(failed/execution_interrupted),slot 清空、last 记旧 lead/attempt。
+    expect(driver.start).not.toHaveBeenCalled();
+    expect(executor.snapshot()).toMatchObject({ generation: 1, slot: null, last: { fence: { task_id: taskId, attempt: 1 }, lead: SENDER } });
+    expect(outputs('task.fail').map((e) => e.body.summary)).toEqual(['execution_interrupted']);
+    // 陈旧 attempt 无论来自哪个 lead 皆被 stale_attempt 拒(守卫基于 last 高水位、与 sender 无关):
+    // OTHER 滞后的 attempt=1(尚未 R1 记录 → 抵达仲裁)→ stale_attempt,绝不复活已对账的陈旧 run。
+    redeliver(offer({ task_id: taskId, attempt: 1, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'stale_attempt', retryable: false });
+    expect(driver.start).not.toHaveBeenCalled();
+    // 接管后的新 lead(OTHER)以更高 attempt=2 → 放行、generation 单调推进(1→2)、归属移交 OTHER。
+    redeliver(offer({ task_id: taskId, attempt: 2, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(executor.snapshot().slot).toMatchObject({ fence: { task_id: taskId, attempt: 2, generation: 2 }, lead: OTHER });
+  });
+
+  it('无法证明静默时 recover 判 unknown → recovery_required 占用单槽,新 lead offer 得 busy(可重试)而非在不确定期复活陈旧 run', async () => {
+    const f = await setup();
+    const taskId = newId();
+    f.deliver(offer({ task_id: taskId, attempt: 1 }));
+    await f.executor.settle();
+    f.store.close();
+    const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
+    const driver = new FakeDriver(runtime); // recovery 默认 'unknown':活孤儿不可证身份
+    const executor = new DurableExecutor({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal, driver });
+    const outputs = (type: string) => runtime.all().map((i) => i.envelope).filter((i) => i.type === type);
+    const redeliver = (input: EnvelopeV1) => { expect(['new', 'duplicate']).toContain(runtime.receive(input)); executor.consume(input, true); };
+    await executor.recover();
+    expect(driver.start).not.toHaveBeenCalled(); // 不复活
+    expect(executor.snapshot().slot).toMatchObject({ phase: 'recovery_required', fence: { task_id: taskId, attempt: 1 }, lead: SENDER });
+    // 陈旧 run 未对账为终态前占用单槽:新 lead 更高 attempt 得 busy(可重试),绝不在不确定期并发复活。
+    redeliver(offer({ task_id: taskId, attempt: 2, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
+    expect(outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'busy', retryable: true });
+    expect(driver.start).not.toHaveBeenCalled();
+  });
+});

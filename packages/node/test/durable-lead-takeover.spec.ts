@@ -158,3 +158,31 @@ describe('DurableLead 跨机接管 fence(C2a: export/import + attempt 高水位�
     expect(() => t.lead.importTasks(bad as never)).toThrow();
   });
 });
+
+describe('DurableLead 接管↔续租联动(C2c: 接管后 renewalSeq 单调续接,绝不重置)', () => {
+  it('import 保留 origin 的 renewalSeq 高水位,新 lead 重派后首次续租序号从其续接而非归 1', () => {
+    const o = origin();
+    const taskId = newId();
+    o.lead.originate(taskId, 'aid');
+    o.lead.dispatch(taskId, EXEC, offerBody());
+    o.deliver(receiptTo(LOCAL, 'task.accept', taskId, 1, { lease_ms: LEASE })); // → running attempt 1
+    // origin 一次心跳续租 → renewalSeq 抬到 1(renewal_seq=1)。
+    o.deliver(receiptTo(LOCAL, 'task.progress', taskId, 1, { generation: 1, run_id: newId(), seq: 1 }));
+    expect(o.lead.snapshot(taskId)?.renewalSeq).toBe(1);
+    expect(o.outputs('task.lease.renew').map((r) => r.body.renewal_seq)).toEqual([1]);
+    const bundle = o.lead.exportTasks();
+
+    // 接管:importTasks 浅拷贝保留 renewalSeq 高水位(=1),attempt fence 到 2、归位 drafting。
+    const t = target({ selectTarget: () => ({ target: EXEC2, offerBody: offerBody() }) });
+    t.lead.importTasks(bundle);
+    expect(t.lead.snapshot(taskId)).toMatchObject({ state: 'drafting', attempt: 2, renewalSeq: 1 });
+    // 重派 attempt+1(=3):redispatchTo 不触碰 renewalSeq,仍为 1(跨改派单调,绝不重置)。
+    t.lead.tick(now);
+    expect(t.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 3, renewalSeq: 1 });
+    // 新执行方 accept → running,首次心跳续租的 renewal_seq 从高水位续接(=2),而非重置为 1。
+    t.deliver(receiptTo(OTHER, 'task.accept', taskId, 3, { lease_ms: LEASE }, EXEC2));
+    t.deliver(receiptTo(OTHER, 'task.progress', taskId, 3, { generation: 2, run_id: newId(), seq: 1 }, EXEC2));
+    expect(t.outputs('task.lease.renew').map((r) => r.body.renewal_seq)).toEqual([2]);
+    expect(t.lead.snapshot(taskId)?.renewalSeq).toBe(2);
+  });
+});
