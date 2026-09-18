@@ -168,3 +168,58 @@ describe('能力与目录查询(03 §4/§5,评审 I-59)', () => {
     expect(after.nodes.find((n) => n.node_id === node_id)?.status).toBe('revoked');
   });
 });
+
+describe('跨队能力授权 grantCaps(D2,03 §8/§10.4)', () => {
+  function twoTeams(nowFn: () => number = () => 1_000_000) {
+    const r = new Registry({ now: nowFn });
+    const a = r.createTeam({ owner_user_id: 'u1' });
+    const b = r.createTeam({ owner_user_id: 'u2' });
+    return { r, a, b };
+  }
+
+  it('活跃 grant → 返回 caps_visible,双向对称,hasGrant 一致为真', () => {
+    const { r, a, b } = twoTeams();
+    r.createGrant({ from_team: a.team_id, to_team: b.team_id, caps_visible: ['tool:x', 'env:wsl2'] });
+    expect(r.grantCaps(a.team_id, b.team_id)).toEqual(['tool:x', 'env:wsl2']);
+    expect(r.grantCaps(b.team_id, a.team_id)).toEqual(r.grantCaps(a.team_id, b.team_id));
+    expect(r.hasGrant(a.team_id, b.team_id)).toBe(true);
+  });
+
+  it('无 grant → undefined(与"有 grant 但 caps 空"的 [] 区分),hasGrant 为假', () => {
+    const { r, a, b } = twoTeams();
+    expect(r.grantCaps(a.team_id, b.team_id)).toBeUndefined();
+    expect(r.hasGrant(a.team_id, b.team_id)).toBe(false);
+  });
+
+  it('grant 存在但 caps_visible 空 → [](通道开启但未授予任何能力)', () => {
+    const { r, a, b } = twoTeams();
+    r.createGrant({ from_team: a.team_id, to_team: b.team_id });
+    expect(r.grantCaps(a.team_id, b.team_id)).toEqual([]);
+    expect(r.hasGrant(a.team_id, b.team_id)).toBe(true);
+  });
+
+  it('过期 grant → undefined,hasGrant 转假(随 now 推进失效)', () => {
+    let now = 1_000_000;
+    const { r, a, b } = twoTeams(() => now);
+    r.createGrant({ from_team: a.team_id, to_team: b.team_id, caps_visible: ['tool:x'], ttlMs: 5_000 });
+    expect(r.grantCaps(a.team_id, b.team_id)).toEqual(['tool:x']);
+    now += 5_001;
+    expect(r.grantCaps(a.team_id, b.team_id)).toBeUndefined();
+    expect(r.hasGrant(a.team_id, b.team_id)).toBe(false);
+  });
+
+  it('多条活跃 grant → caps_visible 并集去重', () => {
+    const { r, a, b } = twoTeams();
+    r.createGrant({ from_team: a.team_id, to_team: b.team_id, caps_visible: ['tool:x', 'env:wsl2'] });
+    r.createGrant({ from_team: b.team_id, to_team: a.team_id, caps_visible: ['env:wsl2', 'tool:y'] });
+    expect([...r.grantCaps(a.team_id, b.team_id)!].sort()).toEqual(['env:wsl2', 'tool:x', 'tool:y']);
+  });
+
+  it('revokeGrant → 活跃 grant 消失后回落 undefined', () => {
+    const { r, a, b } = twoTeams();
+    const g = r.createGrant({ from_team: a.team_id, to_team: b.team_id, caps_visible: ['tool:x'] });
+    expect(r.grantCaps(a.team_id, b.team_id)).toEqual(['tool:x']);
+    r.revokeGrant(g.grant_id);
+    expect(r.grantCaps(a.team_id, b.team_id)).toBeUndefined();
+  });
+});

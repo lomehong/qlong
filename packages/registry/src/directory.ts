@@ -586,11 +586,26 @@ export class Registry {
     return task?.team_id === teamId ? structuredClone(task) : undefined;
   }
   hasGrant(fromTeam: string, toTeam: string): boolean {
+    return this.grantCaps(fromTeam, toTeam) !== undefined;
+  }
+
+  /**
+   * D2(03 §8/§10.4):返回 from↔to 之间所有活跃 grant 的 caps_visible 并集(去重)。
+   * 双向对称(与 hasGrant 一致);过期 grant 跳过。
+   * 无活跃 grant → undefined(区别于"有 grant 但 caps 空"→ []);
+   * 跨队派发时网关据此裁剪:required_caps ⊆ caps_visible 方可路由。
+   */
+  grantCaps(fromTeam: string, toTeam: string): string[] | undefined {
+    let found = false;
+    const union = new Set<string>();
     for (const g of this.grants.values()) {
       if (g.expires_at !== undefined && this.now > g.expires_at) continue;
-      if ((g.from_team === fromTeam && g.to_team === toTeam) || (g.from_team === toTeam && g.to_team === fromTeam)) return true;
+      if ((g.from_team === fromTeam && g.to_team === toTeam) || (g.from_team === toTeam && g.to_team === fromTeam)) {
+        found = true;
+        for (const c of g.caps_visible) union.add(c);
+      }
     }
-    return false;
+    return found ? [...union] : undefined;
   }
 
   /**
