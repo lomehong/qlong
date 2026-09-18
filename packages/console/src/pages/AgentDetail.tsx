@@ -3,9 +3,10 @@ import { StatusDot } from '../components/StatusDot';
 import { CopyChip } from '../components/CopyChip';
 import { Loading } from '../components/ui';
 
-export default function AgentDetail({ onBack }: { onBack: () => void }) {
+export default function AgentDetail({ onBack, agentId }: { onBack: () => void; agentId: string }) {
   const { agents, suspendAgent, resumeAgent, revokeAgent } = useStore();
-  const agent = agents[0];
+  // 按选中 id 取记录(此前恒取 agents[0],详情页永远显示第一个 Agent —— 真 bug 修复)
+  const agent = agents.find((a) => a.node_id === agentId);
   if (!agent) return <Loading />;
   return (
     <div>
@@ -34,9 +35,9 @@ export default function AgentDetail({ onBack }: { onBack: () => void }) {
         </div>
       </div>
       <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
-        {agent.status === 'suspended' && <button className="btn btn-primary" onClick={() => resumeAgent('33333333-3333-4333-8333-333333333333', agent.node_id).catch(e => useStore.getState().setError((e as Error).message))}>恢复</button>}
-        {agent.status === 'active' && <button className="btn btn-ghost" onClick={() => suspendAgent('33333333-3333-4333-8333-333333333333', agent.node_id).catch(e => useStore.getState().setError((e as Error).message))}>暂停</button>}
-        <button className="btn btn-danger" onClick={() => { if (window.confirm('确认永久吊销? 此操作不可逆。')) revokeAgent('33333333-3333-4333-8333-333333333333', agent.node_id).catch(e => useStore.getState().setError((e as Error).message)); }}>吊销</button>
+        {agent.status === 'suspended' && <button className="btn btn-primary" onClick={() => resumeAgent(agent.team_id, agent.node_id).catch(e => useStore.getState().setError((e as Error).message))}>恢复</button>}
+        {agent.status === 'active' && <button className="btn btn-ghost" onClick={() => suspendAgent(agent.team_id, agent.node_id).catch(e => useStore.getState().setError((e as Error).message))}>暂停</button>}
+        <button className="btn btn-danger" onClick={() => { if (window.confirm('确认永久吊销? 此操作不可逆。')) revokeAgent(agent.team_id, agent.node_id).catch(e => useStore.getState().setError((e as Error).message)); }}>吊销</button>
       </div>
     </div>
   );

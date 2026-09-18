@@ -1,3 +1,4 @@
+import { useStore } from '../store/useStore';
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { CopyChip } from '../components/CopyChip';
@@ -14,7 +15,7 @@ export default function Tasks({ teamId }: { teamId: string }) {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     if (!teamId) return;
-    api.get<{ tasks: TaskRow[] }>(`/v1/teams/${teamId}/tasks`).then(d => setTasks(d.tasks)).catch(() => {}).finally(() => setLoading(false));
+    api.get<{ tasks: TaskRow[] }>(`/v1/teams/${teamId}/tasks`).then(d => setTasks(d.tasks)).catch((e) => useStore.getState().setError((e as Error).message)).finally(() => setLoading(false));
   }, [teamId]);
   if (loading) return <Loading />;
   return (

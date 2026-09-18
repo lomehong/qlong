@@ -46,6 +46,7 @@ export default function App() {
   const [teamId, setTeamId] = useState('');
   const [authState, setAuthState] = useState<'checking' | 'login' | 'ready'>('checking');
   const [username, setUsername] = useState('');
+  const [agentId, setAgentId] = useState('');
   const loadTeams = useStore((s) => s.loadTeams);
   // 真实可见宽度档位(s/m/l)写入 <html data-vw>,驱动全局响应式;
   // 在固定宽度 iframe(创空间)内也能随外层窗口缩放/横滚正确适配
@@ -137,14 +138,14 @@ export default function App() {
         <div key={page} className="page-enter">
           {page === 'dashboard' && <Dashboard onNav={setPage} teamId={teamId} />}
           {page === 'install' && <Install teamId={teamId} />}
-          {page === 'agents' && <Agents onNav={setPage} teamId={teamId} />}
-          {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} />}
+          {page === 'agents' && <Agents onNav={(p, nid) => { if (nid) setAgentId(nid); setPage(p); }} teamId={teamId} />}
+          {page === 'agent-detail' && <AgentDetail onBack={() => setPage('agents')} agentId={agentId} />}
           {page === 'tasks' && <Tasks teamId={teamId} />}
           {page === 'teams' && <Teams onOpen={(tid) => { setTeamId(tid); setPage('team-detail'); }} />}
           {page === 'team-detail' && <TeamDetail onBack={() => setPage('teams')} teamId={teamId} />}
           {page === 'grants' && <Grants teamId={teamId} />}
           {page === 'audit' && <Audit teamId={teamId} />}
-          {page === 'settings' && <Settings />}
+          {page === 'settings' && <Settings username={username} />}
         </div>
       </main>
       <ErrorToast />

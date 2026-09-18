@@ -4,7 +4,7 @@ import { StatusDot } from '../components/StatusDot';
 import { CopyChip } from '../components/CopyChip';
 import { Loading, Empty } from '../components/ui';
 
-export default function Agents({ onNav, teamId }: { onNav: (p: string) => void; teamId: string }) {
+export default function Agents({ onNav, teamId }: { onNav: (p: string, nodeId?: string) => void; teamId: string }) {
   const { agents, loading, error, fetchOverview, suspendAgent, resumeAgent, revokeAgent } = useStore();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('全部状态');
@@ -38,7 +38,7 @@ export default function Agents({ onNav, teamId }: { onNav: (p: string) => void; 
           <table className="table">
             <thead><tr>{['状态', '名称', '平台', '版本', 'key_epoch', 'caps_rev', '最近活跃', '操作'].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>{filtered.map(a => (
-              <tr key={a.node_id} className="row-clickable" onClick={() => onNav('agent-detail')}>
+              <tr key={a.node_id} className="row-clickable" onClick={() => onNav('agent-detail', a.node_id)}>
                 <td><StatusDot online={a.online} status={a.status} /></td>
                 <td><strong>{a.name || a.node_id.slice(0, 8)}</strong> <CopyChip value={a.node_id} /></td>
                 <td>{a.platform || '—'}</td>

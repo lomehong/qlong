@@ -95,26 +95,29 @@ esac
 GATEWAY_URL="${QLONG_GATEWAY_URL:-$GW_BASE/gateway}"
 if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 注册入网..."
-  echo "$ENROLL_TOKEN" | "$INSTALL_DIR/qlong" enroll --stdin --registry "$DIST_BASE" --gateway "$GATEWAY_URL"
-  echo ">>> 入网完成"
+  if echo "$ENROLL_TOKEN" | "$INSTALL_DIR/qlong" enroll --stdin --registry "$DIST_BASE" --gateway "$GATEWAY_URL"; then
+    echo ">>> 入网完成"
+  else
+    echo "!!! 入网失败:请核对邀请码是否有效(30 分钟 TTL、一次性)后重试安装" >&2
+    exit 1
+  fi
 fi
 
 # 服务化自启(纪要 §8.5:装完即在线/重启自动在线)。
 # 持久节点拒绝隐式启动:自启必须显式准入(open + 本地文件系统确认);
 # create 不能注册为自启(重启即 DATABASE_EXISTS 失败循环)——首次创建须手动完成。
-SERVICE_ARGS=""
 if [ -n "$QLONG_STORAGE_MODE" ] && [ "$QLONG_LOCAL_FS_CONFIRMED" = "1" ]; then
   if [ "$QLONG_STORAGE_MODE" != "open" ]; then
     echo ">>> 跳过自启注册:QLONG_STORAGE_MODE=$QLONG_STORAGE_MODE;自启必须 open"
     echo "    首次手动执行: qlong run --storage-mode create --confirm-local-filesystem"
     echo "    完成后以 QLONG_STORAGE_MODE=open 重跑安装即可注册自启"
   else
-    [ -n "$QLONG_DATA_DIR" ] && SERVICE_ARGS="$SERVICE_ARGS --data-dir $QLONG_DATA_DIR"
-    [ -n "$QLONG_DATA_BASE" ] && SERVICE_ARGS="$SERVICE_ARGS --data-base $QLONG_DATA_BASE"
-    SERVICE_ARGS="$SERVICE_ARGS --storage-mode open --confirm-local-filesystem"
-    [ "$QLONG_WINDOWS_ACL_CONFIRMED" = "1" ] && SERVICE_ARGS="$SERVICE_ARGS --confirm-windows-acl"
-    # shellcheck disable=SC2086
-    "$INSTALL_DIR/qlong" service install $SERVICE_ARGS
+    # POSIX 位置参数逐词累积:路径含空格不会碎(不使用字符串拼接展开)
+    set -- --storage-mode open --confirm-local-filesystem
+    [ -n "$QLONG_DATA_DIR" ] && set -- "$@" --data-dir "$QLONG_DATA_DIR"
+    [ -n "$QLONG_DATA_BASE" ] && set -- "$@" --data-base "$QLONG_DATA_BASE"
+    [ "$QLONG_WINDOWS_ACL_CONFIRMED" = "1" ] && set -- "$@" --confirm-windows-acl
+    "$INSTALL_DIR/qlong" service install "$@"
   fi
 else
   echo ">>> 跳过自启注册:未配置持久存储准入(QLONG_STORAGE_MODE=open + QLONG_LOCAL_FS_CONFIRMED=1)"
