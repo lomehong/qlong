@@ -58,6 +58,7 @@
 - cli `server-custody.spec.ts`：正式中心 + 真实 Registry 验签 + 实际 client/runtime，中心/节点重开、接管与收件 COMMIT 故障、v1→v2 追加迁移保留原数据/校验和。
 - node `durable-node.spec.ts`：`createDurableNode` 全链 pump——v2 闭环（offer→accept→driver→result→stored 释放）、无 driver 拒单、重启 pending 重授权消费、验证失败留 pending 重试、cancel/租约到期、关停 flush、create/open 准入与身份不匹配拒绝、consume COMMIT 故障 fail-closed。
 - node `fenced-driver.spec.ts`：`FencedProcessDriver` 的 exit 0/非零、stop 静默、任务超时、spawn 失败、workdir 装配与恒 unknown 的 recover。
+- node `durable-lease-loop.spec.ts`：B2 业务续租端到端闭环——牵头方 `DurableLead` 生产半与执行方 `DurableExecutor` 消费半经双独立 store + 手动中继信封互操作（offer→accept→跨心跳 progress→`task.lease.renew`→业务租约死线延长），并验证延长死线跨 store 重开持久（多网关接续的唯一事实基础）。生产半/消费半的单元边界另由 `durable-lead.spec.ts`（B2a）与 `durable-executor.spec.ts` 固化。
 - 本批接管集成是回环 WS/SQLite 重开及故障注入；不是双机、容器、真实模型、进程全链强杀或掉电验收。storage 包已有的子进程强杀测试不能代替这些验证。
 
 任务 pump 接线批次最终验证：全仓 **1350 项通过、2 项平台跳过**，7 包类型检查、CLI 构建/离线 demo（demo/takeover）、Console 构建通过。完整测试命令为 `pnpm -r --workspace-concurrency=1 --if-present run test --exclude '**/dsh-e2e.spec.ts' --retry 0 --maxWorkers=2`，退出码 0。默认高并发曾出现 Vitest `ERR_IPC_CHANNEL_CLOSED`；降低 runner 并发完成全量检查，没有启用失败测试自动重试或新增排除。另修复 gateway `routeAsync` 兜底入箱与连接补投的竞态（节点在判离线后、入箱前上线会滞留信封到下次重连；入箱后同一步复查连接表并立即补投），`bus.spec` 单文件重复运行回归通过。
@@ -66,7 +67,7 @@
 
 ## 仍待完成
 
-任务 pump：单 executor aid 闭环已接通（`createDurableNode` + `FencedProcessDriver`：offer→accept→progress 心跳→result/fail/lease_expired/cancel 全事务，重启 pending 逐条重授权消费，关停 flush 后断连；CLI `qlong run` 已接入并要求显式 create/open 存储）。仍待完成：业务续租（多网关接续）、多 lead/单 exec、RunHandle/orphan 恢复产品化（当前 recover 恒 unknown → recovery_required）、Docker/Podman network-none 与模型 broker、产物可信验收、IPC/owner 命令、持久状态上报、节点跨队能力授权、gateway-only/authority 连接登记、投递结果查询 API、保留窗口/GC/收尾预算、旧数据显式迁移与全链故障矩阵。
+任务 pump：单 executor aid 闭环已接通（`createDurableNode` + `FencedProcessDriver`：offer→accept→progress 心跳→result/fail/lease_expired/cancel 全事务，重启 pending 逐条重授权消费，关停 flush 后断连；CLI `qlong run` 已接入并要求显式 create/open 存储）。**业务续租（B2）已端到端接通**：牵头方在 running 收到带 v2 fence 的 `task.progress` 时回发 `task.lease.renew`（生产半，`renewalSeq` 持久单调、重启对齐），执行方经 `canApplyLeaseRenewal` 绑定 fence 与 progress 身份后延长业务租约死线（消费半）；`lease-renewal` 能力位两端引用同一 `CUSTODY_FEATURES` 全量协商，陈旧对端缺此位即 4004。延长死线跨 store 重开持久，多网关/进程接续只读执行方持久 `leaseDeadline`，无需专门的网关租约逻辑。持久状态上报（`DurableTaskReporter` 经真实 HTTP 汇把牵头任务生命周期投影到中心）、投递结果查询 API（`GET /v1/nodes/me/deliveries/:msgId`，仅发送方可读）、保留窗口/tombstone GC（回收终态 stored 墓碑、绝不删 pending）亦已落地。仍待完成：多 lead/单 exec 归属仲裁、RunHandle/orphan 恢复产品化（当前 recover 恒 unknown → recovery_required）、Docker/Podman network-none 与模型 broker、产物可信验收、IPC/owner 命令、节点跨队能力授权、gateway-only/authority 连接登记、旧数据显式迁移与全链故障矩阵。
 
 建议后续修改每个提交边界时先补故障回归，再运行对应测试、全仓类型检查和排除真实模型 E2E 的全仓测试。未完成强隔离前不向不受信节点开放执行。
 
