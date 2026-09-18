@@ -223,8 +223,20 @@ export class WsGateway {
           connId = newId();
           nodeId = node.node_id;
           // D1a:认领归属(generation 单调 fencing token)——先于踢旧,新 generation 立即超越旧主。
-          // LocalClaimRegistry.claim 不抛;跨进程 SQLite 实现的 fail-closed 在 d1c 接线。
-          const generation = this.claimRegistry.claim(nodeId, this.authorityId, Date.now()).generation;
+          // D1c:共享 SqliteClaimStore 的 claim 可能故障/损坏(STORE_FAULTED/DATABASE_CORRUPT)。无法认领即无法
+          // 仲裁归属,fail-closed(与 assertAuthorityAvailable/renewTimer 一致);非 custody 用内存注册表(不抛),
+          // 退化为拒绝本连接。认领前尚无连接登记,故直接关闭本 socket 即可。
+          let generation: number;
+          try {
+            generation = this.claimRegistry.claim(nodeId, this.authorityId, Date.now()).generation;
+          } catch {
+            if (this.opts.custody) {
+              this.failClosed();
+              return;
+            }
+            this.closeSocket(ws, 1011, 'claim unavailable');
+            return;
+          }
           // M2-03:同节点旧连接踢下线(新连接接管;旧 close 由守卫忽略)
           const oldConnId = this.currentConnByNode.get(nodeId);
           this.currentConnByNode.set(nodeId, connId);
@@ -488,7 +500,16 @@ export class WsGateway {
     this.currentConnByNode.delete(nodeId);
     this.opts.core.disconnect(nodeId);
     // D1a:释放 claim(仅当前连接经 M2-03 守卫到达此处;被 fence 的旧 generation 由 release 内部拒绝)。
-    if (state) this.claimRegistry.release(nodeId, this.authorityId, state.generation);
+    // D1c:release 属 best-effort——failClosed 路径下中心 storage 已 faulted,SqliteClaimStore.release 会抛错;
+    // 连接清理与随后的 1011 关闭必须继续(陈旧 claim 由 reapExpired/TTL 或更高 generation 接管),
+    // 归属仲裁层的失败绝不可破坏 fail-closed 安全路径。
+    if (state) {
+      try {
+        this.claimRegistry.release(nodeId, this.authorityId, state.generation);
+      } catch {
+        // 存储故障/损坏:claim 变陈旧,由 TTL 回收或后续 claim 接管;不影响断连清理。
+      }
+    }
     try {
       this.opts.onPresenceChange?.(nodeId, false, connId);
     } catch {

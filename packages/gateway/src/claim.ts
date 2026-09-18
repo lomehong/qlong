@@ -57,7 +57,16 @@ export interface LocalClaimRegistryOptions {
 }
 
 /** 缺省租约时长:30s。远大于网关 renew 周期(≤100ms 级),容忍 GC/调度抖动而不误 reap 活连接。 */
-const DEFAULT_LEASE_TTL_MS = 30_000;
+export const DEFAULT_LEASE_TTL_MS = 30_000;
+
+/** 校验并解析 leaseTtlMs(正安全整数,缺省 30s)——LocalClaimRegistry 与 SqliteClaimStore 共用,防两处漂移。 */
+export function resolveLeaseTtlMs(value: number | undefined): number {
+  const ttl = value ?? DEFAULT_LEASE_TTL_MS;
+  if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+    throw new RangeError(`leaseTtlMs must be a positive safe integer, got ${ttl}`);
+  }
+  return ttl;
+}
 
 /**
  * 单 authority 内存实现(d1a/d1b)。generation 高水位独立于活跃 claim 存储,故 release/reap 后
@@ -70,11 +79,7 @@ export class LocalClaimRegistry implements ClaimRegistry {
   private readonly leaseTtlMs: number;
 
   constructor(opts: LocalClaimRegistryOptions = {}) {
-    const ttl = opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
-    if (!Number.isSafeInteger(ttl) || ttl <= 0) {
-      throw new RangeError(`leaseTtlMs must be a positive safe integer, got ${ttl}`);
-    }
-    this.leaseTtlMs = ttl;
+    this.leaseTtlMs = resolveLeaseTtlMs(opts.leaseTtlMs);
   }
 
   claim(nodeId: string, authorityId: string, now: number): Claim {

@@ -2,6 +2,7 @@ import { defineMigration, type SqliteStoreOptions, type StorageSchema } from '..
 import { AUTH_SQL } from './auth-store.js';
 import { REGISTRY_SQL } from './state-store.js';
 import { CUSTODY_SQL } from '../../gateway/src/custody-store.js';
+import { CLAIM_SQL } from '../../gateway/src/claim-store.js';
 
 /** One authority database. Future mailbox/command migrations must append, never edit v1. */
 export const CENTER_SCHEMA: StorageSchema = {
@@ -9,6 +10,7 @@ export const CENTER_SCHEMA: StorageSchema = {
   migrations: [
     defineMigration({ version: 1, name: 'registry-auth-projections', sql: REGISTRY_SQL + AUTH_SQL }),
     defineMigration({ version: 2, name: 'durable-custody', sql: CUSTODY_SQL }),
+    defineMigration({ version: 3, name: 'cluster-claim', sql: CLAIM_SQL }),
   ],
 };
 

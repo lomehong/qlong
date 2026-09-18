@@ -70,16 +70,23 @@ interface ClaimRegistry {
 ```
 
 - **`LocalClaimRegistry`**（d1a/d1b）：`Map<nodeId, Claim>` + 单调计数器，单 authority 内 `claim` 恒成功、`renew/release` 恒匹配（无竞争）。TTL 逻辑在 d1b 加入。
-- **`SqliteClaimStore`**（d1c）：中心侧共享表，`claim` 在**单事务**内 `SELECT generation ... → +1 → UPSERT`（generation 单调由事务串行化保证）；损坏 fail-closed（同 custody-store.ts:43-46）。
+- **`SqliteClaimStore`**（d1c）：中心侧共享表。generation 高水位存于**独立 `gateway_claim_seq` 表**（永不删除），`claim` 在**单事务**内 `INSERT … ON CONFLICT DO UPDATE SET last_generation = last_generation + 1 RETURNING`（原子自增，单调由事务串行化保证）→ 以该 generation `UPSERT gateway_claim`。`release`/`reapExpired` 只删 `gateway_claim` 活跃行、**绝不动 seq**——故 §4.3「reap 后别的 authority claim 得 gen+1」成立，fencing token 跨进程/跨重启绝不复用（与 `LocalClaimRegistry` 的 claims+highWater 双 Map 同构）。损坏 fail-closed（同 custody-store.ts:43-46）。
+  - **ws.ts fail-closed 接线（d1c-3）**：`LocalClaimRegistry`（d1a/b）纯内存从不抛，故 ws.ts 早期把 claim 端口视为不失败；换成共享 `SqliteClaimStore` 后 `claim`/`release` 会在 storage faulted/损坏时抛错，必须显式接线：**认证期 `claim` 抛出** → custody 走 `failClosed()`、非 custody 拒绝本连接（`closeSocket 1011`），与 `assertAuthorityAvailable`（ws.ts:178）/renew 定时器（§4.3 ①）语义一致，绝不让认领失败逃逸为未捕获异常或留下半开连接；**断连期 `release`** 属 best-effort——`failClosed` 路径下 storage 已 faulted，`release` 抛错必须被吞（连接清理与随后的 1011 关闭要继续），陈旧 claim 由 `reapExpired`/TTL 或更高 generation 接管。归属仲裁层的失败**绝不可破坏 fail-closed 安全路径**（§1.2 claim 是 best-effort 优化层）。
 
 **claim 表 schema 片段**（中心追加迁移，同 `CUSTODY_SQL` 模式）：
 ```sql
 CREATE TABLE gateway_claim (
   node_id TEXT NOT NULL CHECK (length(node_id) = 36),
   authority_id TEXT NOT NULL,
-  generation INTEGER NOT NULL CHECK (generation >= 0),
+  generation INTEGER NOT NULL CHECK (generation >= 1),
   claimed_at INTEGER NOT NULL,
   lease_expires_at INTEGER NOT NULL CHECK (lease_expires_at >= claimed_at),
+  PRIMARY KEY (node_id)
+) STRICT;
+-- generation 高水位(单调,永不删除):release/reap 只删上面的活跃行,此表保证 fencing token 绝不复用。
+CREATE TABLE gateway_claim_seq (
+  node_id TEXT NOT NULL CHECK (length(node_id) = 36),
+  last_generation INTEGER NOT NULL CHECK (last_generation >= 1),
   PRIMARY KEY (node_id)
 ) STRICT;
 ```

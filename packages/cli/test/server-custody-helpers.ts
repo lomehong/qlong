@@ -175,6 +175,26 @@ export function centerView(db: DatabaseSync, envelope: EnvelopeV1) {
 export const readCenter = (f: DurableServerFixture, envelope: EnvelopeV1) =>
   inspectSql(join(f.dataDir, 'center.sqlite'), (db) => centerView(db, envelope));
 
+/** Read-only peek at the durable claim registry (D1c) while the center runs; WAL-concurrent like readCenter. */
+export function readClaim(f: DurableServerFixture, nodeId: string) {
+  return inspectSql(join(f.dataDir, 'center.sqlite'), (db) => {
+    const seq = db.prepare('SELECT last_generation FROM gateway_claim_seq WHERE node_id = ?').get(nodeId);
+    const active = db.prepare('SELECT authority_id, generation FROM gateway_claim WHERE node_id = ?').get(nodeId);
+    return {
+      seq: seq === undefined ? undefined : Number(seq.last_generation),
+      active: active === undefined
+        ? undefined
+        : { authorityId: String(active.authority_id), generation: Number(active.generation) },
+    };
+  });
+}
+
+/** True once center schema v3 has landed both claim tables (D1c migration). */
+export function claimTablesExist(f: DurableServerFixture): boolean {
+  return inspectSql(join(f.dataDir, 'center.sqlite'), (db) =>
+    Number(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name IN ('gateway_claim', 'gateway_claim_seq')").get()?.n) === 2);
+}
+
 /** The INSERT succeeds; only COMMIT fails. Installation/repair uses the sole offline owner. */
 export function failCommit(store: SqliteStore, target: 'gateway_custody' | 'node_inbox'): void {
   store.transaction((db) => db.exec(`

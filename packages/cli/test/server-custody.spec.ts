@@ -10,7 +10,8 @@ import {
   cleanupServerFixtures, nodeHeaders, ownerHeaders, persistedSnapshot, type Owner,
 } from './server-durable-fixtures.js';
 import {
-  centerView, CustodyFixture, failCommit, inspectSql, offer, readCenter, repairCommit, setup, wait,
+  centerView, claimTablesExist, CustodyFixture, failCommit, inspectSql, offer, readCenter, readClaim,
+  repairCommit, setup, wait,
 } from './server-custody-helpers.js';
 
 afterEach(async () => { await cleanupServerFixtures(); });
@@ -330,7 +331,7 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await Promise.all([a.close(), b.close()]);
   }, 20_000);
 
-  it('appends center schema v2 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
+  it('appends center schema v2+v3 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
     const f = new CustodyFixture();
     const v1 = CENTER_SCHEMA.migrations[0]!;
     const store = SqliteStore.open({ ...f.options(), filename: 'center.sqlite',
@@ -362,11 +363,14 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await f.stop();
     // Check the migration before authenticated HTTP requests can legitimately touch last_seen.
     f.offline((storage) => {
-      expect(storage.version).toBe(2);
+      expect(storage.version).toBe(3);
       expect(persistedSnapshot(storage) === before).toBe(true);
-      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2]);
+      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2, 3]);
       expect(storage.database.prepare('SELECT checksum FROM _qlong_migrations WHERE version = 1').get()?.checksum === v1.checksum).toBe(true);
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0);
+      // v3 claim 双表追加为空(不触碰既有数据);迁移仅追加,绝不重写 v1/v2。
+      expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_claim').get()?.count).toBe(0);
+      expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_claim_seq').get()?.count).toBe(0);
     });
     await f.start('open');
     const me = await f.call<{ csrf: string }>('GET', '/v1/auth/me', undefined, ownerHeaders(owner));
@@ -439,5 +443,48 @@ describe('startQlongServer v2 lead projection through the node default HTTP sink
     } finally {
       await leadNode.stop().catch(() => { /* 已故障/已停的 stop 在部分断言失败路径下属预期 */ });
     }
+  }, 20_000);
+});
+
+describe('startQlongServer D1c: durable cross-process claim registry (center schema v3)', () => {
+  // d1c-3:中心装配 SqliteClaimStore(共享 storage,authorityId 缺省 'gw1')。价值判别器——generation
+  // 高水位持久于 gateway_claim_seq,跨中心重启单调递增;若退回内存 LocalClaimRegistry,重启后归 1(RED)。
+  it('lands the claim tables and keeps the generation high-water monotonic across a center restart', async () => {
+    const f = new CustodyFixture();
+    await f.start('create', { seedTeam: { name: 'claim-team' } });
+    expect(claimTablesExist(f)).toBe(true); // v3 迁移:gateway_claim + gateway_claim_seq 随中心 schema 落地
+    const owner = await f.register();
+    const teamId = (await f.teams(owner))[0]!.team_id;
+    const node = await f.enroll(await f.invite(owner, teamId));
+
+    // 连接 → 网关经 SqliteClaimStore 认领 gen1(authorityId 缺省 'gw1');持久表被写。
+    const first = await f.connect(node.node_token);
+    expect(first.authenticated).toBe(true);
+    await wait(() => expect(readClaim(f, node.node_id).seq).toBe(1));
+    expect(readClaim(f, node.node_id).active).toMatchObject({ authorityId: 'gw1', generation: 1 });
+
+    // 断连:release 删活跃行(在线只读视图确认已提交),但 seq 高水位保留。
+    first.close();
+    await first.waitClosed();
+    await wait(() => expect(readClaim(f, node.node_id).active).toBeUndefined());
+    expect(readClaim(f, node.node_id).seq).toBe(1);
+
+    await f.stop();
+    f.offline((storage) => {
+      expect(storage.version).toBe(3); // v3 迁移已应用
+      // seq 高水位跨停机持久(fencing token 绝不复用);活跃行已随 release 清空。
+      expect(storage.database.prepare('SELECT last_generation FROM gateway_claim_seq WHERE node_id = ?')
+        .get(node.node_id)?.last_generation).toBe(1);
+      expect(storage.database.prepare('SELECT count(*) AS n FROM gateway_claim').get()?.n).toBe(0);
+    });
+
+    // 重启(open)+ 重连:同一节点认领得 gen2(跨重启单调;内存 LocalClaimRegistry 会重置为 1)。
+    await f.start('open');
+    const second = await f.connect(node.node_token);
+    expect(second.authenticated).toBe(true);
+    await wait(() => expect(readClaim(f, node.node_id).seq).toBe(2));
+    expect(readClaim(f, node.node_id).active).toMatchObject({ authorityId: 'gw1', generation: 2 });
+    second.close();
+    await second.waitClosed();
   }, 20_000);
 });

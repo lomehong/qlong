@@ -8,6 +8,7 @@ import { AuthService } from '../../registry/src/auth.js';
 import { GatewayCore } from '../../gateway/src/core.js';
 import { InboxStore } from '../../gateway/src/mailbox.js';
 import { SqliteCustodyStore } from '../../gateway/src/custody-store.js';
+import { SqliteClaimStore } from '../../gateway/src/claim-store.js';
 import type { EnvelopeV1 } from '@qlong/core';
 import { validateEnvelope } from '@qlong/core';
 import { WsGateway } from '../../gateway/src/ws.js';
@@ -124,9 +125,14 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     }
   }
   const custody = storage ? new SqliteCustodyStore(storage, { retentionMs: opts.custodyRetentionMs }) : undefined;
+  // D1c:与 custody 并列的持久 claim 注册表(共享同一 storage)。generation 高水位跨中心重启单调,
+  // 令归属仲裁可跨进程/跨重启判定(单 authority 也持久;多 authority 集群路由解禁见 d1d)。
+  const claimRegistry = storage ? new SqliteClaimStore(storage) : undefined;
   const gw = new WsGateway({
     core,
     custody,
+    claimRegistry,
+    authorityId: opts.clusterName ?? 'gw1',
     cluster,
     clusterSecret,
     assertAuthorityAvailable: () => { if (storage) void storage.database; },

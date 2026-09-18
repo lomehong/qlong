@@ -240,6 +240,20 @@ describe('WsGateway single-instance presence lifecycle', () => {
     expectOffline(fixture);
   });
 
+  it('fails closed when the claim registry throws during auth (D1c: shared SQLite claim fail-closed wiring)', async () => {
+    const claimRegistry = new LocalClaimRegistry();
+    const fixture = makeGateway({ claimRegistry, authorityId: 'gwA' });
+    // 共享 SqliteClaimStore 在认领时可能故障/损坏(STORE_FAULTED/DATABASE_CORRUPT)。d1c 接线前
+    // claim 抛出会逃逸为未捕获异常并留下半开连接;认领失败必须优雅 fail-closed(1011)。
+    vi.spyOn(claimRegistry, 'claim').mockImplementationOnce(() => { throw new Error('claim store faulted'); });
+    const client = await connect(fixture.gateway, await fixture.gateway.listen());
+    client.sendAuth();
+    expect((await client.closed).code).toBe(1011);
+    await client.serverClosed;
+    expect(client.frames).toEqual([]);
+    expectOffline(fixture);
+  });
+
   it.each(['close', 'error', 'suspended', 'revoked', 'shutdown'])(
     'contains a throwing offline hook during %s and never repeats the notification',
     async (cause) => {
