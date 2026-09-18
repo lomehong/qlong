@@ -49,6 +49,11 @@ export interface WsGatewayOptions {
   claimRegistry?: ClaimRegistry;
   /** D1:本网关进程稳定标识(claim 归属方);缺省 'gw1'。生产须传唯一值(如 clusterName)。 */
   authorityId?: string;
+  /**
+   * D1b:claim 租约续期/回收定时器周期(ms);缺省 10_000(远小于 LocalClaimRegistry 缺省 TTL 30s)。
+   * 约束:必须 < claimRegistry 的 leaseTtlMs,否则活连接会在两次续租间被误 reap。测试可调小。
+   */
+  claimRenewIntervalMs?: number;
 }
 
 interface RegistryLike {
@@ -88,6 +93,10 @@ export class WsGateway {
   /** D1:claim 注册表(generation 归属)+ 本进程 authorityId;缺省单 authority 内存实现。 */
   private readonly claimRegistry: ClaimRegistry;
   private readonly authorityId: string;
+  /** D1b:claim 租约续期/回收定时器周期(ms)。 */
+  private readonly claimRenewIntervalMs: number;
+  /** D1b:authority-liveness 续租定时器(无条件运行——claim 在 auth/disconnect 无条件接线)。 */
+  private renewTimer?: NodeJS.Timeout;
   private unavailable = false;
   private started = false;
   private closing = false;
@@ -108,11 +117,15 @@ export class WsGateway {
     this.window = opts.window === undefined ? MAX_WINDOW : opts.window;
     this.claimRegistry = opts.claimRegistry ?? new LocalClaimRegistry();
     this.authorityId = opts.authorityId ?? 'gw1';
+    this.claimRenewIntervalMs = opts.claimRenewIntervalMs === undefined ? 10_000 : opts.claimRenewIntervalMs;
     if (!Number.isSafeInteger(this.retryIntervalMs) || this.retryIntervalMs < 1 || this.retryIntervalMs > 2_147_483_647) {
       throw new RangeError('retryIntervalMs must be a positive timer interval');
     }
     if (!Number.isSafeInteger(this.window) || this.window < 1 || this.window > MAX_WINDOW) {
       throw new RangeError('window must be an integer between 1 and 16');
+    }
+    if (!Number.isSafeInteger(this.claimRenewIntervalMs) || this.claimRenewIntervalMs < 1 || this.claimRenewIntervalMs > 2_147_483_647) {
+      throw new RangeError('claimRenewIntervalMs must be a positive timer interval');
     }
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
     // 独立端口模式:listen() 的 server 上 '/' 即网关入口
@@ -211,7 +224,7 @@ export class WsGateway {
           nodeId = node.node_id;
           // D1a:认领归属(generation 单调 fencing token)——先于踢旧,新 generation 立即超越旧主。
           // LocalClaimRegistry.claim 不抛;跨进程 SQLite 实现的 fail-closed 在 d1c 接线。
-          const generation = this.claimRegistry.claim(nodeId, this.authorityId).generation;
+          const generation = this.claimRegistry.claim(nodeId, this.authorityId, Date.now()).generation;
           // M2-03:同节点旧连接踢下线(新连接接管;旧 close 由守卫忽略)
           const oldConnId = this.currentConnByNode.get(nodeId);
           this.currentConnByNode.set(nodeId, connId);
@@ -342,6 +355,30 @@ export class WsGateway {
       }, Math.min(this.retryIntervalMs, 100));
       this.retryTimer.unref();
     }
+    // D1b:authority-liveness 续租/回收定时器(无条件——claim 在 auth/disconnect 无条件接线)。
+    // 每周期:先为每个"当前连接"续租(延长 leaseExpiresAt);renew 返回 false = 已被更高 generation
+    // 超越(或 claim 已失)→ fence-drop 丢弃本地僵尸连接(半开/僵死自愈,分裂脑收敛;跨进程价值在 d1c);
+    // 续租后回收过期租约(reapExpired)——死亡 authority 停止续租 → 租约到期被回收,令归属可判定。
+    // 节点不发任何额外帧(§8 一致):这是网关对自身持有的活 socket 的续租,非第二套节点心跳。
+    this.renewTimer = setInterval(() => {
+      if (this.closing || this.unavailable) return;
+      try {
+        const now = Date.now();
+        for (const state of [...this.socketsByConn.values()]) {
+          // M2-03:仅当前连接代表归属;被踢旧连接不续租(其 close 由守卫忽略)。
+          if (this.currentConnByNode.get(state.nodeId) !== state.connId) continue;
+          if (!this.claimRegistry.renew(state.nodeId, this.authorityId, state.generation, now)) {
+            this.closeSocket(state.ws, 4000, 'superseded');
+            this.disconnect(state.connId, state.nodeId);
+          }
+        }
+        this.claimRegistry.reapExpired(now);
+      } catch {
+        // claim 注册表故障(如 d1c 共享 SQLite 不可用)→ 无法仲裁归属,fail-closed(与 retryTimer 一致)。
+        this.failClosed();
+      }
+    }, this.claimRenewIntervalMs);
+    this.renewTimer.unref();
   }
 
   private admitCustody(state: ConnState, raw: unknown, now: number): void {
@@ -434,8 +471,10 @@ export class WsGateway {
     this.unavailable = true;
     if (this.retryTimer) clearInterval(this.retryTimer);
     if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.renewTimer) clearInterval(this.renewTimer);
     this.retryTimer = undefined;
     this.syncTimer = undefined;
+    this.renewTimer = undefined;
     for (const [nodeId, connId] of [...this.currentConnByNode]) this.disconnect(connId, nodeId);
     for (const ws of this.wss.clients) this.closeSocket(ws, 1011, 'gateway unavailable');
   }
@@ -616,8 +655,10 @@ export class WsGateway {
   private async shutdown(): Promise<void> {
     if (this.syncTimer) clearInterval(this.syncTimer);
     if (this.retryTimer) clearInterval(this.retryTimer);
+    if (this.renewTimer) clearInterval(this.renewTimer);
     this.syncTimer = undefined;
     this.retryTimer = undefined;
+    this.renewTimer = undefined;
     for (const [server, binding] of this.upgradeBindings) {
       server.off('upgrade', binding.listener);
     }

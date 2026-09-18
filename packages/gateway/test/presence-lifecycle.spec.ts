@@ -152,7 +152,7 @@ describe('WsGateway single-instance presence lifecycle', () => {
     await first.waitForFrame('auth_ok');
     // 连接携带 generation;claim 注册表登记现归属(单 authority 首认领 = gen 1)
     expect(fixture.core.connections.get(node.node_id)!.generation).toBe(1);
-    expect(claimRegistry.lookup(node.node_id)).toEqual({ nodeId: node.node_id, authorityId: 'gwA', generation: 1 });
+    expect(claimRegistry.lookup(node.node_id)).toMatchObject({ nodeId: node.node_id, authorityId: 'gwA', generation: 1 });
 
     // 重连:新连接超越旧(M2-03 踢旧),generation 单调 +1
     const second = await connect(fixture.gateway, port);
@@ -356,5 +356,42 @@ describe('WsGateway listen and shutdown lifecycle', () => {
     expect(attached.listening).toBe(true);
     expect(fixture.gateway.wss.clients.size).toBe(0);
     expect(() => fixture.gateway.attach(attached, '/late')).toThrow('closing');
+  });
+});
+
+describe('WsGateway D1b: authority-liveness lease renewal + fence-drop', () => {
+  it("renews a live connection's lease so it survives well past the TTL (gateway-side, no node frames — §8)", async () => {
+    const claimRegistry = new LocalClaimRegistry({ leaseTtlMs: 200 });
+    const fixture = makeGateway({ claimRegistry, authorityId: 'gwA', claimRenewIntervalMs: 40 });
+    const port = await fixture.gateway.listen();
+    const conn = await connect(fixture.gateway, port);
+    conn.sendAuth();
+    await conn.waitForFrame('auth_ok');
+    const initial = claimRegistry.lookup(node.node_id)!.leaseExpiresAt;
+    // 网关侧定时器周期续租:等待远超 TTL(200ms),活连接租约被持续延长而未被 reap。
+    await new Promise((r) => setTimeout(r, 350));
+    const after = claimRegistry.lookup(node.node_id);
+    expect(after).toBeDefined(); // 未被误 reap(续租保护)
+    expect(after).toMatchObject({ nodeId: node.node_id, authorityId: 'gwA', generation: 1 });
+    expect(after!.leaseExpiresAt).toBeGreaterThan(initial); // 续租推进了到期时刻
+    expect(fixture.gateway.has(node.node_id)).toBe(true); // 连接仍在线
+  });
+
+  it('drops a local connection whose claim is superseded by a higher generation elsewhere (fence-drop self-heal)', async () => {
+    const claimRegistry = new LocalClaimRegistry({ leaseTtlMs: 5_000 });
+    const fixture = makeGateway({ claimRegistry, authorityId: 'gwA', claimRenewIntervalMs: 30 });
+    const port = await fixture.gateway.listen();
+    const conn = await connect(fixture.gateway, port);
+    conn.sendAuth();
+    await conn.waitForFrame('auth_ok');
+    expect(fixture.gateway.has(node.node_id)).toBe(true);
+    // 模拟另一 authority 在共享注册表以更高 generation 接管(分裂脑收敛;跨进程价值在 d1c 显现)。
+    claimRegistry.claim(node.node_id, 'gwB', Date.now()); // gen2, owner gwB
+    // renew 定时器发现 renew(gwA, gen1) 被 fence(false) → 丢弃本地僵尸连接(半开/僵死自愈)。
+    expect(await waitFor(() => !fixture.gateway.has(node.node_id), 1_000)).toBe(true);
+    expectOffline(fixture);
+    // 新主不受损:本地 release(gwA, gen1) 被 generation fence 拒绝,不会误删 gwB gen2。
+    expect(claimRegistry.lookup(node.node_id)).toMatchObject({ authorityId: 'gwB', generation: 2 });
+    expect((await conn.closed).code).toBe(4000); // superseded
   });
 });
