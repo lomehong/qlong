@@ -1,11 +1,11 @@
 import { DEFAULT_PARAMS, envelopeDigest, isUuid, newId, type EnvelopeV1, type QlongParams } from '@qlong/core';
 import { canApplyLeaseRenewal, isLeaseFence } from '../../../core/src/lease.js';
-import type { FencedDriver, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
+import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
 import { gateCaps, gatePolicy, type LocalPolicy } from '../executor/gates.js';
 import type { Outbound } from '../wire.js';
 import type { NodeRuntimeStore, RuntimeJson, RuntimeState, RuntimeTransition } from './store.js';
 
-export type { FencedDriver, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
+export type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
 
 const STATE_KEY = 'executor:v2';
 const EFFECT_KIND = 'executor.run';
@@ -45,6 +45,8 @@ export interface DurableExecutorOptions {
   params?: QlongParams;
   seal: (out: Outbound) => EnvelopeV1;
   driver?: FencedDriver;
+  /** e2d-1: 执行器拥有的 per-fence 工作区端口;事务外 prepare/结果提交后 release。缺省则驱动退回静态 workdir。 */
+  workspace?: ExecutorWorkspace;
   /** Bound each driver wait, not execution time. Timeout never proves quiescence. */
   driverTimeoutMs?: number;
   capabilities?: () => string[];
@@ -369,6 +371,17 @@ export class DurableExecutor {
     if (this.live && same(this.live.fence, fence)) this.live = undefined;
   }
 
+  /** 密封终态后于事务外释放该精确 fence 的工作区。结果已提交,故清理失败不得推翻终态。 */
+  private async finishAndRelease(fence: RunFence, outcome: RunOutcome): Promise<void> {
+    this.finish(fence, outcome);
+    await this.releaseWorkspace(fence);
+  }
+
+  private async releaseWorkspace(fence: RunFence): Promise<void> {
+    if (!this.opts.workspace) return;
+    try { await this.opts.workspace.release(fence); } catch { /* best-effort:清理失败不推翻已提交结果 */ }
+  }
+
   private unknown(fence: RunFence, reason: StopReason = 'execution_interrupted'): void {
     this.change((state) => {
       if (!state.slot || !same(state.slot.fence, fence)) return false;
@@ -398,7 +411,7 @@ export class DurableExecutor {
         }
         catch { /* Driver failure cannot prove quiescence. */ }
         this.assertHealthy();
-        if (status === 'stopped') this.finish(run.fence, failed('execution_interrupted'));
+        if (status === 'stopped') await this.finishAndRelease(run.fence, failed('execution_interrupted'));
         else this.unknown(run.fence);
       }
       this.completeOldEffects();
@@ -418,16 +431,27 @@ export class DurableExecutor {
   }
 
   private async start(run: DurableRun): Promise<void> {
+    // e2d-1: per-fence 工作区在 'starting'/mayHaveStarted 提交之前于事务外解析——mkdir 是纯磁盘
+    // I/O,崩溃后重启可幂等重 prepare,而非误升级 recovery_required。prepare 失败即干净 task.fail。
+    let ctx: RunContext | undefined;
+    if (this.opts.workspace) {
+      try {
+        ctx = await this.opts.workspace.prepare(Object.freeze({ ...run.fence }), structuredClone(run.offer));
+      } catch {
+        await this.finishAndRelease(run.fence, failed('workspace_prepare_failed'));
+        return;
+      }
+    }
     const committed = this.change((state) => {
       if (!state.slot || !same(state.slot.fence, run.fence) || state.slot.phase !== 'prepared') return false;
       state.slot.phase = 'starting'; state.slot.mayHaveStarted = true; return true;
     });
-    if (!committed) return;
+    if (!committed) { await this.releaseWorkspace(run.fence); return; }
     let handle: RunHandle;
     this.starting = true;
     const pending = Promise.resolve().then(() => {
       this.assertHealthy();
-      return this.opts.driver!.start(Object.freeze({ ...run.fence }), structuredClone(run.offer));
+      return this.opts.driver!.start(Object.freeze({ ...run.fence }), structuredClone(run.offer), ctx);
     });
     try { handle = await this.bounded(pending); }
     catch (error) {
@@ -446,7 +470,7 @@ export class DurableExecutor {
               return;
             }
             if (!this.faulted) {
-              this.finish(run.fence, outcome);
+              await this.finishAndRelease(run.fence, outcome);
               this.completeOldEffects();
             }
           } finally { this.starting = false; }
@@ -503,7 +527,7 @@ export class DurableExecutor {
     let outcome: RunOutcome;
     try { outcome = await this.quiesce(live); }
     catch { this.unknown(run.fence); return; }
-    this.finish(run.fence, outcome);
+    await this.finishAndRelease(run.fence, outcome);
   }
 
   /**
@@ -522,14 +546,14 @@ export class DurableExecutor {
         if (!run) break;
         const live = this.live;
         if (live && !same(live.fence, run.fence)) throw new Error('Executor live fence mismatch');
-        if (live?.outcome) { this.finish(run.fence, live.outcome); continue; }
+        if (live?.outcome) { await this.finishAndRelease(run.fence, live.outcome); continue; }
         if (run.phase === 'prepared') {
-          if (!this.opts.driver) { this.finish(run.fence, failed('driver_unavailable')); continue; }
+          if (!this.opts.driver) { await this.finishAndRelease(run.fence, failed('driver_unavailable')); continue; }
           await this.start(run);
           continue;
         }
         if (run.phase === 'stopping') {
-          if (!run.mayHaveStarted) { this.finish(run.fence, failed(run.stopReason ?? 'stopped')); continue; }
+          if (!run.mayHaveStarted) { await this.finishAndRelease(run.fence, failed(run.stopReason ?? 'stopped')); continue; }
           if (live) { await this.stop(run, live); continue; }
           this.unknown(run.fence);
         } else if (live?.closedFault && run.phase !== 'recovery_required') this.unknown(run.fence);

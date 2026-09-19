@@ -153,6 +153,7 @@ if (cmd === 'run') {
   const { runStorageOptions } = await import('./run-storage-options.js');
   const { createDurableNode } = await import('../../node/src/runtime/node.js');
   const { FencedProcessDriver } = await import('../../node/src/driver/fenced-driver.js');
+  const { FencedWorkspace } = await import('../../node/src/collab/workspace.js');
   const { PersistentRunHandleStore } = await import('../../node/src/runtime/run-handles.js');
   const { loadIdentity } = await import('../../node/src/identity.js');
   // ---- 第 2 步:牵头生产链路旗标(--originate / --auto-select / --takeover)----
@@ -209,10 +210,12 @@ if (cmd === 'run') {
       storage: runStorageOptions(process.argv.slice(3), process.env, home),
       // 工厂形式:用 createDurableNode 内部装配的持久 runtime 背书 run handle(C1c),
       // 使 fence→pid+启动证据跨进程重启存活,recover 得以据持久句柄判定静默。
+      // e2d-1:cwd 不再是静态 home——执行器为每个 fence 解析隔离工作区并传入 ctx.cwd,
+      // 故此处不再设 workdir;缺省工作区根落在 os.tmpdir 下(跨平台安全)。
       driver: (runtime) => new FencedProcessDriver({
-        workdir: home,
         runHandles: new PersistentRunHandleStore(runtime),
       }),
+      workspace: new FencedWorkspace(),
       driverTimeoutMs: 15_000, // npx 冷启动可能较慢;有界等待仍封顶执行器契约
       capabilities: () => cfg.caps,
       reportIntervalMs: 60_000,

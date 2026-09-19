@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { newId } from '@qlong/core';
 import { FencedProcessDriver } from '../src/driver/fenced-driver.js';
@@ -224,5 +227,47 @@ describe('FencedProcessDriver recover 判定矩阵(C1b)', () => {
     const d = new FencedProcessDriver({ runHandles: store });
     const impostor = { ...recorded, attempt: recorded.attempt + 1 };
     await expect(d.recover(impostor)).resolves.toBe('unknown');
+  });
+});
+
+/**
+ * e2d-1a:执行器把每-fence 工作区解析为 cwd 传入,驱动据此 spawn。
+ * 证明"执行 cwd 正确"——子进程真实工作目录 = ctx.cwd,且优先于静态 opts.workdir。
+ */
+describe('FencedProcessDriver per-fence 工作区 cwd(e2d-1)', () => {
+  /** 子进程把真实 cwd 打到 stdout;经 realpath 归一以吸收平台临时目录符号链接。 */
+  const cwdProbe = (): { cmd: string; args: string[] } =>
+    ({ cmd: node, args: ['-e', 'process.stdout.write(process.cwd())'] });
+  const readCwd = (outcome: { body: Record<string, unknown> }): string =>
+    realpathSync(String((outcome.body as { summary?: string }).summary));
+
+  it('ctx.cwd 成为子进程真实工作目录(执行 cwd 正确)', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qlong-cwd-')));
+    try {
+      const d = new FencedProcessDriver({ commandLine: cwdProbe });
+      const outcome = await (await d.start(fence(), offer(), { cwd: dir })).closed;
+      expect(outcome.kind).toBe('result');
+      expect(readCwd(outcome)).toBe(dir);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('ctx.cwd 优先于静态 opts.workdir(不再共享静态目录)', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qlong-ctx-')));
+    try {
+      const d = new FencedProcessDriver({ workdir: 'C:/definitely-unused-static-marker', commandLine: cwdProbe });
+      const outcome = await (await d.start(fence(), offer(), { cwd: dir })).closed;
+      expect(readCwd(outcome)).toBe(dir);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('子进程写入 ctx.cwd 的文件落在该 per-fence 目录(为跨 attempt 隔离奠基)', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qlong-write-')));
+    try {
+      const d = new FencedProcessDriver({
+        commandLine: () => ({ cmd: node, args: ['-e', "require('node:fs').writeFileSync('marker.txt','x');process.stdout.write(process.cwd())"] }),
+      });
+      await (await d.start(fence(), offer(), { cwd: dir })).closed;
+      expect(existsSync(join(dir, 'marker.txt'))).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -14,7 +14,7 @@ import { NODE_SCHEMA } from '../src/runtime/schema.js';
 import { NodeRuntimeStore } from '../src/runtime/store.js';
 import { createDurableNode, type DurableNode } from '../src/runtime/node.js';
 import { TASK_REPORT_KIND, type TaskReport } from '../src/runtime/report.js';
-import type { FencedDriver, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
+import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 
 const tempBase = realpathSync(tmpdir());
 const roots = new Set<string>();
@@ -55,13 +55,13 @@ const delivery = (env: EnvelopeV1, ticket = newId()) => ({
 const RESULT: RunOutcome = { kind: 'result', body: { summary: 'finished' } };
 
 class StubDriver implements FencedDriver {
-  readonly started: Array<{ fence: RunFence; offer: Record<string, unknown> }> = [];
+  readonly started: Array<{ fence: RunFence; offer: Record<string, unknown>; ctx?: RunContext }> = [];
   readonly stops: string[] = [];
   private readonly pending = new Map<string, (outcome: RunOutcome) => void>();
   recover = vi.fn(async (): Promise<'stopped' | 'unknown'> => 'unknown');
 
-  start = async (fence: RunFence, offer: Record<string, unknown>): Promise<RunHandle> => {
-    this.started.push({ fence, offer });
+  start = async (fence: RunFence, offer: Record<string, unknown>, ctx?: RunContext): Promise<RunHandle> => {
+    this.started.push({ fence, offer, ctx });
     let resolveClosed!: (outcome: RunOutcome) => void;
     const closed = new Promise<RunOutcome>((resolve) => { resolveClosed = resolve; });
     this.pending.set(fence.run_id, resolveClosed);
@@ -72,6 +72,17 @@ class StubDriver implements FencedDriver {
     this.pending.get(runId)?.(outcome);
     this.pending.delete(runId);
   }
+}
+
+/** e2d-1d:记录型 ExecutorWorkspace 桩——验证 createDurableNode 把工作区端口接线到执行器。 */
+class StubWorkspace implements ExecutorWorkspace {
+  readonly prepared: RunFence[] = [];
+  readonly released: RunFence[] = [];
+  async prepare(fence: Readonly<RunFence>): Promise<RunContext> {
+    this.prepared.push({ ...fence });
+    return { cwd: `/ws/${fence.run_id}` };
+  }
+  async release(fence: Readonly<RunFence>): Promise<void> { this.released.push({ ...fence }); }
 }
 
 interface FixtureOptions {
@@ -261,6 +272,27 @@ describe('DurableNode v2 task loop', () => {
     const env = f.signPeer({}, { kind: 'aid', summary: 'factory driver', lease_ms: 60_000, offer_ttl_ms: 30_000 });
     f.send(delivery(env));
     await wait(() => expect(driver.started).toHaveLength(1)); // 解析出的驱动确被执行器使用
+  });
+
+  it('workspace 端口形式:createDurableNode 接线执行器 → prepare 的 cwd 传驱动、结果提交后 release(e2d-1d)', async () => {
+    const driver = new StubDriver();
+    const workspace = new StubWorkspace();
+    let seen: NodeRuntimeStore | undefined;
+    const f = await fixture({ driver, onFrame: autoStored });
+    const node = await f.makeNode({ workspace: (runtime) => { seen = runtime; return workspace; } });
+    expect(seen).toBe(node.runtime); // 工厂收到刚装配的持久 store
+    await node.start();
+    const env = f.signPeer({}, { kind: 'aid', summary: 'workspace wiring', lease_ms: 60_000, offer_ttl_ms: 30_000 });
+    f.send(delivery(env));
+    await wait(() => expect(driver.started).toHaveLength(1));
+    const fence = driver.started[0]!.fence;
+    expect(workspace.prepared).toEqual([{ ...fence }]);          // 执行器事务外 prepare
+    expect(driver.started[0]!.ctx).toEqual({ cwd: `/ws/${fence.run_id}` }); // 解析 cwd 传驱动
+    expect(workspace.released).toEqual([]);                       // 在途不清理
+    driver.complete(fence.run_id);
+    await wait(() => expect(f.sent('task.result')).toHaveLength(1));
+    await wait(() => expect(workspace.released).toEqual([{ ...fence }])); // 结果提交后 release
+    expect(node.executor.snapshot().slot).toBeNull();
   });
 
   it('rejects a live offer without a driver instead of executing it', async () => {

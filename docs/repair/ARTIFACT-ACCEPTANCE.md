@@ -23,7 +23,8 @@
 >   「完整信封摘要 + 持久验收上下文 + 判定/在途令牌」，杜绝跨任务/attempt/契约/签名上下文误复用；取消/改派/接管/终态/消费
 >   即回收，异步 I/O 完成后重读持久状态复核上下文；派发/改派对非法契约**改状态前**拒绝（不闭锁节点）；artifact-only 声明
 >   当前无字节映射端口 → 明确判 false（不静默跳过）。
-> - **仍缺（e2d，暂停）**：执行侧产清单、durable per-task 工作区、drain 默认接线、真实 git PROJECT 端到端。
+> - **e2d-1 已落地（本轮，未提交）**：durable per-fence 工作区生命周期——执行器新增 `workspace` 端口（`prepare`→解析 cwd 于 `'starting'` 提交前、事务外；结果/失败密封后 `release`；`unknown`/`recovery_required` 绝不 release），`FencedProcessDriver` 消费 `ctx.cwd`（优先于静态 workdir），`FencedWorkspace` 按精确 fence 派生隔离目录（跨 attempt/generation/run 不串产物、路径越界与非法 fence 拒绝、os.tmpdir 缺省根），`createDurableNode` 透传 + CLI 移除静态 `workdir: home`。
+> - **仍缺（e2d-2/3/4）**：执行侧产清单/签名/push、drain 默认接线、真实 git PROJECT 端到端。
 > - **验证**：node 定向 100 测绿 + 七靶点变异全捕获并字节还原；全仓 **1621 passed | 2 skipped**，七包 typecheck 绿。
 >   P0 出口尚待用户确认后方进入 P1（e2d）。
 
@@ -179,7 +180,14 @@ machine.ts:93 的 `project→false` 仍是安全底线（machine-safety.spec.ts:
 ## 5. 装配（node.ts / lead.ts / payload-git.ts）
 
 - **执行侧**：`createDurableNode` 域内 `opts.privKey` + `me.{node_id,key_epoch}` 已在；产清单闭包接入 durable
-  executor 完成路径（驱动 settle → 产清单 → push → result.artifacts）。工作区根接线（§4.2 缺口）。
+  executor 完成路径（驱动 settle → 产清单 → push → result.artifacts）。工作区根接线见下条（e2d-1 已落地）。
+- **durable 工作区（e2d-1，已落地）**：`DurableExecutor` 增 `workspace?: ExecutorWorkspace` 端口，生命周期归执行器——
+  `start()` 在 `'starting'`/`mayHaveStarted` 提交**之前**于事务外 `prepare(fence,offer)` 解析 `ctx.cwd` 传驱动（mkdir 是纯磁盘 I/O，
+  崩溃重启可幂等重 prepare，不误升级 recovery_required；prepare 失败即干净 `task.fail(workspace_prepare_failed)` 并 release）；
+  所有异步终态路径（settle/stop/recover(stopped)/start late-path）经 `finishAndRelease` 在结果密封**之后**事务外 `release`；
+  `unknown`/`recovery_required` 与取消在途未证静默时**绝不** release（保留在途产物）。release 由 fence 派生路径（纯函数），
+  故重启后新进程可清理上一进程遗留工作区。`FencedWorkspace`（collab/workspace.ts）实现该端口；`createDurableNode` 以 `workspace`
+  选项（值或 `(runtime)=>` 工厂，与 driver 同解析时机）透传；CLI `run` 装配 `new FencedWorkspace()` 并移除静态 `workdir: home`。
 - **牵头侧**：`DurableLead` 增 `resolvePubkey?` 端口（缺省用 registry-verifier 同款 HTTP 查询）+ 内部 `verdicts` 同步缓存
   + `stageArtifactVerification` 预置方法；`machine(task)` 注入 per-task 验收器（§4.3）。
 - **drain**：node.ts:320 `ledByUs` 分支在 `lead.consume(env,true)` 前 `await lead.stageArtifactVerification(task, env)`

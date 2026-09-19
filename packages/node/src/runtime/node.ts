@@ -17,7 +17,7 @@ import {
   type EnvelopeV1, type QlongParams,
 } from '@qlong/core';
 import { SqliteStore } from '../../../storage/src/index.js';
-import type { FencedDriver } from '../driver/run-handle.js';
+import type { ExecutorWorkspace, FencedDriver } from '../driver/run-handle.js';
 import { GatewayClient } from '../gateway-client.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { DurableExecutor } from './executor.js';
@@ -61,6 +61,11 @@ export interface DurableNodeOptions {
    * 解析,便于装配 run-handle 持久化背书(C1c,见 PersistentRunHandleStore)。
    */
   driver?: FencedDriver | ((runtime: NodeRuntimeStore) => FencedDriver);
+  /**
+   * e2d-1: 执行器拥有的 per-fence 工作区端口;缺省 = 驱动退回静态 workdir。
+   * 亦可传工厂 (runtime) => ExecutorWorkspace,与 driver 工厂同一解析时机。
+   */
+  workspace?: ExecutorWorkspace | ((runtime: NodeRuntimeStore) => ExecutorWorkspace);
   /** 有界 driver 等待(默认 5s;CLI spawn 建议放宽) */
   driverTimeoutMs?: number;
   /** 静态能力标签(闸3 与 caps 上报共用) */
@@ -176,6 +181,8 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   const runtime = new NodeRuntimeStore(store, me.node_id, { retentionMs: opts.custodyRetentionMs });
   // C1c:driver 可为工厂,用刚装配的持久 runtime 解析(如注入 NodeRuntimeStore 背书的 RunHandleStore)。
   const driver = typeof opts.driver === 'function' ? opts.driver(runtime) : opts.driver;
+  // e2d-1:workspace 与 driver 同一解析时机(均事务外、由执行器拥有生命周期)。
+  const workspace = typeof opts.workspace === 'function' ? opts.workspace(runtime) : opts.workspace;
 
   const params: QlongParams = { ...(opts.params ?? DEFAULT_PARAMS) };
   const tickIntervalMs = bounded(opts.tickIntervalMs, 1_000, 50, 60_000, 'tickIntervalMs');
@@ -255,6 +262,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     params,
     seal,
     driver,
+    workspace,
     driverTimeoutMs: opts.driverTimeoutMs,
     capabilities: opts.capabilities,
     policy: opts.policy,

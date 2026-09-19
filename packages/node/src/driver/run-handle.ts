@@ -11,6 +11,28 @@ export interface RunOutcome {
   body: Record<string, unknown>;
 }
 
+/**
+ * e2d-1:执行器在 SQL 事务外为每个 fence 解析出的运行上下文。驱动只消费已解析值,
+ * 绝不自行派生工作区。cwd 缺省时驱动退回其静态 opts.workdir(向后兼容)。
+ */
+export interface RunContext {
+  /** 执行器拥有的 per-fence 工作区绝对路径;驱动据此设定子进程 cwd。 */
+  readonly cwd?: string;
+}
+
+/**
+ * e2d-1:执行器拥有的 per-fence 工作区端口。生命周期严格在 SQL 事务外:
+ * prepare 在 driver.start 前解析 cwd;release 在结果持久化提交后清理。
+ * 两者均按精确 fence 幂等。release 失败由调用方按 best-effort 处理(清理失败
+ * 是资源泄漏,绝不推翻已提交结果);取消/超时/恢复未证静默时不得提前 release。
+ */
+export interface ExecutorWorkspace {
+  /** 事务外为精确 fence 创建/附着工作区,返回已解析运行上下文(含 cwd)。按 fence 幂等。 */
+  prepare(fence: Readonly<RunFence>, offer: Record<string, unknown>): Promise<RunContext>;
+  /** 结果持久化提交后释放该精确 fence 的工作区。幂等。 */
+  release(fence: Readonly<RunFence>): Promise<void>;
+}
+
 export interface RunHandle {
   /** Immutable identity; stop must target this handle, never a driver's mutable current run. */
   readonly fence: Readonly<RunFence>;
@@ -26,7 +48,7 @@ export interface FencedDriver {
    * stops a late returned handle; drivers must return promptly or provide exact-fence recovery.
    * Async waiting must not synchronously block the event loop (lease/cancel polling continues).
    */
-  start(fence: Readonly<RunFence>, offer: Record<string, unknown>): Promise<RunHandle>;
+  start(fence: Readonly<RunFence>, offer: Record<string, unknown>, ctx?: RunContext): Promise<RunHandle>;
   /** 'stopped' proves quiescence of this exact fence, including across driver restarts; timeout is unknown. */
   recover(fence: Readonly<RunFence>): Promise<'stopped' | 'unknown'>;
 }

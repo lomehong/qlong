@@ -8,7 +8,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { buildHarnessCommand, composeTaskPrompt, type HarnessDriverOptions } from './harness-driver.js';
-import type { FencedDriver, RunFence, RunHandle, RunHandleStore, RunOutcome } from './run-handle.js';
+import type { FencedDriver, RunContext, RunFence, RunHandle, RunHandleStore, RunOutcome } from './run-handle.js';
 
 /** stdout 保留的答案尾部上限(与旧驱动一致的结果体瘦身) */
 const STDOUT_TAIL = 4000;
@@ -66,9 +66,10 @@ export class FencedProcessDriver implements FencedDriver {
 
   constructor(private readonly opts: FencedProcessDriverOptions = {}) {}
 
-  start = async (fence: Readonly<RunFence>, offer: Record<string, unknown>): Promise<RunHandle> => {
+  start = async (fence: Readonly<RunFence>, offer: Record<string, unknown>, ctx?: RunContext): Promise<RunHandle> => {
     const prompt = composeTaskPrompt(offer);
-    const { cmd, args, cwd } = buildHarnessCommand(prompt, this.opts.workdir, this.opts);
+    // e2d-1:执行器解析的 per-fence 工作区优先;缺省退回静态 opts.workdir(向后兼容)。
+    const { cmd, args, cwd } = buildHarnessCommand(prompt, ctx?.cwd ?? this.opts.workdir, this.opts);
     const timeoutMs = this.opts.taskTimeoutMs ?? 1_800_000;
     const state: LiveProc = { proc: null as unknown as ChildProcess, settled: false, stopped: false, timedOut: false };
     let resolveClosed!: (outcome: RunOutcome) => void;

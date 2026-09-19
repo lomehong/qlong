@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { envelopeDigest, newId, type EnvelopeV1 } from '@qlong/core';
-import type { FencedDriver, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
+import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 import { DurableExecutor, type DurableExecutorOptions } from '../src/runtime/executor.js';
 import { NodeRuntimeStore, type RuntimeJson } from '../src/runtime/store.js';
 import type { Outbound } from '../src/wire.js';
@@ -49,13 +49,14 @@ class FakeDriver implements FencedDriver {
     outcome: ReturnType<typeof deferred<RunOutcome>>;
     stopped: ReturnType<typeof deferred<void>>;
     stopEntered: ReturnType<typeof deferred<void>>;
+    ctx?: RunContext;
   }> = [];
   startBarrier: Promise<void> = Promise.resolve();
   recovery: 'stopped' | 'unknown' = 'unknown';
 
   constructor(readonly store: NodeRuntimeStore) {}
 
-  start = vi.fn(async (fence: RunFence, _offer: Record<string, unknown>): Promise<RunHandle> => {
+  start = vi.fn(async (fence: RunFence, _offer: Record<string, unknown>, ctx?: RunContext): Promise<RunHandle> => {
     // Reads would throw on store reentry if start/stop/recover were called inside a transaction.
     expect(this.store.state(KEY)?.value).toMatchObject({ generation: fence.generation,
       slot: { phase: 'starting', mayHaveStarted: true, fence } });
@@ -71,7 +72,7 @@ class FakeDriver implements FencedDriver {
       stopEntered.resolve();
       return stopped.promise;
     }) });
-    this.runs.push({ handle, outcome, stopped, stopEntered });
+    this.runs.push({ handle, outcome, stopped, stopEntered, ctx });
     this.entered.resolve();
     await this.startBarrier;
     return handle;
@@ -81,6 +82,37 @@ class FakeDriver implements FencedDriver {
     expect(this.store.state(KEY)?.value).toMatchObject({ slot: { fence } });
     return this.recovery;
   });
+}
+
+/** e2d-1c:记录型 ExecutorWorkspace 桩——prepare 断言其在事务外、'starting' 提交前运行。 */
+class FakeWorkspace implements ExecutorWorkspace {
+  readonly prepared: RunFence[] = [];
+  readonly released: RunFence[] = [];
+  failPrepare = false;
+  constructor(readonly store: NodeRuntimeStore) {}
+  async prepare(fence: Readonly<RunFence>, _offer: Record<string, unknown>): Promise<RunContext> {
+    // 读取会在事务重入时抛错;断言 prepare 在 SQL 事务外、且早于 'starting'/mayHaveStarted 提交。
+    expect(this.store.state(KEY)?.value).toMatchObject({ slot: { phase: 'prepared', fence } });
+    if (this.failPrepare) throw new Error('prepare boom');
+    this.prepared.push({ ...fence });
+    return { cwd: `/ws/${fence.run_id}` };
+  }
+  async release(fence: Readonly<RunFence>): Promise<void> { this.released.push({ ...fence }); }
+}
+
+/** 装配带 FakeDriver + FakeWorkspace 的执行器;两者共享同一真实临时 SQLite。 */
+async function setupWs(recovered = true) {
+  const f = fixture();
+  const driver = new FakeDriver(f.runtime);
+  const workspace = new FakeWorkspace(f.runtime);
+  const executor = new DurableExecutor({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal, driver, workspace });
+  if (recovered) await executor.recover();
+  const deliver = (input: EnvelopeV1, authorized = true) => {
+    expect(['new', 'duplicate']).toContain(f.runtime.receive(input));
+    executor.consume(input, authorized);
+  };
+  const outputs = (type: string) => f.runtime.all().map((item) => item.envelope).filter((item) => item.type === type);
+  return { ...f, driver, workspace, executor, deliver, outputs };
 }
 
 async function setup(overrides: Partial<DurableExecutorOptions> = {}, recovered = true) {
@@ -871,5 +903,114 @@ describe('DurableExecutor 接管↔恢复联动(C2c: recover 不复活旧 lead �
     redeliver(offer({ task_id: taskId, attempt: 2, from: { node_id: OTHER, team_id: TEAM, key_epoch: 1 } }));
     expect(outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'busy', retryable: true });
     expect(driver.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('DurableExecutor per-fence 工作区生命周期(e2d-1)', () => {
+  it('在 driver.start 前于事务外 prepare 工作区,并把解析 cwd 传给驱动', async () => {
+    const f = await setupWs();
+    const input = offer();
+    f.deliver(input);
+    const fence = f.executor.snapshot().slot!.fence;
+    await f.executor.settle();
+    // prepare 早于 'starting' 提交(FakeWorkspace 内部断言 phase='prepared' 且可读取=事务外)
+    expect(f.workspace.prepared).toEqual([{ ...fence }]);
+    expect(f.driver.runs[0]!.ctx).toEqual({ cwd: `/ws/${fence.run_id}` });
+    expect(f.executor.snapshot().slot?.phase).toBe('running');
+  });
+
+  it('运行中不 release;结果提交后才 release(finish 之后、事务外)', async () => {
+    const f = await setupWs();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    const fence = f.executor.snapshot().slot!.fence;
+    expect(f.workspace.released).toEqual([]); // 在途不提前清理
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.executor.snapshot().slot).toBeNull();
+    expect(f.outputs('task.result')).toHaveLength(1);
+    expect(f.workspace.released).toEqual([{ ...fence }]); // 提交后清理
+  });
+
+  it('取消在途 run:静默前不 release(保留在途产物),静默+提交后才 release', async () => {
+    const f = await setupWs();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    const run = f.driver.runs[0]!;
+    const fence = f.executor.snapshot().slot!.fence;
+    f.deliver(control(input, 'task.cancel'));
+    const stopping = f.executor.settle();
+    await run.stopEntered.promise;
+    expect(f.executor.snapshot().slot?.phase).toBe('stopping');
+    expect(f.workspace.released).toEqual([]); // 进程未静默,工作区必须保留
+    run.stopped.resolve();
+    await stopping;
+    expect(f.executor.snapshot().slot).toBeNull();
+    expect(f.outputs('task.cancel.ack')).toHaveLength(1);
+    expect(f.workspace.released).toEqual([{ ...fence }]);
+  });
+
+  it('prepare 失败 → task.fail(workspace_prepare_failed),不触发 driver.start,并 release 且不转 recovery_required', async () => {
+    const f = await setupWs();
+    f.workspace.failPrepare = true;
+    const input = offer();
+    f.deliver(input);
+    const fence = f.executor.snapshot().slot!.fence;
+    await f.executor.settle();
+    expect(f.driver.start).not.toHaveBeenCalled();
+    expect(f.executor.snapshot().slot).toBeNull(); // 干净失败,未升级 recovery_required
+    expect(f.outputs('task.fail')[0]!.body.summary).toBe('workspace_prepare_failed');
+    expect(f.workspace.released).toEqual([{ ...fence }]); // 部分目录被清理
+  });
+
+  it('未注入 workspace 端口 → driver.start 收到 ctx undefined(向后兼容)', async () => {
+    const f = await setup();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    expect(f.driver.runs[0]!.ctx).toBeUndefined();
+    expect(f.executor.snapshot().slot?.phase).toBe('running');
+  });
+
+  /** 模拟崩溃后重启:持久化一个 mayHaveStarted 的 run,用新执行器+新工作区 recover。 */
+  async function restartWith(recovery: 'stopped' | 'unknown') {
+    const f = fixture();
+    const driver1 = new FakeDriver(f.runtime);
+    const ws1 = new FakeWorkspace(f.runtime);
+    const ex1 = new DurableExecutor({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal, driver: driver1, workspace: ws1 });
+    await ex1.recover();
+    const input = offer();
+    f.runtime.receive(input); ex1.consume(input, true);
+    const saved = ex1.snapshot();
+    saved.slot!.phase = 'running'; saved.slot!.mayHaveStarted = true;
+    f.runtime.transition(KEY, f.runtime.state(KEY)!.revision, () => ({ state: saved as unknown as RuntimeJson }));
+    const fence = saved.slot!.fence;
+    f.store.close();
+    const runtime = new NodeRuntimeStore(open({ ...f.options, mode: 'open' }), LOCAL);
+    const driver2 = new FakeDriver(runtime);
+    driver2.recovery = recovery;
+    const ws2 = new FakeWorkspace(runtime);
+    const ex2 = new DurableExecutor({ store: runtime, nodeId: LOCAL, teamId: TEAM, seal, driver: driver2, workspace: ws2 });
+    const outputs = (type: string) => runtime.all().map((i) => i.envelope).filter((i) => i.type === type);
+    await ex2.recover();
+    return { driver2, ws2, ex2, fence, outputs };
+  }
+
+  it('重启恢复 stopped → finish+release 清理上一进程遗留工作区(按 fence,无需本进程 prepare)', async () => {
+    const { driver2, ws2, ex2, fence, outputs } = await restartWith('stopped');
+    expect(driver2.recover).toHaveBeenCalledWith(fence);
+    expect(ex2.snapshot().slot).toBeNull();
+    expect(outputs('task.fail')[0]!.body.summary).toBe('execution_interrupted');
+    expect(ws2.prepared).toEqual([]);            // 本进程从未 prepare
+    expect(ws2.released).toEqual([{ ...fence }]); // 仍按 fence release 清理遗留
+  });
+
+  it('重启恢复 unknown → recovery_required,不 release(保留在途产物待运维)', async () => {
+    const { ws2, ex2, fence } = await restartWith('unknown');
+    expect(ex2.snapshot().slot).toMatchObject({ phase: 'recovery_required', fence });
+    expect(ws2.released).toEqual([]); // 不可证静默时绝不清理
   });
 });
