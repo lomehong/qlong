@@ -1,6 +1,6 @@
 # 旧数据显式迁移设计（F1 / P2）
 
-> 状态：**设计定稿，slice1 未实现**。本文固化 P2「旧数据显式迁移」的源/目标映射、信任铁律、
+> 状态：**slice1 已实现（提交 ece609e）、slice2 已实现（事务化导入）、slice3（verify）未实现**。本文固化 P2「旧数据显式迁移」的源/目标映射、信任铁律、
 > 四个已核实的陷阱、`qlong migrate <inspect|import|verify>` CLI 与三切片分解 + 测试矩阵。
 > 对应计划 P2（line102-116）。P3「全链故障矩阵」另见 `docs/testing/R-MATRIX.md`（slice 后建）。
 
@@ -108,6 +108,14 @@
 - **变异**：移除独占准入→并发双写 RED；不走单事务→COMMIT 失败留半量 RED；改 `stored_at/expires_at`→延 exp RED；
   ledger 幂等键移除→重跑翻倍 RED。
 
+> **实现现状（slice2 已落地）**：导入器 `packages/cli/src/migrate/import.ts`（`importMigration`），账本表
+> `packages/registry/src/import-ledger.ts`（`IMPORT_LEDGER_SQL` + `insertImportLedger`）append 为 `CENTER_SCHEMA` v5
+> （v1–v4 checksum 不变）；custody 事务内入口从 `SqliteCustodyStore.offer` 抽出为同步 `offerInTransaction(db, encoded, now, limits)`
+> （`gateway/custody-store.ts`，`offer()` 薄委托），使导入可在单同步事务内落 custody 而不触发 async。**验签在事务外**
+> （`verifyEnvelopeSig` 是 async，不能进事务），事务内仅同步 db 写。**与设计的偏差（如实标注）**：设计的
+> “中途崩溃（子进程 kill）→重跑一致”未单独写 kill 测试；其可观测不变量（崩溃后重跑得到一致结果）由
+> “重跑幂等（同来源摘要无副作用）”+“COMMIT 失败整事务回滚”两测共同覆盖。变异已验（4 靶点均 RED 捕获、字节还原）。
+
 ### slice3 — `qlong migrate verify`（导入后复核 + 切换说明）
 - 只读复核：目标 `auth_users` 数量/逐条摘要 == inspect 预期；`auth_meta.initialized`/`user_count` 一致；
   mailbox `migratable` 子集在 `gateway_custody` 为 `pending` 且 `envelopeDigest` 匹配；**身份关联**（username↔team owner_user_id、
@@ -132,8 +140,10 @@
 
 - 新增 `if (cmd === 'migrate')` 块：`const sub = process.argv[3] ?? ''`；`sub ∉ {inspect,import,verify}` → 打印用法 + `exit 2`
   （镜像 `task`/`lead` 子命令风格，`main.ts:297/441`）。
-- 标志（`--name value` 解析同 `join.ts:120`）：`--auth-dir <dir>`、`--mailbox <file>`、`--to <center.sqlite>`、
-  `--data-dir`/`--storage-mode`（复用 `server-storage-options.ts`）、`--json`（inspect）、`--confirm-migration`（import 显式确认）。
+- 标志（`--name value` 解析同 `join.ts:120`）：`--auth-dir <dir>`、`--mailbox <file>`、`--to <center.sqlite>`、`--json`（inspect）。
+  import 专用：`--to` 必为**绝对路径**且目标库已存在（mode `open`，含 registry 节点供离线验签）+ **双重确认门**
+  `--confirm-migration`（操作）与 `--confirm-local-filesystem`（存储介质准入，或 `QLONG_LOCAL_FS_CONFIRMED=1`）；
+  `--data-base <dir>`（`allowedBase` 校验）、`--confirm-windows-acl`（或 `QLONG_WINDOWS_ACL_CONFIRMED=1`）。
 - `KNOWN_COMMANDS`（`main.ts:502`）加 `'migrate'`；usage 串加 `migrate`。
 - 逻辑全抽到 `migrate/` 模块（inspect/import/verify 纯函数 + 事务编排），main.ts 只解析参数 + 调用 + 打印（惯例：粘合层不单测）。
 

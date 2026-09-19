@@ -331,7 +331,7 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await Promise.all([a.close(), b.close()]);
   }, 20_000);
 
-  it('appends center schema v2+v3+v4 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
+  it('appends center schema v2+v3+v4+v5 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
     const f = new CustodyFixture();
     const v1 = CENTER_SCHEMA.migrations[0]!;
     const store = SqliteStore.open({ ...f.options(), filename: 'center.sqlite',
@@ -363,9 +363,9 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await f.stop();
     // Check the migration before authenticated HTTP requests can legitimately touch last_seen.
     f.offline((storage) => {
-      expect(storage.version).toBe(4);
+      expect(storage.version).toBe(5);
       expect(persistedSnapshot(storage) === before).toBe(true);
-      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2, 3, 4]);
+      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
       expect(storage.database.prepare('SELECT checksum FROM _qlong_migrations WHERE version = 1').get()?.checksum === v1.checksum).toBe(true);
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0);
       // v3 claim 双表追加为空(不触碰既有数据);迁移仅追加,绝不重写 v1/v2。
@@ -373,6 +373,8 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_claim_seq').get()?.count).toBe(0);
       // v4 owner 命令表追加为空(E3a);迁移仅追加,绝不重写 v1/v2/v3。
       expect(storage.database.prepare('SELECT count(*) AS count FROM registry_commands').get()?.count).toBe(0);
+      // v5 数据导入账本追加为空(F1/P2 slice2);迁移仅追加,绝不重写 v1–v4。
+      expect(storage.database.prepare('SELECT count(*) AS count FROM import_ledger').get()?.count).toBe(0);
     });
     await f.start('open');
     const me = await f.call<{ csrf: string }>('GET', '/v1/auth/me', undefined, ownerHeaders(owner));
@@ -473,7 +475,7 @@ describe('startQlongServer D1c: durable cross-process claim registry (center sch
 
     await f.stop();
     f.offline((storage) => {
-      expect(storage.version).toBe(4); // v4 迁移已应用
+      expect(storage.version).toBe(5); // 全量 CENTER_SCHEMA 迁移已应用(至 v5)
       // seq 高水位跨停机持久(fencing token 绝不复用);活跃行已随 release 清空。
       expect(storage.database.prepare('SELECT last_generation FROM gateway_claim_seq WHERE node_id = ?')
         .get(node.node_id)?.last_generation).toBe(1);

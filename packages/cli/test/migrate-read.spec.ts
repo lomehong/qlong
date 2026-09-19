@@ -115,12 +115,12 @@ describe('readMigrationSources — dry-run 只读,不改源', () => {
 });
 
 describe('readTargetSnapshot — 只读真实 center.sqlite', () => {
-  it('maps schema/version/auth/custody/registry rows from a real CENTER_SCHEMA v4 database', () => {
+  it('maps schema/version/auth/custody/registry rows from a real CENTER_SCHEMA v5 database', () => {
     const c = buildCenter();
     const snap = readTargetSnapshot(c.path);
     expect(snap.path).toBe(c.path);
     expect(snap.schemaId).toBe('qlong.center');
-    expect(snap.version).toBe(4);
+    expect(snap.version).toBe(5);
     expect(snap.initialized).toBe(true);
     expect(snap.users).toEqual([{ username: 'alice', role: 'global_owner', created_at: ISO, salt: SALT, hash: HASH }]);
     expect(snap.custody).toEqual([{ from_node: c.fromNode, msg_id: c.msgId, digest: c.digest }]);

@@ -71,7 +71,7 @@ function diagnoseUser(raw: unknown): string {
 }
 
 /** 离线复刻 Registry.lookupPubkey(directory.ts:384):仅 active 节点、current|historical 纪元可解析。 */
-function lookupNodeKey(nodes: TargetNode[], nodeId: string, epoch: number):
+export function lookupNodeKey(nodes: TargetNode[], nodeId: string, epoch: number):
   { status: 'current' | 'historical'; pubkey: string } | { status: 'node_unknown' | 'node_inactive' | 'unknown_epoch' } {
   const node = nodes.find((n) => n.node_id === nodeId);
   if (!node) return { status: 'node_unknown' };

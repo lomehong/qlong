@@ -27,9 +27,11 @@ CREATE INDEX gateway_custody_pending ON gateway_custody(to_node, status);
 CREATE INDEX gateway_custody_expiry ON gateway_custody(expires_at) WHERE status = 'pending';
 `;
 
-type OfferResult = 'stored' | 'full' | 'conflict' | 'expired' | 'invalid';
+export type OfferResult = 'stored' | 'full' | 'conflict' | 'expired' | 'invalid';
 type Status = 'pending' | 'received' | 'expired';
 interface CustodyOptions { maxEntries?: number; maxBytes?: number; perNodeEntries?: number; retentionMs?: number }
+/** 配额三元组(不含 retentionMs);offerInTransaction 由调用方提供(导入器复用中心默认配额)。 */
+export interface CustodyLimits { maxEntries: number; maxBytes: number; perNodeEntries: number }
 interface Row extends DeliveryIdentity {
   to_node: string;
   status: Status;
@@ -38,7 +40,7 @@ interface Row extends DeliveryIdentity {
   payload: string | null;
   payload_bytes: number;
 }
-interface Encoded { envelope: EnvelopeV1; payload: string; bytes: number; digest: string; expires: number }
+export interface Encoded { envelope: EnvelopeV1; payload: string; bytes: number; digest: string; expires: number }
 
 function requireValid(condition: unknown): asserts condition {
   // Never include payloads or persisted values in recovery errors.
@@ -169,6 +171,37 @@ function retentionWindow(value: number | undefined): number | undefined {
   return value;
 }
 
+/** 公开的编码入口(= 内部 encode):把不可信输入转为 Encoded;失败返回 undefined(绝不抛)。 */
+export const encodeCustody = encode;
+
+/**
+ * db 级 offer:在调用方已开启的**单事务**内落一条 custody(F1/P2 slice2 迁移导入器复用)。
+ * 与 SqliteCustodyStore.offer 的事务体逐字同构——offer() 即 encode 后薄委托到此,行为不变。
+ * 语义:稳定操作身份 (from,msg_id) 优先于时间/配额;已存在同 digest→'stored',异体→'conflict';
+ * now>=expires→'expired'(绝不延长 exp);超 transport 生命期→'invalid';配额满→'full';否则 INSERT pending→'stored'。
+ * limits 由调用方提供;now 的 validTime 校验由调用方在事务外先行(offer() 保留该守卫)。
+ */
+export function offerInTransaction(db: DatabaseSync, encoded: Encoded, now: number, limits: CustodyLimits): OfferResult {
+  const { envelope, digest, expires, payload, bytes } = encoded;
+  const existing = find(db, envelope.from.node_id, envelope.msg_id);
+  // Stable operation identity wins over time and quotas, even after terminal receipt/expiry.
+  if (existing) return existing.digest === digest ? 'stored' : 'conflict';
+  if (now >= expires) return 'expired';
+  if (expires - now > MAX_TRANSPORT_LIFETIME_MS) return 'invalid';
+  expire(db, now);
+  const totals = db.prepare('SELECT count(*) AS entries, coalesce(sum(payload_bytes), 0) AS bytes FROM gateway_custody').get()!;
+  const recipient = db.prepare("SELECT count(*) AS entries FROM gateway_custody WHERE to_node = ? AND status = 'pending'")
+    .get(envelope.to.node_id)!;
+  requireValid(Number.isSafeInteger(totals.entries) && Number.isSafeInteger(totals.bytes) && Number.isSafeInteger(recipient.entries));
+  if ((totals.entries as number) >= limits.maxEntries || bytes > limits.maxBytes - (totals.bytes as number) ||
+      (recipient.entries as number) >= limits.perNodeEntries) return 'full';
+  db.prepare(`INSERT INTO gateway_custody
+    (from_node, msg_id, to_node, digest, status, stored_at, expires_at, payload, payload_bytes)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`)
+    .run(envelope.from.node_id, envelope.msg_id, envelope.to.node_id, digest, now, expires, payload, bytes);
+  return 'stored';
+}
+
 /**
  * Durable custody, not task acceptance. Caller verifies signatures/ACLs and authenticates receipts.
  * No connection-state distinction or cache. Tombstones persist forever unless a retentionMs window is
@@ -195,26 +228,9 @@ export class SqliteCustodyStore {
   offer(env: EnvelopeV1, now: number): OfferResult {
     const encoded = encode(env);
     if (!encoded || !validTime(now)) return 'invalid';
-    return this.store.transaction<OfferResult>((db) => {
-      const { envelope, digest, expires, payload, bytes } = encoded;
-      const existing = find(db, envelope.from.node_id, envelope.msg_id);
-      // Stable operation identity wins over time and quotas, even after terminal receipt/expiry.
-      if (existing) return existing.digest === digest ? 'stored' : 'conflict';
-      if (now >= expires) return 'expired';
-      if (expires - now > MAX_TRANSPORT_LIFETIME_MS) return 'invalid';
-      expire(db, now);
-      const totals = db.prepare('SELECT count(*) AS entries, coalesce(sum(payload_bytes), 0) AS bytes FROM gateway_custody').get()!;
-      const recipient = db.prepare("SELECT count(*) AS entries FROM gateway_custody WHERE to_node = ? AND status = 'pending'")
-        .get(envelope.to.node_id)!;
-      requireValid(Number.isSafeInteger(totals.entries) && Number.isSafeInteger(totals.bytes) && Number.isSafeInteger(recipient.entries));
-      if ((totals.entries as number) >= this.maxEntries || bytes > this.maxBytes - (totals.bytes as number) ||
-          (recipient.entries as number) >= this.perNodeEntries) return 'full';
-      db.prepare(`INSERT INTO gateway_custody
-        (from_node, msg_id, to_node, digest, status, stored_at, expires_at, payload, payload_bytes)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`)
-        .run(envelope.from.node_id, envelope.msg_id, envelope.to.node_id, digest, now, expires, payload, bytes);
-      return 'stored';
-    });
+    return this.store.transaction<OfferResult>((db) =>
+      offerInTransaction(db, encoded, now,
+        { maxEntries: this.maxEntries, maxBytes: this.maxBytes, perNodeEntries: this.perNodeEntries }));
   }
 
   pending(toNode: string, now: number, limit: number): Array<{ envelope: EnvelopeV1; digest: string }> {

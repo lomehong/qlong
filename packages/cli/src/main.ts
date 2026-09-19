@@ -12,6 +12,7 @@ import { MemoryStore } from '../../node/src/lead/store.js';
 import { joinAndSave, qlongHome, readConfig } from './join.js';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
+import { basename, dirname, isAbsolute } from 'node:path';
 
 try {
   assertNodeRuntime(process.versions.node);
@@ -266,13 +267,12 @@ if (cmd === 'run') {
       const pick = (await selectorHandle)?.selector({ task_id: taskId, nextAttempt: 1, excluded: {}, kind: originate.kind as 'aid' | 'project' });
       if (pick) { target = pick.target; offerBody = pick.offerBody; }
     }
-    if (target === undefined) {
-      // 单机形态兜底(愿景:一条龙独立干活):无其他可用目标 → 自派单,本进程 lead→executor 闭环
-      target = cfg.node_id;
-      console.log('无其他可用目标:自派单(单机形态,本机执行)');
+    if (target !== undefined) {
+      node.lead.dispatch(taskId, target, offerBody);
+      console.log('已发起牵头任务', taskId, '→', target);
+    } else {
+      console.log('已发起牵头任务', taskId, '(暂无合格目标,保留 drafting;目录刷新后由周期泵改派)');
     }
-    node.lead.dispatch(taskId, target, offerBody);
-    console.log('已发起牵头任务', taskId, '→', target, target === cfg.node_id ? '(本机执行)' : '');
   }
   console.log('Ctrl+C 退出(关停会静默在跑任务并把终态落中心)');
   let stopping = false;
@@ -484,31 +484,79 @@ if (cmd === 'migrate') {
   if (sub !== 'inspect' && sub !== 'import' && sub !== 'verify') {
     console.error('用法:');
     console.error('  qlong migrate inspect --auth-dir <目录> [--mailbox <文件>] [--to <center.sqlite>] [--json]');
-    console.error('  qlong migrate import  --auth-dir <目录> [--mailbox <文件>] --to <center.sqlite> --confirm-migration');
+    console.error('  qlong migrate import  --auth-dir <目录> [--mailbox <文件>] --to <center.sqlite> --confirm-migration --confirm-local-filesystem');
     console.error('  qlong migrate verify  --to <center.sqlite>');
     console.error('(离线只读预检;缺省 auth-dir=$QLONG_AUTH_DIR、mailbox=$QLONG_MAILBOX_FILE。import/verify 见 §5 slice2/slice3)');
     process.exit(2);
   }
-  if (sub !== 'inspect') {
-    console.error(`qlong migrate ${sub} 尚未实现(见 docs/repair/DATA-MIGRATION.md §5 slice2/slice3)`);
-    process.exit(2);
-  }
   const authDir = sflag('--auth-dir', process.env.QLONG_AUTH_DIR);
   const mailboxFile = sflag('--mailbox', process.env.QLONG_MAILBOX_FILE);
-  if (authDir === undefined && mailboxFile === undefined) {
-    console.error('缺少迁移源:请提供 --auth-dir <目录> 或 --mailbox <文件>(或设置 QLONG_AUTH_DIR / QLONG_MAILBOX_FILE)');
+  if (sub === 'verify') {
+    console.error('qlong migrate verify 尚未实现(见 docs/repair/DATA-MIGRATION.md §5 slice3)');
     process.exit(2);
   }
-  const { readMigrationSources, readTargetSnapshot, formatInventory } = await import('./migrate/read.js');
-  const { inspectMigration } = await import('./migrate/inspect.js');
-  try {
+  if (sub === 'inspect') {
+    if (authDir === undefined && mailboxFile === undefined) {
+      console.error('缺少迁移源:请提供 --auth-dir <目录> 或 --mailbox <文件>(或设置 QLONG_AUTH_DIR / QLONG_MAILBOX_FILE)');
+      process.exit(2);
+    }
     // dry-run 只读:readMigrationSources 绝不写源(尤其不写 initialized);readTargetSnapshot 只读打开目标库。
-    const sources = readMigrationSources({ authDir, mailboxFile });
-    const inventory = await inspectMigration(sources, readTargetSnapshot(sflag('--to') ?? ''), Date.now());
-    console.log(process.argv.includes('--json') ? JSON.stringify(inventory, null, 2) : formatInventory(inventory));
-  } catch (e) {
-    console.error('迁移预检失败:', e instanceof Error ? e.message : e);
-    process.exitCode = 1;
+    const { readMigrationSources, readTargetSnapshot, formatInventory } = await import('./migrate/read.js');
+    const { inspectMigration } = await import('./migrate/inspect.js');
+    try {
+      const sources = readMigrationSources({ authDir, mailboxFile });
+      const inventory = await inspectMigration(sources, readTargetSnapshot(sflag('--to') ?? ''), Date.now());
+      console.log(process.argv.includes('--json') ? JSON.stringify(inventory, null, 2) : formatInventory(inventory));
+    } catch (e) {
+      console.error('迁移预检失败:', e instanceof Error ? e.message : e);
+      process.exitCode = 1;
+    }
+  }
+  if (sub === 'import') {
+    // 事务化导入是写操作:双重确认门 --confirm-migration(操作)+ --confirm-local-filesystem(存储介质准入)。
+    // 目标必须已存在(mode open:须含 registry 节点供离线验签);逻辑全在 migrate/import.ts,此处仅粘合。
+    const to = sflag('--to');
+    if (to === undefined || !isAbsolute(to)) {
+      console.error('import 需要绝对 --to <center.sqlite> 路径(指向已存在的 v2 中心库)');
+      process.exit(2);
+    }
+    if (!process.argv.includes('--confirm-migration')) {
+      console.error('拒绝执行:导入是写操作,请加 --confirm-migration 显式确认(建议先跑 qlong migrate inspect 预检)');
+      process.exit(2);
+    }
+    if (!process.argv.includes('--confirm-local-filesystem') && process.env.QLONG_LOCAL_FS_CONFIRMED !== '1') {
+      console.error('拒绝执行:请用 --confirm-local-filesystem 确认目标库在本地非共享存储(DATA-MIGRATION.md §7)');
+      process.exit(2);
+    }
+    if (authDir === undefined && mailboxFile === undefined) {
+      console.error('缺少迁移源:请提供 --auth-dir <目录> 或 --mailbox <文件>(或设置 QLONG_AUTH_DIR / QLONG_MAILBOX_FILE)');
+      process.exit(2);
+    }
+    const windowsAcl = process.argv.includes('--confirm-windows-acl') || process.env.QLONG_WINDOWS_ACL_CONFIRMED === '1';
+    const dataDir = dirname(to);
+    const { readMigrationSources } = await import('./migrate/read.js');
+    const { importMigration } = await import('./migrate/import.js');
+    try {
+      const sources = readMigrationSources({ authDir, mailboxFile });
+      const report = await importMigration(sources, {
+        now: Date.now(),
+        target: {
+          allowedBase: sflag('--data-base', process.env.QLONG_DATA_BASE) ?? dirname(dataDir),
+          dataDir, filename: basename(to), mode: 'open',
+          localFilesystemConfirmed: true, windowsAclConfirmed: windowsAcl ? true : undefined,
+        },
+      });
+      console.log(report.idempotent
+        ? `导入无副作用(全部来源摘要已在账本,幂等重跑):${report.targetPath}`
+        : `导入完成:${report.usersInserted} 用户 / ${report.mailboxStored} 待投消息 → ${report.targetPath}`);
+      for (const e of report.ledger) {
+        console.log(`  账本 [${e.kind}] migratable=${e.migratable} blocked=${e.blocked} non_migratable=${e.non_migratable} invalid=${e.invalid} @${e.imported_at}`);
+      }
+      console.log('提示:请运行 qlong migrate verify 复核后再切换部署(源数据未删除;失败已回滚)。');
+    } catch (e) {
+      console.error('迁移导入失败(目标库已回滚,源数据保留):', e instanceof Error ? e.message : e);
+      process.exitCode = 1;
+    }
   }
 }
 
