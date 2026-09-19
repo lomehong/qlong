@@ -395,6 +395,40 @@ describe('DurableNode v2 task loop', () => {
     await wait(() => expect(node.executor.snapshot().slot).toBeNull());
   });
 
+  it('单机形态:自派单闭环 —— originate 后 dispatch 给本机,offer 网关回环进执行器直至 done', async () => {
+    // 愿景"一条龙独立干活":lead 与 executor 同进程。自派单的 task.offer 此前被
+    // "本机牵头一律进牵头半"路由吞掉,单龙无法自给自足(见 runtime/node.ts drain 注)。
+    const driver = new StubDriver();
+    // 网关回环:每个出站任务信封 → stored(中心落库)+ delivery(自寻址消息泵回本机)
+    const loopback: FixtureOptions['onFrame'] = (frame, ws) => {
+      if (frame.frame !== 'envelope') return;
+      const env = frame.envelope as EnvelopeV1;
+      write(ws, stored(env));
+      write(ws, delivery(env));
+    };
+    const f = await fixture({ onFrame: loopback, driver });
+    const node = await f.makeNode({
+      validateAcceptance: () => true,
+      taskReportSink: async () => ({ ok: true, status: 200 }),
+    });
+    await node.start();
+
+    const taskId = newId();
+    expect(node.lead.originate(taskId, 'aid')).toBe(true);
+    // 显式自派单(target = 本机)
+    expect(node.lead.dispatch(taskId, node.identity.node_id, { kind: 'aid', summary: '单机自洽' })).toBe(true);
+
+    // offer 回环 → 执行半接单并驱动(此前它会被路由进牵头半,任务永久卡死)
+    await wait(() => expect(driver.started).toHaveLength(1));
+    expect(driver.started[0]!.fence.task_id).toBe(taskId);
+    driver.complete(driver.started[0]!.fence.run_id);
+    // result 回环 → 牵头半验收 → done(依赖 drain 触发补跑:result 在上一轮 drain 排空窗口内入账)
+    await wait(() => expect(node.lead.snapshot(taskId)?.state).toBe('done'));
+    expect(f.sent('task.accept')).toHaveLength(1);
+    expect(f.sent('task.result')).toHaveLength(1);
+    await node.stop();
+  });
+
   it('rejects a live offer without a driver instead of executing it', async () => {
     const f = await fixture({ onFrame: autoStored });
     const node = await f.makeNode();

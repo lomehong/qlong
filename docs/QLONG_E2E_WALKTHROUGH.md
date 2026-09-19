@@ -20,6 +20,16 @@
 > 铁律:数据库丢失/损坏走显式恢复,不能改回 `create` "修复"(CENTER-STORAGE.md);
 > 数据目录必须在本地盘(NFS/SMB/云同步盘会拒绝启动)。
 
+## 〇b、剧本 0:单机形态(一条龙独立干活,愿景基线)
+
+> "单机形态完全保留:拔掉网线,一条'龙'还是一台能独立干活的单机。" 无第二台设备时,
+> `--originate` 找不到其他可用目标会**自派单**(本进程 lead→executor 闭环),一条龙即可全链跑通。
+
+```sh
+qlong run --storage-mode open --confirm-local-filesystem --confirm-windows-acl --auto-select --originate task.json
+# 日志:"无其他可用目标:自派单(单机形态,本机执行)" → 任务本机执行 → done
+```
+
 ## 一、剧本 1:互助闭环(aid,任务书四要素)
 
 牵头方 A 启动即发起(任务书文件 `task.json`):

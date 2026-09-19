@@ -266,12 +266,13 @@ if (cmd === 'run') {
       const pick = (await selectorHandle)?.selector({ task_id: taskId, nextAttempt: 1, excluded: {}, kind: originate.kind as 'aid' | 'project' });
       if (pick) { target = pick.target; offerBody = pick.offerBody; }
     }
-    if (target !== undefined) {
-      node.lead.dispatch(taskId, target, offerBody);
-      console.log('已发起牵头任务', taskId, '→', target);
-    } else {
-      console.log('已发起牵头任务', taskId, '(暂无合格目标,保留 drafting;目录刷新后由周期泵改派)');
+    if (target === undefined) {
+      // 单机形态兜底(愿景:一条龙独立干活):无其他可用目标 → 自派单,本进程 lead→executor 闭环
+      target = cfg.node_id;
+      console.log('无其他可用目标:自派单(单机形态,本机执行)');
     }
+    node.lead.dispatch(taskId, target, offerBody);
+    console.log('已发起牵头任务', taskId, '→', target, target === cfg.node_id ? '(本机执行)' : '');
   }
   console.log('Ctrl+C 退出(关停会静默在跑任务并把终态落中心)');
   let stopping = false;

@@ -266,12 +266,15 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
 
   // 5) 传输客户端:custody 语义(v2);其自身存储故障同样触发节点级 fail-closed。
   const verify = opts.verifyInbound ?? createRegistryVerifier(opts, me);
+  // drain 不可重入;入账触发在 drain 进行中到达时计数,排空后补跑一轮(否则触发被 guard
+  // 吞掉且 batch<批量 即返回,信封会滞留 pending 直到下一次重连/重试 —— 单龙自派单回环稳定复现)。
+  let drainTriggers = 0;
   const client = new GatewayClient({
     url: opts.gatewayUrl,
     nodeToken: opts.nodeToken,
     runtime,
     verifyInbound: verify,
-    onInboxReady: () => { void drain(); },
+    onInboxReady: () => { drainTriggers += 1; void drain(); },
     onFault: failClosed,
   });
 
@@ -352,7 +355,13 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
           if (!(await verifySafely(env))) { skipped = true; continue; }
           // 路由:本节点牵头该任务 → 回执走牵头方(绝不落入本机执行槽);否则 → 执行方消费。
           const ledByUs = env.task_id !== undefined && runtime.state(leadStateKey(env.task_id)) !== undefined;
-          if (ledByUs) {
+          // 单机形态(愿景:一条龙独立干活):本机牵头的任务可以自派单(target=本机),全部任务信封
+          // 自寻址回环 —— 必须按"收件角色"而非"本机是否牵头"路由:执行半绑定类型(offer 启动 /
+          // lease.renew 续租 / cancel 停止)恒进执行器;其余(accept/progress/result/fail/reject/
+          // cancel.ack 等)才是发给牵头半的回执。跨节点形态不受影响(那些类型本就不会发给本机牵头)。
+          const executorBound =
+            env.type === 'task.offer' || env.type === 'task.lease.renew' || env.type === 'task.cancel';
+          if (ledByUs && !executorBound) {
             // e2d-3: PROJECT task.result 在 consume 前异步预置验收判定(collect+验签+重新哈希+契约核对)。
             // best-effort——方法内部 try/catch 全吞:预置异常/端口缺席 → 判定缺席 → 机器 fail-closed,绝不放大为节点 fault。
             await lead.stageArtifactVerification(env);
@@ -365,7 +374,14 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
         nextVerifyRetryAt = skipped ? Date.now() + verifyRetryMs : 0;
         if (batch.length < PUMP_BATCH) return;
       }
-    } finally { draining = false; }
+    } finally {
+      draining = false;
+      // 排空期间有新入账触发 → 补跑一轮(幂等:pending 空则立即返回)
+      if (!stopped && !faulted && drainTriggers > 0) {
+        drainTriggers = 0;
+        void drain().catch(() => { /* 故障已闭锁 */ });
+      }
+    }
   }
 
   /** 单所有者、带重入守卫的持久上报泵送:传输失败留在 pending 等下次;损坏/存储故障 fail-closed。 */
