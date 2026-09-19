@@ -118,6 +118,14 @@ if ($env:QLONG_STORAGE_MODE -and $env:QLONG_LOCAL_FS_CONFIRMED -eq '1') {
 Write-Host ">>> 验收入网状态..."
 & "$InstallDir\qlong.cmd" status
 
+# 用户 PATH 注册:新开终端后可直接 `qlong ...`(幂等;已含则不动)
+$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($UserPath -notlike "*$InstallDir*") {
+  [Environment]::SetEnvironmentVariable('Path', "$UserPath;$InstallDir", 'User')
+  Write-Host ">>> 已将 $InstallDir 加入用户 PATH——新开终端后可直接用 qlong 命令" -ForegroundColor Green
+  Write-Host "    (当前窗口需手动刷新: `$env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + `$env:Path)"
+}
+
 Write-Host ">>> 安装完成: $InstallDir\qlong.cmd"
 Write-Host ">>> 卸载: powershell -File `$PSCommandPath -Uninstall(含凭证清除)"
 

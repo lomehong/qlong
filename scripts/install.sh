@@ -128,6 +128,13 @@ else
   echo "    或手动: qlong service install --storage-mode open --confirm-local-filesystem"
 fi
 
+# PATH 提示:~/.local/bin 在部分发行版缺省不在 PATH
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *) echo ">>> 提示: $INSTALL_DIR 不在 PATH——可执行以下命令后直接使用 qlong:"
+     echo "    echo 'export PATH=\$PATH:$INSTALL_DIR' >> ~/.profile && source ~/.profile" ;;
+esac
+
 # 装完即在线验收(I-22 清单)
 echo ">>> 验收入网状态..."
 "$INSTALL_DIR/qlong" status
