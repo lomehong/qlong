@@ -127,12 +127,15 @@ export class WsGateway {
       throw new Error('Durable custody does not support cluster routing');
     }
     // d1d:custody 集群中继只在持久监护模式有意义(通知的是共享库 pump,legacy 模式无共享库可泵)。
-    if (opts.relaySecret !== undefined || opts.relayPeers !== undefined) {
+    // 空串/空数组视为未配置(CLI 的 env split 恒产 relayPeers: [],不能因此拒绝 ephemeral)。
+    const relayPeers = (opts.relayPeers ?? []).filter((u) => u.length > 0);
+    const relayConfigured = (opts.relaySecret !== undefined && opts.relaySecret.length > 0) || relayPeers.length > 0;
+    if (relayConfigured) {
       if (!opts.custody) throw new Error('Custody pump relay requires durable custody mode');
       if (opts.cluster !== undefined || opts.clusterSecret !== undefined) {
         throw new Error('Custody pump relay is exclusive with legacy cluster routing');
       }
-      if (opts.relayPeers !== undefined && opts.relaySecret === undefined) {
+      if (relayPeers.length > 0 && (opts.relaySecret === undefined || opts.relaySecret.length === 0)) {
         throw new RangeError('relayPeers requires relaySecret');
       }
     }
@@ -150,8 +153,8 @@ export class WsGateway {
     if (!Number.isSafeInteger(this.claimRenewIntervalMs) || this.claimRenewIntervalMs < 1 || this.claimRenewIntervalMs > 2_147_483_647) {
       throw new RangeError('claimRenewIntervalMs must be a positive timer interval');
     }
-    this.pumpRelay = opts.relaySecret !== undefined && (opts.relayPeers?.length ?? 0) > 0
-      ? new PumpRelay({ secret: opts.relaySecret, peers: opts.relayPeers!.map((url, i) => ({ name: `peer${i + 1}`, url })) })
+    this.pumpRelay = opts.relaySecret !== undefined && opts.relaySecret.length > 0 && relayPeers.length > 0
+      ? new PumpRelay({ secret: opts.relaySecret, peers: relayPeers.map((url, i) => ({ name: `peer${i + 1}`, url })) })
       : undefined;
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
     // 独立端口模式:listen() 的 server 上 '/' 即网关入口

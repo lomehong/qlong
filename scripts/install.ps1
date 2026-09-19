@@ -78,10 +78,18 @@ if ($EnrollToken) {
   Write-Host ">>> 注册入网..."
   $EnrollToken | & "$InstallDir\qlong.cmd" enroll --stdin --registry "$DistBase" --gateway "$gatewayUrl"
   if ($LASTEXITCODE -ne 0) {
-    Write-Host ">>> 安装中止:入网失败(邀请码无效/过期或网络不可达);回控制台重新生成邀请码后重跑同一安装命令" -ForegroundColor Red
-    exit 1
+    # enroll 非零退出 ≠ 入网失败:输出已打印"入网完成"但客户端退出异常(历史 Node TLS 崩溃)时,
+    # 凭证已落盘。检测既有凭证则幂等续装,不误报中止。
+    $qlongHome = if ($env:QLONG_HOME) { $env:QLONG_HOME } else { "$env:USERPROFILE\.qlong" }
+    if (Test-Path "$qlongHome\config.json") {
+      Write-Host ">>> enroll 非零退出,但检测到既有入网凭证($qlongHome\config.json)——按已入网继续安装" -ForegroundColor Yellow
+    } else {
+      Write-Host ">>> 安装中止:入网失败(邀请码无效/过期或网络不可达);回控制台重新生成邀请码后重跑同一安装命令" -ForegroundColor Red
+      exit 1
+    }
+  } else {
+    Write-Host ">>> 入网完成"
   }
-  Write-Host ">>> 入网完成"
 }
 
 # 服务化自启(纪要 §8.5:装完即在线/重启自动在线)。

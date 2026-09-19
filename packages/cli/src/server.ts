@@ -150,8 +150,8 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     authorityId: opts.clusterName ?? 'gw1',
     cluster,
     clusterSecret,
-    relaySecret: opts.relaySecret,
-    relayPeers: opts.relayPeers,
+    relaySecret: opts.relaySecret || undefined,
+    relayPeers: (opts.relayPeers?.length ?? 0) > 0 ? opts.relayPeers : undefined,
     assertAuthorityAvailable: () => { if (storage) void storage.database; },
     onPresenceChange: (nodeId, online) => { registry.presence.set(nodeId, online); },
     authenticate: (tok: string) => {

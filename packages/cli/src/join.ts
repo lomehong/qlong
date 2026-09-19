@@ -29,7 +29,7 @@ export async function joinAndSave(
   const identity = loadOrCreateIdentity(home);
   const res = await fetch(opts.registryUrl.replace(/\/$/, '') + '/v1/enroll', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Connection: 'close' },
     body: JSON.stringify({
       ...(opts.token ? { token: opts.token } : {}),
       pubkey: identity.pubkeyB64,

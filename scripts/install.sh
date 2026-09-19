@@ -97,6 +97,9 @@ if [ -n "$ENROLL_TOKEN" ]; then
   echo ">>> 注册入网..."
   if echo "$ENROLL_TOKEN" | "$INSTALL_DIR/qlong" enroll --stdin --registry "$DIST_BASE" --gateway "$GATEWAY_URL"; then
     echo ">>> 入网完成"
+  elif [ -f "${QLONG_HOME:-$HOME/.qlong}/config.json" ]; then
+    # enroll 非零退出 ≠ 入网失败:凭证已在(历史崩溃后重跑),幂等续装
+    echo ">>> enroll 非零退出,但检测到既有入网凭证 —— 按已入网继续安装"
   else
     echo "!!! 入网失败:请核对邀请码是否有效(30 分钟 TTL、一次性)后重试安装" >&2
     exit 1

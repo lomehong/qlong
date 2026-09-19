@@ -83,11 +83,12 @@ if (cmd === 'enroll') {
   try {
     const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps });
     console.log('入网完成: node', cfg.node_id, '| team', cfg.team_id);
-    process.exit(0);
+    // 不 process.exit:fetch 的空闲 TLSSocket 在强制退出时触发 libuv 断言崩溃
+    // (Windows/Node24,src\winsync.c);空闲连接已 unref,自然排空即干净退出。
   } catch (e) {
     console.error('入网失败:', e instanceof Error ? e.message : e);
     console.error('邀请码无效/过期时,请回到控制台或 /install 页面重新生成,重跑同一安装命令即可');
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
@@ -132,10 +133,10 @@ if (cmd === 'join') {
     console.log('  team_id :', cfg.team_id);
     console.log('  caps    :', cfg.caps.join(', ') || '(无)');
     console.log('下一步: qlong run --storage-mode create --confirm-local-filesystem(首次;之后改 open)');
-    process.exit(0);
+    // 同 enroll:自然排空退出,避免 TLS 句柄强制关闭崩溃
   } catch (e) {
     console.error('入网失败:', e instanceof Error ? e.message : e);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
@@ -266,20 +267,23 @@ if (cmd === 'run') {
   }
   console.log('Ctrl+C 退出(关停会静默在跑任务并把终态落中心)');
   let stopping = false;
+  let releaseMain: (() => void) | undefined;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
     void node.stop().then(
-      () => process.exit(0),
+      () => { releaseMain?.(); },
       () => {
         console.error('关停未完全收口:请保留节点数据目录,恢复后用 open 模式重启');
         process.exitCode = 1;
+        releaseMain?.();
       },
     );
   };
   process.on('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
-  await new Promise(() => undefined); // 常驻
+  // 常驻;关停后 resolve 让模块自然收尾 —— 不 process.exit(TLS 句柄强制关闭崩溃,同 enroll 注)
+  await new Promise<void>((resolve) => { releaseMain = resolve; });
 }
 
 if (cmd === 'lead') {
@@ -384,15 +388,18 @@ if (cmd === 'server') {
     console.log('书坊分发 → /install /install.sh /install.ps1 /releases/<版本>/ | 控制台 → /');
   }
   console.log('Ctrl+C 退出');
+  let releaseMain: (() => void) | undefined;
   const shutdown = (): void => {
-    void handles.close().then(() => { process.exit(0); }, () => {
+    void handles.close().then(() => { releaseMain?.(); }, () => {
       console.error('中心关闭失败,请保留数据目录并检查恢复状态');
       process.exitCode = 1;
+      releaseMain?.();
     });
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
-  await new Promise(() => undefined); // 常驻
+  // 常驻;关停后 resolve 自然退出(避免强杀 TLS 句柄崩溃,同 enroll 注)
+  await new Promise<void>((resolve) => { releaseMain = resolve; });
 }
 
 if (cmd === 'status') {
@@ -420,7 +427,7 @@ if (cmd === 'tasks') {
   const res = await fetch(regUrl + '/v1/teams/' + teamId + '/tasks', { headers: { Authorization: 'Bearer ' + tok } });
   const d = (await res.json()) as { tasks?: Array<{ task_id: string; status: string; type: string }> };
   for (const t of d.tasks ?? []) console.log(t.task_id.slice(0, 12), t.type, t.status);
-  process.exit(0);
+  // fetch 后自然排空退出(不 process.exit,同 enroll 注)
 }
 
 if (cmd === 'task') {
@@ -450,10 +457,11 @@ if (cmd === 'task') {
   if (res.status === 202) {
     console.log('已受理(202):', d.kind ?? sub, (d.task_id ?? taskId).slice(0, 12), '→ 牵头节点', (d.lead ?? '').slice(0, 12), '| 命令', (d.command_id ?? '').slice(0, 12));
     console.log('命令已入队中心;牵头节点下次 PULL 时事务化执行(取消/改派),非即时完成。');
-    process.exit(0);
+  } else {
+    console.error(`命令被拒(${res.status}):`, d.error?.message ?? res.statusText);
+    process.exitCode = 1;
   }
-  console.error(`命令被拒(${res.status}):`, d.error?.message ?? res.statusText);
-  process.exit(1);
+  // fetch 后自然排空退出(不 process.exit,同 enroll 注)
 }
 
 if (cmd === 'doctor') {
@@ -482,5 +490,9 @@ if (cmd === 'doctor') {
   process.exit(0);
 }
 
-console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead>');
-process.exit(2);
+// 已匹配命令的块走"自然排空退出"(见 enroll 注);仅未知命令落到这里。
+const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead'];
+if (!KNOWN_COMMANDS.includes(cmd)) {
+  console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead>');
+  process.exit(2);
+}
