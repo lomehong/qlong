@@ -473,6 +473,45 @@ if (cmd === 'task') {
   // fetch 后自然排空退出(不 process.exit,同 enroll 注)
 }
 
+if (cmd === 'migrate') {
+  // F1/P2 旧数据显式迁移(docs/repair/DATA-MIGRATION.md):离线、只读预检 → 事务化导入 → 复核。
+  // 逻辑全在 migrate/ 模块;此处仅解析参数 + 调用 + 打印(粘合层惯例不单测)。
+  const sub = process.argv[3] ?? '';
+  const sflag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  if (sub !== 'inspect' && sub !== 'import' && sub !== 'verify') {
+    console.error('用法:');
+    console.error('  qlong migrate inspect --auth-dir <目录> [--mailbox <文件>] [--to <center.sqlite>] [--json]');
+    console.error('  qlong migrate import  --auth-dir <目录> [--mailbox <文件>] --to <center.sqlite> --confirm-migration');
+    console.error('  qlong migrate verify  --to <center.sqlite>');
+    console.error('(离线只读预检;缺省 auth-dir=$QLONG_AUTH_DIR、mailbox=$QLONG_MAILBOX_FILE。import/verify 见 §5 slice2/slice3)');
+    process.exit(2);
+  }
+  if (sub !== 'inspect') {
+    console.error(`qlong migrate ${sub} 尚未实现(见 docs/repair/DATA-MIGRATION.md §5 slice2/slice3)`);
+    process.exit(2);
+  }
+  const authDir = sflag('--auth-dir', process.env.QLONG_AUTH_DIR);
+  const mailboxFile = sflag('--mailbox', process.env.QLONG_MAILBOX_FILE);
+  if (authDir === undefined && mailboxFile === undefined) {
+    console.error('缺少迁移源:请提供 --auth-dir <目录> 或 --mailbox <文件>(或设置 QLONG_AUTH_DIR / QLONG_MAILBOX_FILE)');
+    process.exit(2);
+  }
+  const { readMigrationSources, readTargetSnapshot, formatInventory } = await import('./migrate/read.js');
+  const { inspectMigration } = await import('./migrate/inspect.js');
+  try {
+    // dry-run 只读:readMigrationSources 绝不写源(尤其不写 initialized);readTargetSnapshot 只读打开目标库。
+    const sources = readMigrationSources({ authDir, mailboxFile });
+    const inventory = await inspectMigration(sources, readTargetSnapshot(sflag('--to') ?? ''), Date.now());
+    console.log(process.argv.includes('--json') ? JSON.stringify(inventory, null, 2) : formatInventory(inventory));
+  } catch (e) {
+    console.error('迁移预检失败:', e instanceof Error ? e.message : e);
+    process.exitCode = 1;
+  }
+}
+
 if (cmd === 'doctor') {
   console.log('qlong doctor(真实联调前检查)');
   const nodeMajor = Number(process.versions.node.split('.')[0]);
@@ -500,8 +539,8 @@ if (cmd === 'doctor') {
 }
 
 // 已匹配命令的块走"自然排空退出"(见 enroll 注);仅未知命令落到这里。
-const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead'];
+const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate'];
 if (!KNOWN_COMMANDS.includes(cmd)) {
-  console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead>');
+  console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead|migrate>');
   process.exit(2);
 }
