@@ -10,6 +10,7 @@ import { SingleNodeHarness } from '../../node/src/local/harness.js';
 import { LeadSupervisor } from '../../node/src/lead/supervisor.js';
 import { MemoryStore } from '../../node/src/lead/store.js';
 import { joinAndSave, qlongHome, readConfig } from './join.js';
+import { QLONG_USER_AGENT } from '@qlong/core';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
 import { basename, dirname, isAbsolute } from 'node:path';
@@ -189,7 +190,7 @@ if (cmd === 'run') {
         selfNodeId: cfg.node_id,
         fetchDirectory: async () => {
           const res = await fetch(cfg.registry_url.replace(/\/+$/, '') + `/v1/teams/${encodeURIComponent(cfg.team_id)}/nodes`, {
-            headers: { Authorization: 'Bearer ' + cfg.node_token },
+            headers: { Authorization: 'Bearer ' + cfg.node_token, 'User-Agent': QLONG_USER_AGENT },
             signal: AbortSignal.timeout(5_000),
             redirect: 'error',
           });
@@ -433,7 +434,7 @@ if (cmd === 'tasks') {
     console.error('set QLONG_TEAM_ID + QLONG_NODE_TOKEN');
     process.exit(1);
   }
-  const res = await fetch(regUrl + '/v1/teams/' + teamId + '/tasks', { headers: { Authorization: 'Bearer ' + tok } });
+  const res = await fetch(regUrl + '/v1/teams/' + teamId + '/tasks', { headers: { Authorization: 'Bearer ' + tok, 'User-Agent': QLONG_USER_AGENT } });
   const d = (await res.json()) as { tasks?: Array<{ task_id: string; status: string; type: string }> };
   for (const t of d.tasks ?? []) console.log(t.task_id.slice(0, 12), t.type, t.status);
   // fetch 后自然排空退出(不 process.exit,同 enroll 注)
@@ -460,7 +461,7 @@ if (cmd === 'task') {
   }
   const res = await fetch(`${regUrl}/v1/teams/${teamId}/tasks/${taskId}/${sub}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-CSRF-Token': csrf },
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-CSRF-Token': csrf, 'User-Agent': QLONG_USER_AGENT },
   });
   const d = (await res.json().catch(() => ({}))) as { command_id?: string; kind?: string; task_id?: string; lead?: string; error?: { message?: string } };
   if (res.status === 202) {
@@ -576,7 +577,7 @@ if (cmd === 'doctor') {
   if (joined) {
     try {
       const cfg = readConfig(home);
-      const res = await fetch(cfg.registry_url + '/v1/nodes/me', { headers: { Authorization: 'Bearer ' + cfg.node_token } });
+      const res = await fetch(cfg.registry_url + '/v1/nodes/me', { headers: { Authorization: 'Bearer ' + cfg.node_token, 'User-Agent': QLONG_USER_AGENT } });
       console.log(res.ok ? '✓ registry 可达且凭证有效(' + res.status + ')' : '✗ registry 返回 ' + res.status + '(token 失效/服务未启动)');
     } catch (e) {
       console.log('✗ registry 不可达:', e instanceof Error ? e.message : e);
