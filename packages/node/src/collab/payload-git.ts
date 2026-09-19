@@ -15,10 +15,11 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { PayloadRef } from '../executor/fetcher.js';
+import type { SignedManifest } from './artifact-manifest.js';
 
 export interface GitPayloadStoreOptions {
   /** 共享仓库:本地目录(bare 由本类自动 init)或 https 远端 URL(R10:私网须节点白名单) */
@@ -31,6 +32,9 @@ export interface GitPayloadStoreOptions {
 
 const PAYLOAD_REF_PREFIX = 'refs/payload/';
 const PAYLOAD_DIR = 'payloads';
+
+/** E2:签名产物清单在产物分支内的固定文件名(ARTIFACT-ACCEPTANCE §4.2) */
+export const MANIFEST_FILE = 'qlong-manifest.json';
 
 export class GitPayloadError extends Error {}
 
@@ -214,13 +218,45 @@ export function pushArtifacts(
   return { branch: `qlong/${taskId}`, pushed: existing };
 }
 
+/**
+ * 签名产物回传(E2 / ARTIFACT-ACCEPTANCE §4.2):在 pushArtifacts 基础上,把执行方**单独签名**的
+ * 产物清单(qlong-manifest.json)一并 commit 进 qlong/<task> 分支 —— 产物分支自描述、自验签,
+ * 即使脱离 task.result 信封 / 离线搬运,牵头方仍可用执行方登记公钥独立验签(§1.2)。
+ * 清单先落盘再连同存在的 deliverable 一并提交:缺件不入清单,由牵头方核契约完整性时判缺。
+ */
+export function pushSignedArtifacts(
+  worktreeDir: string,
+  repo: string,
+  signed: SignedManifest,
+  taskId: string,
+  gitBin?: string,
+): { branch: string; pushed: string[] } {
+  const bin = resolveGitBin(gitBin);
+  const git = (args: string[]): string =>
+    execFileSync(bin, args, {
+      cwd: worktreeDir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'qlong', GIT_AUTHOR_EMAIL: 'qlong@local',
+        GIT_COMMITTER_NAME: 'qlong', GIT_COMMITTER_EMAIL: 'qlong@local',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString('utf8');
+  writeFileSync(join(worktreeDir, MANIFEST_FILE), JSON.stringify(signed));
+  const existing = signed.manifest.deliverables.map((d) => d.path).filter((f) => existsSync(join(worktreeDir, f)));
+  git(['add', MANIFEST_FILE, ...existing]);
+  git(['commit', '--quiet', '-m', `artifacts ${taskId}`, '--', MANIFEST_FILE, ...existing]);
+  git(['push', '--quiet', repo, `HEAD:refs/heads/qlong/${taskId}`]);
+  return { branch: `qlong/${taskId}`, pushed: existing };
+}
+
 /** 牵头方收取产物:把 qlong/<task> 分支的产物树导出到本地目录 */
 export function collectArtifacts(
   repo: string,
   taskId: string,
   outDir: string,
   gitBin?: string,
-): { ok: boolean; files?: string[]; reason?: string } {
+): { ok: boolean; files?: string[]; manifest?: SignedManifest; reason?: string } {
   gitBin = resolveGitBin(gitBin);
   const branch = `qlong/${taskId}`;
   try {
@@ -244,7 +280,16 @@ export function collectArtifacts(
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, data);
     }
-    return { ok: true, files };
+    // E2:读回签名清单(若分支携带);清单文件本身不计入 deliverable files。
+    // 清单损坏/不可解析 → manifest 缺席,由牵头方验收器 fail-closed(绝不据坏清单伪造验收)。
+    let manifest: SignedManifest | undefined;
+    if (files.includes(MANIFEST_FILE)) {
+      try {
+        const parsed = JSON.parse(readFileSync(join(outDir, MANIFEST_FILE), 'utf8')) as SignedManifest;
+        if (parsed && parsed.alg === 'ed25519' && parsed.manifest && typeof parsed.sig === 'string') manifest = parsed;
+      } catch { /* 清单不可解析 → 缺席,验收 fail-closed */ }
+    }
+    return { ok: true, files: files.filter((f) => f !== MANIFEST_FILE), manifest };
   } catch (e) {
     return { ok: false, reason: String(e instanceof Error ? e.message : e) };
   }
