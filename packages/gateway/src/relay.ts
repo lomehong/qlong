@@ -8,6 +8,7 @@
  *
  * 传输可替换(同 HttpClusterBus 哲学):本实现为 HTTP;Redis pub/sub 等按同接口替换。
  */
+import { QLONG_USER_AGENT } from '@qlong/core';
 
 export interface PumpRelayPeer {
   name: string;
@@ -36,7 +37,7 @@ export class PumpRelay {
     this.secret = opts.secret;
     this.timeoutMs = opts.timeoutMs ?? 1_000;
     this.fetchImpl = opts.fetchImpl ?? (async (url, init) => {
-      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
+      const res = await fetch(url, { ...init, headers: { ...init.headers, 'User-Agent': QLONG_USER_AGENT }, signal: AbortSignal.timeout(this.timeoutMs) });
       return { ok: res.ok, status: res.status };
     });
   }

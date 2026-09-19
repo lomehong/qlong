@@ -10,6 +10,7 @@
 | 步骤 | 设备 | 命令/动作 | 预期 |
 |------|------|-----------|------|
 | 0.1 | A、B | `node --version` | ≥ 24(v2 持久栈依赖内置 node:sqlite) |
+| 0.1b | A、B | `node scripts/drill-check.mjs`(仓库 checkout;或 `qlong doctor` 快查) | 全部 ✓,exit 0——覆盖凭证/中心/网关握手/存储准入/产物仓/dsh 通道(加 `--dsh` 探测) |
 | 0.2 | A | `node scripts/package.mjs` → 部署中心(或用线上 `lomehong-qlong.ms.show`) | 首启:`qlong server --storage-mode create --confirm-local-filesystem`;**之后必须 `open`** |
 | 0.3 | 控制台 | 首次打开 → 创建管理员 → 登录;团队页/安装页生成邀请码 | 一次性 token(30 分钟 TTL) |
 | 0.4 | A、B | 执行 /install 安装命令(token 走 stdin) | 下载→校验→enroll→入网;**持久节点自启仅在 open+本地盘确认下注册** |
@@ -69,18 +70,29 @@ qlong run --storage-mode open --confirm-local-filesystem --auto-select   --origi
 
 ## 三、剧本 3:项目协同(§8.4 文件协同)
 
+> 前置(硬性):**执行方 B 入网时必须携带产物仓** —— `qlong enroll --artifact-repo <git 路径>`
+> (或环境变量 `QLONG_ARTIFACT_REPO`);未配置时 PROJECT offer 一律 `policy_denied`(e2d-2d),
+> 这是有意的验收防线而非缺陷。牵头方 A 亦建议携带(牵头侧 collect/resolve 默认接线,e2d-3)。
+
 1. A 的 task.json 用 `"kind": "project"` + workspace/deliverables 字段(§8.4);
 2. B 接单:WorkspaceManager.clone(worktree)→ dsh 执行 → `pushArtifacts` 提交 `qlong/<task>` 分支;
 3. B `task.result` 携 artifacts 引用;A 按默认验收策略判定(见 2c 注)。
 
-## 四、剧本 4:双网关集群(D1 claim 注册表,v2 形态)
+## 四、剧本 4:多网关集群(D1 claim 注册表,v2 形态)
 
-> v2 的集群 = **多网关进程共享同一中心 SQLite**(custody + claim 表)+ `/internal/pump` 中继。
+> v2 的集群语义 = **多网关 authority 共享同一中心 SQLite**(custody + claim 表)+ `/internal/pump` 中继。
 > 旧 `QLONG_CLUSTER_SECRET/QLONG_CLUSTER_PEERS` 属 legacy 分片模型,持久模式下**拒绝配置**。
+>
+> **当前边界(诚实声明)**:双 authority 共享库已在网关/存储层完整验证
+> (`gateway/test/custody-relay.spec.ts` 等以共享 SqliteStore 的双实例端到端覆盖);
+> 但 CLI 级"两个 `qlong server` 进程开同一数据目录"会被中心**所有权独占锁**拒绝
+> (`OWNERSHIP_BUSY`,单写者是设计而非缺陷)。解锁依赖 gateway-only 进程形态(中心持库、
+> 网关进程经授权通道读写 custody/claim)——列入下一阶段。**实物演练本轮以单中心单网关为准**,
+> 以下步骤保留为该形态落地后的验收清单。
 
 | 步骤 | 动作 | 预期 |
 |------|------|------|
-| 4.1 | 同一中心库,起两个网关进程(gw1、gw2,`--registry-port` 不同;`QLONG_RELAY_SECRET=<共享密钥>`、gw1 另设 `QLONG_RELAY_PEERS=http://127.0.0.1:<gw2端口>`,反之亦然) | 双 authority 共享 custody/claim 表 |
+| 4.1 | gateway-only 形态:中心持库,起 gw1、gw2 两个网关进程(`QLONG_RELAY_SECRET=<共享密钥>`、gw1 另设 `QLONG_RELAY_PEERS=http://127.0.0.1:<gw2端口>`,反之亦然) | 双 authority 共享 custody/claim 表 |
 | 4.2 | a_node 连 gw1,b_node 连 gw2 | 控制台两节点均 online |
 | 4.3 | a_node 给 b_node 发 project 单(b 离线先不入网) | ack=stored;pending 静置共享库 |
 | 4.4 | b_node 连上 gw2 | 认证即补投(pump);再发一条 → gw1 查 claim 发现现主是 gw2 → `/internal/pump` 通知 → 即时推送 |

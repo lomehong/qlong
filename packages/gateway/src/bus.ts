@@ -10,7 +10,7 @@
  *
  * 传输可替换:本实现为 HTTP 中继;Redis pub/sub 等传输按同接口替换即可。
  */
-import type { EnvelopeV1 } from '@qlong/core';
+import { QLONG_USER_AGENT, type EnvelopeV1 } from '@qlong/core';
 
 export interface ClusterPeer {
   name: string;
@@ -42,7 +42,7 @@ export class HttpClusterBus {
     this.secret = opts.secret;
     this.timeoutMs = opts.timeoutMs ?? 2_000;
     this.fetchImpl = opts.fetchImpl ?? (async (url, init) => {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, headers: { ...init.headers, 'User-Agent': QLONG_USER_AGENT } });
       return { ok: res.ok, status: res.status, text: () => res.text() };
     });
   }

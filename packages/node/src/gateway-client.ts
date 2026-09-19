@@ -6,7 +6,7 @@ import WebSocket from 'ws';
 import {
   CUSTODY_FEATURES, DEFAULT_PARAMS, MAX_TRANSPORT_BYTES, TRANSPORT_VERSION,
   envelopeDigest, hasCustodyFeatures, isGatewayAck, isRoutingDenied, isStoredFrame,
-  newId, validateEnvelope, type DeliveryFrame, type EnvelopeV1, type QlongParams,
+  newId, QLONG_USER_AGENT, validateEnvelope, type DeliveryFrame, type EnvelopeV1, type QlongParams,
 } from '@qlong/core';
 import { MemoryOutbox, type OutboxStore } from './outbox.js';
 import { FileOutbox } from './outbox/file-outbox.js';
@@ -129,7 +129,7 @@ export class GatewayClient {
   private doOpen(): Promise<void> {
     this.state = 'connecting';
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.opts.url, { maxPayload: MAX_FRAME_BYTES });
+      const ws = new WebSocket(this.opts.url, { maxPayload: MAX_FRAME_BYTES, headers: { 'User-Agent': QLONG_USER_AGENT } });
       this.ws = ws;
       let settled = false;
       const finish = (ok: boolean): void => {

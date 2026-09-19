@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../../node/src/identity.js';
+import { QLONG_USER_AGENT } from '@qlong/core';
 
 export interface QlongConfig {
   registry_url: string;
@@ -31,7 +32,7 @@ export async function joinAndSave(
   const identity = loadOrCreateIdentity(home);
   const res = await fetch(opts.registryUrl.replace(/\/$/, '') + '/v1/enroll', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Connection: 'close' },
+    headers: { 'Content-Type': 'application/json', Connection: 'close', 'User-Agent': QLONG_USER_AGENT },
     body: JSON.stringify({
       ...(opts.token ? { token: opts.token } : {}),
       pubkey: identity.pubkeyB64,

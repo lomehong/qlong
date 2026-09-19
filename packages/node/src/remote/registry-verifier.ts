@@ -1,5 +1,6 @@
 /** Trusted registry boundary: no redirects, bounded requests, no response bodies in errors. */
 import { isUuid, validateEnvelope, verifyEnvelopeSig, type EnvelopeV1 } from '@qlong/core';
+import { QLONG_USER_AGENT } from '@qlong/core';
 
 export const REGISTRY_TIMEOUT_MS = 5_000;
 
@@ -37,7 +38,7 @@ export async function fetchRegistryJson(opts: RegistryConnection, path: string):
       throw new Error('invalid registry URL');
     }
     res = await fetch(url, {
-      headers: { Authorization: `Bearer ${opts.nodeToken}` },
+      headers: { Authorization: `Bearer ${opts.nodeToken}`, 'User-Agent': QLONG_USER_AGENT },
       signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
       redirect: 'error',
     });

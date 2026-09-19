@@ -54,3 +54,12 @@ export function isReceiptFrame(value: unknown): value is ReceiptFrame {
     typeof (value as ReceiptFrame).ticket === 'string' && (value as ReceiptFrame).ticket.length <= 128 &&
     (value as ReceiptFrame).ticket.length > 0;
 }
+
+
+/**
+ * 出站 User-Agent(ModelScope 创空间边缘 WAF 兼容,2026-09-19 实测):
+ * 该平台按 UA 拦截非浏览器流量(程序 UA 的 API/WS 升级会被 403/410),浏览器形 UA 放行。
+ * 所有 qlong 出站连接(fetch/ws)统一携带;标识段仍可服务端识别 qlong 节点。
+ */
+export const QLONG_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 qlong/v2';

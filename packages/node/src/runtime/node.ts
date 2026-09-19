@@ -13,7 +13,7 @@
  */
 import { dirname } from 'node:path';
 import {
-  DEFAULT_PARAMS, isUuid, newId, newTraceContext, publicKeyFromPrivate, signEnvelope, toBase64, validateEnvelope,
+  DEFAULT_PARAMS, isUuid, newId, newTraceContext, publicKeyFromPrivate, QLONG_USER_AGENT, signEnvelope, toBase64, validateEnvelope,
   type EnvelopeV1, type QlongParams,
 } from '@qlong/core';
 import { SqliteStore } from '../../../storage/src/index.js';
@@ -321,7 +321,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
         opts.registryUrl.replace(/\/+$/, '') + `/v1/teams/${encodeURIComponent(report.team_id)}/tasks`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken, 'User-Agent': QLONG_USER_AGENT },
           body: JSON.stringify(report),
           signal: AbortSignal.timeout(5_000),
           redirect: 'error',
@@ -398,7 +398,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     try {
       await fetch(`${base}/v1/nodes/me/commands/${encodeURIComponent(id)}/ack`, {
         method: 'POST',
-        headers: { Authorization: 'Bearer ' + opts.nodeToken },
+        headers: { Authorization: 'Bearer ' + opts.nodeToken, 'User-Agent': QLONG_USER_AGENT },
         signal: AbortSignal.timeout(5_000),
         redirect: 'error',
       });
@@ -424,7 +424,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
       try {
         const res = await fetch(`${base}/v1/nodes/me/commands`, {
           method: 'GET',
-          headers: { Authorization: 'Bearer ' + opts.nodeToken },
+          headers: { Authorization: 'Bearer ' + opts.nodeToken, 'User-Agent': QLONG_USER_AGENT },
           signal: AbortSignal.timeout(5_000),
           redirect: 'error',
         });
@@ -471,7 +471,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   const putRegistry = (path: string, body: unknown): void => {
     fetch(opts.registryUrl.replace(/\/+$/, '') + path, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + opts.nodeToken, 'User-Agent': QLONG_USER_AGENT },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(5_000),
       redirect: 'error',
