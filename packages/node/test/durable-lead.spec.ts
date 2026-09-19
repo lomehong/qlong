@@ -479,6 +479,35 @@ describe('E2c 契约线入(LeadRecord.contract 持久化,ARTIFACT-ACCEPTANCE §4
     expect(reopened.snapshot(taskId)?.contract).toEqual(contract); // 未抛错 = validTask 容错;值幸存 = 持久
   });
 
+  it.each([null, 'bad', { deliverables: 'report' }, { deliverables: [null] }, { deliverables: [{}] }])('P0 非法首派契约拒绝且不闭锁节点：%j', (contract) => {
+    const onFault = vi.fn();
+    const f = setup({ onFault });
+    const taskId = newId();
+    f.lead.originate(taskId, 'project');
+    const before = f.runtime.state(leadStateKey(taskId));
+    expect(f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract })).toBe(false);
+    expect(f.runtime.state(leadStateKey(taskId))).toEqual(before);
+    expect(f.outputs('task.offer')).toHaveLength(0);
+    expect(onFault).not.toHaveBeenCalled();
+    expect(f.lead.dispatch(taskId, EXEC, offerBody('project'))).toBe(true);
+  });
+
+  it('P0 非法改派契约不落盘，选择器纠正后下一次 tick 可推进', () => {
+    let bad = true;
+    const f = setup({ selectTarget: () => ({ target: EXEC2, offerBody: {
+      ...offerBody('project'), contract: bad ? { deliverables: 'bad' } : { deliverables: [] },
+    } }) });
+    const taskId = newId();
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, offerBody('project'));
+    f.deliver(receipt('task.reject', taskId, 1, { reason_code: 'busy' }));
+    expect(f.lead.snapshot(taskId)?.state).toBe('drafting');
+    expect(f.outputs('task.offer')).toHaveLength(1);
+    bad = false;
+    f.lead.tick();
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2 });
+  });
+
   it('无 contract 的派发(旧状态/aid)→ snapshot.contract undefined,不判损坏', () => {
     const f = setup();
     const taskId = newId();
@@ -621,6 +650,184 @@ describe('E2c 牵头验收器(stageArtifactVerification 异步预置 + machine(t
     expect(f.runtime.receive(result)).toBe('new');
     restarted.consume(result, true);
     expect(restarted.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+  });
+
+  // 直接观察内存留存量，仅验证资源生命周期，不为测试增加生产接口。
+  const cacheSize = (lead: DurableLead): number =>
+    (lead as unknown as { verdicts: Map<string, unknown> }).verdicts.size;
+
+  function runningProject(overrides: Partial<DurableLeadOptions> = {}) {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const ports = happyPorts(files);
+    const f = setup({ ...ports, ...overrides });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    return { ...f, ...ports, taskId, files, signed, result };
+  }
+
+  it.each(['签名', '纪元', '仓库'])('P0 缓存隔离：成功预置后更换%s 不得复用成功', async (field) => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    const changed = structuredClone(f.result);
+    changed.msg_id = newId();
+    if (field === '签名') changed.body = deliveryBody(f.taskId, { ...f.signed, sig: 'bad' });
+    if (field === '纪元') changed.from.key_epoch = 2;
+    if (field === '仓库') (changed.body.artifacts as Array<{ repo: string }>)[0]!.repo = 'https://other.example/repo';
+    // 错误签名/纪元再次预置也不得命中；新仓库尚未复核，不得直接消费旧判定。
+    if (field !== '仓库') await f.lead.stageArtifactVerification(changed);
+    f.deliver(changed);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
+  });
+
+  it.each(['task', 'attempt'])('P0 冷缓存绑定：其他%s 的签名交付不得完成当前任务', async (field) => {
+    const f = runningProject();
+    const manifest = { ...f.signed.manifest, ...(field === 'task' ? { task_id: newId() } : { attempt: 2 }) };
+    const result = receipt('task.result', f.taskId, 1, deliveryBody(f.taskId, signManifest(manifest, execKey.priv)));
+    await f.lead.stageArtifactVerification(result);
+    f.deliver(result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
+  });
+
+  it('P0 跨任务缓存：同一签名不满足另一任务的契约', async () => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    const taskId = newId();
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: { deliverables: [{ path: 'missing' }] } });
+    f.deliver(receipt('task.accept', taskId, 1));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, f.signed));
+    await f.lead.stageArtifactVerification(result);
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)?.state).toBe('reclaiming');
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('done');
+  });
+
+  it('P0 契约缓存：持久契约变更后不能使用原成功判定', async () => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    const row = f.runtime.state(leadStateKey(f.taskId))!;
+    f.runtime.transition(row.key, row.revision, () => ({ state: {
+      ...(row.value as Record<string, RuntimeJson>), contract: { deliverables: [{ path: 'missing' }] },
+    } }));
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
+  });
+
+  it('P0 缓存生命周期：同信封幂等预置，消费终态后释放', async () => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    await f.lead.stageArtifactVerification(structuredClone(f.result));
+    expect(f.collectArtifacts).toHaveBeenCalledTimes(1);
+    expect(cacheSize(f.lead)).toBe(1);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('done');
+    expect(cacheSize(f.lead)).toBe(0);
+    await f.lead.stageArtifactVerification(f.result);
+    expect(cacheSize(f.lead)).toBe(0);
+  });
+
+  it.each(['cancel', 'redispatch', 'tick', 'takeover'])('P0 缓存生命周期：%s 提交后释放旧判定', async (action) => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    if (action === 'cancel') f.lead.cancel(f.taskId);
+    if (action === 'redispatch') f.lead.redispatch(f.taskId);
+    if (action === 'tick') f.lead.tick(now + lostAfterMs(LEASE, DEFAULT_PARAMS));
+    if (action === 'takeover') {
+      const bundle = f.lead.exportTasks();
+      bundle.tasks[0]!.task.attempt += 1;
+      f.lead.importTasks(bundle);
+    }
+    expect(cacheSize(f.lead)).toBe(0);
+  });
+
+  it.each(['cancel', 'takeover', 'terminal'])('P0 异步竞态：收取期间%s 不允许旧快照重新写缓存', async (action) => {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const f = runningProject({ collectArtifacts: async () => { await wait; return { ok: true, files: [{ path: 'dist/report.md', bytes: reportBytes }] }; } });
+    const pending = f.lead.stageArtifactVerification(f.result);
+    if (action === 'cancel') f.lead.cancel(f.taskId);
+    if (action === 'takeover') {
+      const bundle = f.lead.exportTasks();
+      bundle.tasks[0]!.task.attempt += 1;
+      f.lead.importTasks(bundle);
+    }
+    if (action === 'terminal') f.deliver(receipt('task.fail', f.taskId, 1, { retryable: false }));
+    release();
+    await pending;
+    expect(cacheSize(f.lead)).toBe(0);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).not.toBe('done');
+  });
+
+  it('P0 异步契约变化：外部持久修订后旧 I/O 不能提交成功判定', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const f = runningProject({ resolvePubkey: async () => { await wait; return execKey.publicKey; } });
+    const pending = f.lead.stageArtifactVerification(f.result);
+    const row = f.runtime.state(leadStateKey(f.taskId))!;
+    f.runtime.transition(row.key, row.revision, () => ({ state: {
+      ...(row.value as Record<string, RuntimeJson>), contract: { deliverables: [{ path: 'missing' }] },
+    } }));
+    release();
+    await pending;
+    expect(cacheSize(f.lead)).toBe(0);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
+  });
+
+  it.each(['cancel', 'redispatch'])('P0 %s 后可以重新预置，保留既有 result 赢得竞态的语义', async (action) => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    if (action === 'cancel') f.lead.cancel(f.taskId);
+    else f.lead.redispatch(f.taskId);
+    await f.lead.stageArtifactVerification(f.result);
+    expect(f.collectArtifacts).toHaveBeenCalledTimes(2);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('done');
+  });
+
+  it.each(['collect', 'pubkey'])('P0 %s 暂不可用在消费前重试可成功，预置不消费消息', async (port) => {
+    let available = false;
+    const f = runningProject({
+      collectArtifacts: async () => ({ ok: port !== 'collect' || available, files: [{ path: 'dist/report.md', bytes: reportBytes }] }),
+      resolvePubkey: async () => port !== 'pubkey' || available ? execKey.publicKey : undefined,
+    });
+    await f.lead.stageArtifactVerification(f.result);
+    expect(cacheSize(f.lead)).toBe(0);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('running');
+    available = true;
+    await f.lead.stageArtifactVerification(f.result);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('done');
+  });
+
+  it('P0 心跳不改变验收上下文，已有判定仍可用于原信封', async () => {
+    const f = runningProject();
+    await f.lead.stageArtifactVerification(f.result);
+    now += 100;
+    f.deliver(receipt('task.progress', f.taskId, 1, { seq: 1 }));
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('done');
+  });
+
+  it('P0 I/O 失败仅能在消费前重试；消费后同轮结果由 R1 拦截', async () => {
+    let available = false;
+    const f = runningProject({ collectArtifacts: async () => ({ ok: available, files: [{ path: 'dist/report.md', bytes: reportBytes }] }) });
+    await f.lead.stageArtifactVerification(f.result);
+    expect(cacheSize(f.lead)).toBe(0);
+    f.deliver(f.result);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
+    available = true;
+    await f.lead.stageArtifactVerification(f.result);
+    f.deliver(f.result);
+    const duplicate = { ...f.result, msg_id: newId() };
+    await f.lead.stageArtifactVerification(duplicate);
+    f.deliver(duplicate);
+    expect(f.lead.snapshot(f.taskId)?.state).toBe('reclaiming');
   });
 
   it('T10 project 预置:收取字节被篡改(等长,重新哈希不符)→ 判定 false → acceptance_failed', async () => {

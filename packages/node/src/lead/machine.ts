@@ -134,6 +134,7 @@ export class LeadTaskMachine {
   dispatchTo(target: string, offerBody: Record<string, unknown>, now: number): LeadAction[] {
     if (this.terminal) return [];
     if (this.rec.state !== 'drafting') return []; // 初始派发仅限 drafting;改派走 redispatchTo
+    if (!isLeadContract(offerBody.contract)) return [];
     this.rec.attempt = 1;
     this.rec.target = target;
     this.rec.acceptedThisAttempt = false;
@@ -154,6 +155,7 @@ export class LeadTaskMachine {
   /** 对 requestDispatch 的应答:attempt+1 重新派发(R4 撤销已完成) */
   redispatchTo(target: string, offerBody: Record<string, unknown>, now: number): LeadAction[] {
     if (this.terminal || this.rec.state !== 'drafting') return [];
+    if (!isLeadContract(offerBody.contract)) return [];
     this.rec.attempt += 1;
     this.rec.target = target;
     this.rec.acceptedThisAttempt = false;
@@ -480,8 +482,26 @@ function normalizeFailCodeOrReject(raw: unknown): { code: string } {
   return { code: normalizeFailCode(typeof raw === 'string' ? raw : 'other').code };
 }
 
-/** E2:从 offerBody.contract 提取可持久化契约(仅普通对象;非法 → undefined,绝不污染 rec)。 */
-function asContract(value: unknown): LeadRecord['contract'] | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  return value as LeadRecord['contract'];
+/** 契约结构统一准入：写入、恢复与验收共用；无契约及零交付保持兼容。 */
+export function isLeadContract(value: unknown): value is LeadRecord['contract'] {
+  if (value === undefined) return true;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const contract = value as Record<string, unknown>;
+  if (contract.acceptance !== undefined && !Array.isArray(contract.acceptance)) return false;
+  if (contract.deliverables === undefined) return true;
+  if (!Array.isArray(contract.deliverables)) return false;
+  const named = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+  return contract.deliverables.every((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+    const d = entry as Record<string, unknown>;
+    return (named(d.path) || named(d.artifact)) &&
+      (d.path === undefined || named(d.path)) &&
+      (d.artifact === undefined || named(d.artifact)) &&
+      (d.desc === undefined || typeof d.desc === 'string');
+  });
+}
+
+/** 调用前已准入，复制契约以免 offer 对象的后续修改污染状态。 */
+function asContract(value: unknown): LeadRecord['contract'] {
+  return isLeadContract(value) ? structuredClone(value) : undefined;
 }

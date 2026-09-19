@@ -133,7 +133,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const s = setup();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: s.files, contract: s.contract,
+      taskId: TASK, attempt: 1, collected: s.files, contract: s.contract,
     })).toBe(true);
   });
 
@@ -141,7 +141,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const s = setup();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: OTHER_NODE, fromKeyEpoch: 3,
-      collected: s.files, contract: s.contract,
+      taskId: TASK, attempt: 1, collected: s.files, contract: s.contract,
     })).toBe(false);
   });
 
@@ -149,7 +149,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const s = setup();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 4,
-      collected: s.files, contract: s.contract,
+      taskId: TASK, attempt: 1, collected: s.files, contract: s.contract,
     })).toBe(false);
   });
 
@@ -158,7 +158,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const stranger = newKeyPair();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: stranger.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: s.files, contract: s.contract,
+      taskId: TASK, attempt: 1, collected: s.files, contract: s.contract,
     })).toBe(false);
   });
 
@@ -168,7 +168,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const tampered = s.files.map((f) => (f.path === 'dist/report.md' ? { path: f.path, bytes: Buffer.from('# REPORT BODY') } : f));
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: tampered, contract: s.contract,
+      taskId: TASK, attempt: 1, collected: tampered, contract: s.contract,
     })).toBe(false);
   });
 
@@ -177,7 +177,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const partial = s.files.filter((f) => f.path !== 'build.log');
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: partial, contract: { deliverables: [{ path: 'dist/report.md' }] },
+      taskId: TASK, attempt: 1, collected: partial, contract: { deliverables: [{ path: 'dist/report.md' }] },
     })).toBe(false);
   });
 
@@ -185,7 +185,7 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const s = setup();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: s.files, contract: { deliverables: [{ path: 'dist/report.md' }, { path: 'extra.md' }] },
+      taskId: TASK, attempt: 1, collected: s.files, contract: { deliverables: [{ path: 'dist/report.md' }, { path: 'extra.md' }] },
     })).toBe(false);
   });
 
@@ -197,15 +197,69 @@ describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重�
     const signed = signManifest(bad, priv); // 重签使签名自洽,唯 size 与真实字节不符
     expect(verifyArtifactDelivery({
       signed, pub: publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: files, contract: { deliverables: [{ path: 'a.txt' }] },
+      taskId: TASK, attempt: 1, collected: files, contract: { deliverables: [{ path: 'a.txt' }] },
     })).toBe(false);
+  });
+
+  it.each([
+    ['其他任务', { task_id: OTHER_NODE }],
+    ['旧轮次', { attempt: 2 }],
+    ['缺任务', { task_id: undefined }],
+    ['缺轮次', { attempt: undefined }],
+  ])('P0 清单绑定：%s 的自洽签名仍拒绝', (_name, patch) => {
+    const s = setup();
+    const manifest = { ...s.manifest, ...patch } as ArtifactManifest;
+    expect(verifyArtifactDelivery({
+      signed: signManifest(manifest, s.priv), pub: s.publicKey,
+      fromNodeId: NODE, fromKeyEpoch: 3, taskId: TASK, attempt: 1, collected: s.files,
+    })).toBe(false);
+  });
+
+  it.each([
+    ['空条目', [null]],
+    ['无路径', [{ sha256: sha256(reportBytes), size: reportBytes.length }]],
+    ['重复路径', [
+      { path: 'dist/report.md', sha256: sha256(reportBytes), size: reportBytes.length },
+      { path: 'dist/report.md', sha256: sha256(reportBytes), size: reportBytes.length },
+    ]],
+  ])('P0 畸形清单：%s 返回 false 而非抛错', (_name, deliverables) => {
+    const s = setup();
+    const manifest = { ...s.manifest, deliverables } as ArtifactManifest;
+    expect(verifyArtifactDelivery({
+      signed: signManifest(manifest, s.priv), pub: s.publicKey,
+      fromNodeId: NODE, fromKeyEpoch: 3, taskId: TASK, attempt: 1, collected: s.files,
+    })).toBe(false);
+  });
+
+  it.each([
+    { deliverables: [{ artifact: 'report' }] },
+    { deliverables: [null] },
+    { deliverables: [{}] },
+    { deliverables: 'report' },
+  ])('P0 契约不能被当成空要求跳过：%j', (contract) => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: signManifest(buildManifest(TASK, 1, NODE, 3, []), s.priv), pub: s.publicKey,
+      fromNodeId: NODE, fromKeyEpoch: 3, taskId: TASK, attempt: 1, collected: [],
+      contract: contract as unknown as Parameters<typeof verifyArtifactDelivery>[0]['contract'],
+    })).toBe(false);
+  });
+
+  it.each([undefined, {}, { deliverables: [] }])('P0 零交付契约兼容：%j 仍需有效签名', (contract) => {
+    const s = setup();
+    const input = {
+      signed: signManifest(buildManifest(TASK, 1, NODE, 3, []), s.priv), pub: s.publicKey,
+      fromNodeId: NODE, fromKeyEpoch: 3, taskId: TASK, attempt: 1, collected: [], contract,
+    };
+    expect(verifyArtifactDelivery(input)).toBe(true);
+    expect(verifyArtifactDelivery({ ...input, signed: { ...input.signed, sig: 'bad' } })).toBe(false);
   });
 
   it('无契约(contract 缺席)→ 仅验签+重新哈希,完整即 true', () => {
     const s = setup();
     expect(verifyArtifactDelivery({
       signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
-      collected: s.files,
+      taskId: TASK, attempt: 1, collected: s.files,
     })).toBe(true);
   });
 });

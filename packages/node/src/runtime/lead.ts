@@ -12,12 +12,12 @@
  *   · 上报意图交由 DurableTaskReporter(B1a)持久重试,createDurableNode 泵周期驱动(B1d)。
  * 故障一律 fail-closed 并回调,绝不删除现场或伪造推进。
  */
-import { DEFAULT_PARAMS, envelopeDigest, isUuid, newId, type EnvelopeV1, type QlongParams } from '@qlong/core';
-import { LeadTaskMachine, type LeadAction, type LeadRecord, type LeadState, type TimerName } from '../lead/machine.js';
+import { DEFAULT_PARAMS, envelopeDigest, isUuid, jcs, newId, sha256Hex, type EnvelopeV1, type QlongParams } from '@qlong/core';
+import { isLeadContract, LeadTaskMachine, type LeadAction, type LeadRecord, type LeadState, type TimerName } from '../lead/machine.js';
 import type { Outbound } from '../wire.js';
 import { taskReportEffect } from './report.js';
 import type { EffectIntent, NodeRuntimeStore, RuntimeJson, RuntimeState, RuntimeTransition } from './store.js';
-import { manifestDigest, verifyArtifactDelivery, type SignedManifest } from '../collab/artifact-manifest.js';
+import { validSignedManifest, verifyArtifactDelivery, type SignedManifest } from '../collab/artifact-manifest.js';
 
 const LEAD_STATE_PREFIX = 'lead:v2:';
 const LEAD_STATES: readonly string[] = [
@@ -120,12 +120,8 @@ function validTask(value: unknown): value is DurableLeadTask {
       !optionalDeadline(value.drainUntil) || !optionalDeadline(value.cancelWaitUntil)) return false;
   if (value.drainClosed !== undefined && typeof value.drainClosed !== 'boolean') return false;
   if (value.completedBeforeCancel !== undefined && typeof value.completedBeforeCancel !== 'boolean') return false;
-  // E2:contract 为可选新字段(§4.4)——旧状态无 contract 视为 undefined 不判损坏;存在则须为对象且 deliverables(若在)为数组。
-  if (value.contract !== undefined) {
-    if (!record(value.contract)) return false;
-    const deliverables = (value.contract as { deliverables?: unknown }).deliverables;
-    if (deliverables !== undefined && !Array.isArray(deliverables)) return false;
-  }
+  // 与派发写入共用准入；旧状态无 contract 保持兼容。
+  if (!isLeadContract(value.contract)) return false;
   for (const scope of Object.values(value.excluded)) if (scope !== 'permanent' && scope !== 'once') return false;
   if (value.attempt === 0) {
     return value.state === 'drafting' && value.target === null && value.task_seq === 0;
@@ -136,8 +132,8 @@ function validTask(value: unknown): value is DurableLeadTask {
 export class DurableLead {
   private readonly params: QlongParams;
   private faulted = false;
-  /** E2:同步判定缓存(键=内联清单 JCS 摘要);drain 异步预置写入,机器回调同步读取(§4.3)。内存态,重启清空 → 重投由 drain 重新预置(幂等,§7)。 */
-  private readonly verdicts = new Map<string, boolean>();
+  /** 每任务至多一份判定/在途令牌：完整信封摘要 + 持久验收上下文；消费或上下文失效即回收。 */
+  private readonly verdicts = new Map<string, { context: string; delivery: string; verdict?: boolean }>();
 
   constructor(private readonly opts: DurableLeadOptions) {
     if (opts.store.nodeId !== opts.nodeId || !opts.teamId) throw new TypeError('Invalid lead identity');
@@ -154,6 +150,7 @@ export class DurableLead {
   private failClosed(): void {
     const first = !this.faulted;
     this.faulted = true;
+    this.verdicts.clear();
     if (first) this.notifyFault();
   }
 
@@ -173,11 +170,11 @@ export class DurableLead {
   }
 
   /** 从持久状态复原一台纯机器(深拷贝,避免别名污染已持久快照)。 */
-  private machine(task: DurableLeadTask): LeadTaskMachine {
+  private machine(task: DurableLeadTask, envelope?: EnvelopeV1): LeadTaskMachine {
     const machine = new LeadTaskMachine({
       task_id: task.task_id, kind: task.kind, params: this.params,
       // E2:显式注入优先(测试/替代信任根);缺省用 per-task 验收器(闭包捕获 task,§4.3/§5)。
-      validateAcceptance: this.opts.validateAcceptance ?? this.projectValidator(task),
+      validateAcceptance: this.opts.validateAcceptance ?? this.projectValidator(task, envelope),
     });
     machine.rec = structuredClone(task) as LeadRecord;
     machine.terminal = TERMINAL_STATES.includes(task.state);
@@ -187,10 +184,10 @@ export class DurableLead {
   /**
    * per-task 验收器(闭包捕获 task,机器签名不变;ARTIFACT-ACCEPTANCE §4.3):
    *  - aid:复制机器 v1 兼容(acceptance_results 缺省 → true;含 pass:false → false),绝不查判定缓存(不回归);
-   *  - project:从 body 内联清单复算 JCS 摘要,仅当 drain 已预置判定 true 才放行;无判定/无清单 → fail-closed false。
+   *  - project:仅完整信封与当前任务上下文均匹配的 true 判定放行；无预置/上下文过期 → false。
    * 纯同步读缓存,重 I/O 全在 stageArtifactVerification 预置完成(§1.3)。
    */
-  private projectValidator(task: DurableLeadTask): (body: Record<string, unknown>) => boolean {
+  private projectValidator(task: DurableLeadTask, envelope?: EnvelopeV1): (body: Record<string, unknown>) => boolean {
     if (task.kind !== 'project') {
       return (body) => {
         const arr = body.acceptance_results;
@@ -198,10 +195,20 @@ export class DurableLead {
         return arr.every((x) => (x as { pass?: boolean } | null)?.pass !== false);
       };
     }
-    return (body) => {
-      const digest = manifestDigestOf(body);
-      return digest !== undefined && this.verdicts.get(digest) === true;
+    return () => {
+      if (!envelope) return false;
+      const cached = this.verdicts.get(task.task_id);
+      return cached?.context === acceptanceContext(task) &&
+        cached.delivery === envelopeDigest(envelope) && cached.verdict === true;
     };
+  }
+
+  /** 只在提交后清理；保留不改变验收上下文的 progress 判定。 */
+  private pruneVerdict(task: DurableLeadTask): void {
+    const cached = this.verdicts.get(task.task_id);
+    if (cached && (!acceptsArtifactResult(task) || cached.context !== acceptanceContext(task))) {
+      this.verdicts.delete(task.task_id);
+    }
   }
 
   /** 追加一条上报意图;task_seq 由调用方在状态净变化时自增后传入。 */
@@ -234,10 +241,10 @@ export class DurableLead {
    * 是否有任何副作用(acted,决定是否值得提交一次修订)。
    */
   private runEvent(
-    task: DurableLeadTask, runner: (machine: LeadTaskMachine) => LeadAction[], now: number,
+    task: DurableLeadTask, runner: (machine: LeadTaskMachine) => LeadAction[], now: number, envelope?: EnvelopeV1,
   ): { value: DurableLeadTask; outbox: EnvelopeV1[]; effects: EffectIntent[]; changed: boolean; acted: boolean } {
     const before = task.state;
-    const machine = this.machine(task);
+    const machine = this.machine(task, envelope);
     const actions = this.driveRedispatch(machine, runner(machine), now);
     const outbox: EnvelopeV1[] = [];
     for (const action of actions) if (action.kind === 'send') outbox.push(this.opts.seal(action.msg));
@@ -329,6 +336,7 @@ export class DurableLead {
     this.opts.store.transition(stateKey, row.revision, () => ({
       state: result.value as unknown as RuntimeJson, outbox: result.outbox, effects: result.effects,
     }));
+    this.pruneVerdict(result.value);
     return result.changed;
   }
 
@@ -354,6 +362,7 @@ export class DurableLead {
         this.opts.store.transition(row.key, row.revision, () => ({
           state: result.value as unknown as RuntimeJson, outbox: result.outbox, effects: result.effects,
         }));
+        this.pruneVerdict(result.value);
       }
     });
   }
@@ -404,6 +413,7 @@ export class DurableLead {
         if (TERMINAL_STATES.includes(task.state)) {
           // 终态归档,接管不重跑;origin 侧上报早已投递,导入不重复产修订。
           this.opts.store.transition(stateKey, row?.revision ?? 0, () => ({ state: task as unknown as RuntimeJson }));
+          this.verdicts.delete(task.task_id);
           result.archived.push(task.task_id);
           continue;
         }
@@ -413,6 +423,7 @@ export class DurableLead {
           ? task
           : { ...task, attempt: task.attempt + 1, state: 'drafting' };
         this.opts.store.transition(stateKey, row?.revision ?? 0, () => ({ state: fenced as unknown as RuntimeJson }));
+        this.verdicts.delete(task.task_id);
         result.imported.push(task.task_id);
       }
       return result;
@@ -424,33 +435,51 @@ export class DurableLead {
    * 执行方登记公钥 → 纯判定(verifyArtifactDelivery:验签+钥标识+重新哈希+契约完整性)→ 存同步判定缓存,供
    * 机器回调同步读取。best-effort:端口缺席 / 内联清单缺失 / I/O 失败 / 任何异常 → 不写判定 → 机器 fail-closed
    * (绝不误判 done,也绝不把预置失败放大为节点 fault)。仅 project+task.result 触发;aid / 其他信封 → no-op。
-   * 幂等:同一内联清单摘要已预置则跳过 I/O(重投不重复收取,§7)。由 createDurableNode 的 drain 在 consume 前 await(e2d)。
+   * 幂等仅限同信封、同上下文的已完成判定。I/O 不可用可在消费前再预置；一旦 consume，R1 决议不会自动重试。
+   * 由 createDurableNode 的 drain 在 consume 前 await(e2d)。
    */
   async stageArtifactVerification(envelope: EnvelopeV1): Promise<void> {
     try {
-      if (envelope.type !== 'task.result' || envelope.to.node_id !== this.opts.nodeId) return;
-      if (!isUuid(envelope.task_id)) return;
+      if (this.faulted || envelope.type !== 'task.result' || envelope.to.node_id !== this.opts.nodeId) return;
+      if (!isUuid(envelope.task_id) || envelope.from.team_id !== this.opts.teamId || !envelope.sig ||
+          !envelope.exp || Date.parse(envelope.exp) <= Date.now()) return;
+      // 不让调用方在 await 期间修改签名或任务上下文。
+      envelope = structuredClone(envelope);
       const collect = this.opts.collectArtifacts;
       const resolve = this.opts.resolvePubkey;
       if (!collect || !resolve) return; // 端口缺席 → 无法预置 → 机器 fail-closed
       const signed = inlineSignedManifest(envelope.body);
       if (!signed) return; // 无合法内联清单 → 机器 fail-closed
-      const digest = manifestDigest(signed.manifest);
-      if (this.verdicts.has(digest)) return; // 幂等:已预置(重投)不重复 I/O
+      const taskId = envelope.task_id!;
       let task: DurableLeadTask | undefined;
-      try { task = this.decode(this.opts.store.state(leadStateKey(envelope.task_id))); } catch { return; }
-      if (!task || task.kind !== 'project') return; // aid / 未牵头 → 跳过
+      try { task = this.decode(this.opts.store.state(leadStateKey(taskId))); } catch { return; }
+      if (!task || !acceptsArtifactResult(task) || envelope.attempt !== task.attempt || envelope.from.node_id !== task.target) return;
       const repo = inlineRepo(envelope.body);
       if (repo === undefined) return;
-      const collected = await collect(repo, envelope.task_id);
-      if (!collected.ok || !collected.files) return; // 收取失败(可能瞬态)→ 不缓存,重投再试
-      const pub = await resolve(envelope.from.node_id, envelope.from.key_epoch);
-      if (!pub) return; // 公钥不可解析 → 不缓存,重投再试
-      const verdict = verifyArtifactDelivery({
-        signed, pub, fromNodeId: envelope.from.node_id, fromKeyEpoch: envelope.from.key_epoch,
-        collected: collected.files, contract: task.contract,
-      });
-      this.verdicts.set(digest, verdict); // 确定性判定(通过/否决)入缓存,供机器同步读
+      const context = acceptanceContext(task);
+      const delivery = envelopeDigest(envelope);
+      const cached = this.verdicts.get(taskId);
+      if (cached?.context === context && cached.delivery === delivery && cached.verdict !== undefined) return;
+      const pending: { context: string; delivery: string; verdict?: boolean } = { context, delivery };
+      this.verdicts.set(taskId, pending);
+      try {
+        const collected = await collect(repo, taskId);
+        if (!collected.ok || !collected.files) return; // 未判定，不等于收件可重试
+        const pub = await resolve(envelope.from.node_id, envelope.from.key_epoch);
+        if (!pub) return;
+        const verdict = verifyArtifactDelivery({
+          signed, pub, taskId, attempt: task.attempt,
+          fromNodeId: envelope.from.node_id, fromKeyEpoch: envelope.from.key_epoch,
+          collected: collected.files, contract: task.contract,
+        });
+        const current = this.decode(this.opts.store.state(leadStateKey(taskId)));
+        // 消费/取消/改派/接管会撤销令牌；旧异步操作绝不能重新植入判定。
+        if (this.verdicts.get(taskId) !== pending || !current ||
+            !acceptsArtifactResult(current) || acceptanceContext(current) !== context) return;
+        pending.verdict = verdict;
+      } finally {
+        if (pending.verdict === undefined && this.verdicts.get(taskId) === pending) this.verdicts.delete(taskId);
+      }
     } catch { /* best-effort:任何异常 → 无判定 → 机器 fail-closed,绝不放大为节点 fault */ }
   }
 
@@ -477,7 +506,7 @@ export class DurableLead {
         const result = this.runEvent(
           task,
           (machine) => machine.onMessage(envelope.type, envelope.from.node_id, envelope.attempt ?? 0, envelope.body, now, envelope.msg_id),
-          now,
+          now, envelope,
         );
         value = result.value;
         outbox.push(...result.outbox);
@@ -491,6 +520,8 @@ export class DurableLead {
         if (envelopeDigest(committed) !== digest) throw new Error('Lead custody mismatch');
         return output;
       });
+      if (envelope.type === 'task.result') this.verdicts.delete(task.task_id);
+      else this.pruneVerdict(this.decode(this.opts.store.state(stateKey))!);
     });
   }
 }
@@ -503,14 +534,10 @@ function inlineArtifact(body: Record<string, unknown>): Record<string, unknown> 
   return record(first) ? first : undefined;
 }
 
-/** 内联签名清单(artifacts[0].manifest):须 ed25519 + sig 字符串 + manifest.deliverables 数组,否则 undefined(fail-closed)。 */
+/** 内联清单经过完整结构准入；畸形输入不进入验签与缓存。 */
 function inlineSignedManifest(body: Record<string, unknown>): SignedManifest | undefined {
-  const art = inlineArtifact(body);
-  if (!art || !record(art.manifest)) return undefined;
-  const signed = art.manifest as Record<string, unknown>;
-  if (signed.alg !== 'ed25519' || typeof signed.sig !== 'string' || !record(signed.manifest)) return undefined;
-  if (!Array.isArray((signed.manifest as Record<string, unknown>).deliverables)) return undefined;
-  return art.manifest as unknown as SignedManifest;
+  const signed = inlineArtifact(body)?.manifest;
+  return validSignedManifest(signed) ? signed : undefined;
 }
 
 /** 内联产物仓库(artifacts[0].repo);非字符串 → undefined。 */
@@ -519,8 +546,17 @@ function inlineRepo(body: Record<string, unknown>): string | undefined {
   return art && typeof art.repo === 'string' ? art.repo : undefined;
 }
 
-/** 内联清单的 JCS 摘要 = 判定关联键(§4.3);无合法内联清单 → undefined。 */
-function manifestDigestOf(body: Record<string, unknown>): string | undefined {
-  const signed = inlineSignedManifest(body);
-  return signed ? manifestDigest(signed.manifest) : undefined;
+/** 与机器的 result 可达状态保持一致，取消/回收窗口仍可重新预置并参与既有竞态。 */
+function acceptsArtifactResult(task: DurableLeadTask): boolean {
+  return task.kind === 'project' && (task.state === 'running' || task.state === 'cancelling' ||
+    (task.state === 'reclaiming' && !task.drainClosed));
+}
+
+/** 心跳更新死线/renewalSeq 不使验收失效；任务代次、状态代次及契约变化必须失效。 */
+function acceptanceContext(task: DurableLeadTask): string {
+  return sha256Hex(jcs({
+    task_id: task.task_id, attempt: task.attempt, target: task.target, kind: task.kind,
+    state: task.state, task_seq: task.task_seq, drainClosed: task.drainClosed ?? false,
+    contract: task.contract ?? null,
+  }));
 }

@@ -9,7 +9,8 @@
  * 牵头方验收编排见 DurableLead(§4.3)。哈希用 node:crypto sha256(同 payload-git.ts / fetcher.ts)。
  */
 import { createHash } from 'node:crypto';
-import { jcs, signBytes, verifyBytes, fromBase64, toBase64 } from '@qlong/core';
+import { isUuid, jcs, signBytes, verifyBytes, fromBase64, toBase64 } from '@qlong/core';
+import { isLeadContract } from '../lead/machine.js';
 
 /** 单个交付物的内容寻址条目(path 相对工作区根;sha256/size 为字节级校验值)。 */
 export interface ArtifactEntry {
@@ -100,13 +101,17 @@ export interface ContractDeliverable {
  */
 export function verifyArtifactDelivery(input: {
   signed: SignedManifest;
+  taskId: string;
+  attempt: number;
   pub: Uint8Array;
   fromNodeId: string;
   fromKeyEpoch: number;
   collected: ReadonlyArray<{ path: string; bytes: Uint8Array }>;
   contract?: { deliverables?: ContractDeliverable[] };
 }): boolean {
-  const { signed, pub, fromNodeId, fromKeyEpoch, collected, contract } = input;
+  const { signed, pub, taskId, attempt, fromNodeId, fromKeyEpoch, collected, contract } = input;
+  if (!validSignedManifest(signed) || !isLeadContract(contract)) return false;
+  if (signed.manifest.task_id !== taskId || signed.manifest.attempt !== attempt) return false;
   // 1. 清单钥标识 == 信封署名者
   if (signed.manifest.node_id !== fromNodeId || signed.manifest.key_epoch !== fromKeyEpoch) return false;
   // 2. ed25519 验签(登记公钥)
@@ -122,7 +127,26 @@ export function verifyArtifactDelivery(input: {
   // 4. 契约完整性:每条声明 path deliverable 都在清单
   const manifestPaths = new Set(signed.manifest.deliverables.map((d) => d.path));
   for (const c of contract?.deliverables ?? []) {
-    if (typeof c?.path === 'string' && !manifestPaths.has(c.path)) return false;
+    // artifact 命名尚无字节映射端口，不能把无法核验的声明当成空要求。
+    if (typeof c.path !== 'string' || !manifestPaths.has(c.path)) return false;
+  }
+  return true;
+}
+
+/** 不可信清单的结构准入；重复路径会使内容寻址歧义，统一拒绝。 */
+export function validSignedManifest(value: unknown): value is SignedManifest {
+  const object = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  const positive = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+  if (!object(value) || value.alg !== 'ed25519' || typeof value.sig !== 'string' || !object(value.manifest)) return false;
+  const m = value.manifest;
+  if (!isUuid(m.task_id) || !isUuid(m.node_id) || !positive(m.attempt) || !positive(m.key_epoch) || !Array.isArray(m.deliverables)) return false;
+  const paths = new Set<string>();
+  for (const d of m.deliverables) {
+    if (!object(d) || typeof d.path !== 'string' || !d.path.trim() || paths.has(d.path) ||
+        typeof d.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(d.sha256) ||
+        typeof d.size !== 'number' || !Number.isSafeInteger(d.size) || d.size < 0) return false;
+    paths.add(d.path);
   }
   return true;
 }
