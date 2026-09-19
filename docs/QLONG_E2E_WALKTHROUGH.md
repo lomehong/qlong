@@ -114,7 +114,29 @@ qlong run --storage-mode open --confirm-local-filesystem --auto-select   --origi
 
 种子生成:`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`(操作员自持,勿提交)。
 
-## 六、走查产出(执行后回填本节)
+## 六、走查产出
+
+### 6.0 同机三节点实物演练记录(2026-09-19,v2 持久栈,自建中心)
+
+第一轮实物演练在同机以四进程形态执行(1 持久中心 + 3 节点,a/b/c/d 各独立 QLONG_HOME;
+自建中心 3460 端口,`--storage-mode create` 起,Windows ACL 准入)。真实执行结果:
+
+- **剧本 0/1 ✅**:a 以 `--originate` 发起 aid 单,目录选择器选中 b(排除自身),真实 dsh
+  (npx @deepseek-ai/dsh 0.1.5-rc.2)执行,**done / attempt 1**;中心任务投影终态一致。
+- **剧本 2a(变体)✅**:带 `required_caps:[tool:ios-sign]` 的单,选择器**首派即命中**带标签的 c
+  (caps 过滤在派单层生效,未发生拒单)→ done / attempt 1;闸3 拒单路径由单测覆盖。
+- **剧本 5 ✅(带两个真实发现)**:a 再发单后**硬杀**(模拟故障)→ `qlong lead export`
+  导出 3 任务签名 bundle → 节点 d `run --takeover` 验签接管:
+  `重派 1 | fenced(禁双主)0 | 归档 2`(终态归档不重跑、在途 attempt+1 重派,语义精确)。
+  后续预算链如实暴露两个发现:
+  1. **R8 排除缺口**:offer TTL 过期的目标不进排除表(`applyExclusion` 只挂 reject/fail 路径)
+     → 死节点被反复选中直至预算耗尽 escalate(已登记 R-MATRIX §5 T6,待 TDD 修复);
+  2. **接管撞单槽**:重派单被仍在执行原 attempt 的节点以 policy_denied 拒(单槽 + 租约未到期,
+     行为正确)——接管操作节奏应避开原租约窗口,或先 cancel 原 attempt。
+- 运维备注:身份 pinning 护栏真实生效——用错误 QLONG_HOME 对 a 库执行 lead export 被
+  "Runtime database belongs to another node" 拒绝;`create` 对已存在库拒绝(生命周期纪律)。
+
+### 6.1 待回填(第二台实体设备)
 
 - [ ] 剧本 1 通过(记录消息时间线与 custody stored/receipt);
 - [ ] 剧本 2a/2b/2c 通过;
@@ -128,4 +150,4 @@ qlong run --storage-mode open --confirm-local-filesystem --auto-select   --origi
 
 `npx @deepseek-ai/dsh@0.1.2-rc.1 --profile headless "reply with the single word: pong"` → 输出 `pong`,exit 0(31s);
 同任务经 DeepSeekHarnessDriver 默认 npx 通道(零覆盖)→ complete 收到含 pong 的答案。
-上游:latest 0.1.2-rc.1 / alpha 0.1.3-alpha.2(npm registry 核实)。v2 生产驱动为 `FencedProcessDriver`(fence→pid 落盘,recover 据此判定孤儿)。
+上游版本(2026-09-19 复核):npm dist-tags latest 0.1.5-rc.2 / **alpha 0.1.6-alpha.2**;用户 dsh-desktop 运行时已升级至 v0.1.6-alpha.2(与 alpha 线一致)。v2 生产驱动为 `FencedProcessDriver`(fence→pid 落盘,recover 据此判定孤儿)。
