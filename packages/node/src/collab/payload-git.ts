@@ -13,13 +13,17 @@
  *
  * R10 安全基线同样适用:repo 白名单(https 或本机路径,本机路径须节点策略放行)、size 预检、sha256 校验。
  */
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import type { PayloadRef } from '../executor/fetcher.js';
 import type { SignedManifest } from './artifact-manifest.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface GitPayloadStoreOptions {
   /** 共享仓库:本地目录(bare 由本类自动 init)或 https 远端 URL(R10:私网须节点白名单) */
@@ -248,6 +252,62 @@ export function pushSignedArtifacts(
   git(['commit', '--quiet', '-m', `artifacts ${taskId}`, '--', MANIFEST_FILE, ...existing]);
   git(['push', '--quiet', repo, `HEAD:refs/heads/qlong/${taskId}`]);
   return { branch: `qlong/${taskId}`, pushed: existing };
+}
+
+export interface PublishSignedOptions {
+  /** git 可执行(默认稳健解析) */
+  gitBin?: string;
+  /** 每个 git 子进程调用的墙钟超时(ms);默认 120000。超时即中止并抛错,绝不静默截断。 */
+  timeoutMs?: number;
+  /** 全部 deliverable 声明字节总和上限;默认 256MB。超限先于任何 git I/O 拒绝。 */
+  maxBytes?: number;
+}
+
+/**
+ * e2d-2:异步签名产物发布(ARTIFACT-ACCEPTANCE §4.2 的执行侧生产半)。与同步 pushSignedArtifacts 不同:
+ * - 全程异步(execFile promisify + AbortSignal.timeout),不同步阻塞事件循环——租约续租/取消轮询在发布期间继续;
+ * - **每-attempt 分支** qlong/<task>/a<attempt>:多 attempt 互不覆写、可审计;
+ * - 绝不 force:远端同分支已存在且历史分叉 → 非快进被拒(抛错),不覆写既有交付;
+ * - 字节预算:清单声明 deliverable 总字节超限 → 先于任何 git I/O 拒绝(fail-fast)。
+ * worktreeDir 须已是 git 仓(调用方/适配器负责 init);缺件不入清单,由牵头方核契约完整性时判缺。
+ * 失败一律抛错——由执行器据此干净 task.fail(artifact_publish_failed),绝不把未发布产物伪装成成功。
+ */
+export async function publishSignedArtifacts(
+  worktreeDir: string,
+  repo: string,
+  signed: SignedManifest,
+  taskId: string,
+  attempt: number,
+  opts: PublishSignedOptions = {},
+): Promise<{ branch: string; pushed: string[] }> {
+  if (!Number.isSafeInteger(attempt) || attempt <= 0) throw new GitPayloadError(`attempt 非法:${attempt}`);
+  const bin = resolveGitBin(opts.gitBin);
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const maxBytes = opts.maxBytes ?? 256 * 1024 * 1024;
+  const branch = `qlong/${taskId}/a${attempt}`;
+  // 字节预算:先于任何 git I/O 拒绝,不浪费带宽/磁盘(清单是权威声明集)。
+  const total = signed.manifest.deliverables.reduce((n, d) => n + d.size, 0);
+  if (total > maxBytes) throw new GitPayloadError(`产物总字节 ${total} 超过预算 ${maxBytes}`);
+  const git = async (args: string[]): Promise<string> => {
+    const { stdout } = await execFileAsync(bin, args, {
+      cwd: worktreeDir,
+      env: {
+        ...process.env, GIT_TERMINAL_PROMPT: '0',
+        GIT_AUTHOR_NAME: 'qlong', GIT_AUTHOR_EMAIL: 'qlong@local',
+        GIT_COMMITTER_NAME: 'qlong', GIT_COMMITTER_EMAIL: 'qlong@local',
+      },
+      maxBuffer: 512 * 1024 * 1024,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return stdout;
+  };
+  await writeFile(join(worktreeDir, MANIFEST_FILE), JSON.stringify(signed));
+  const existing = signed.manifest.deliverables.map((d) => d.path).filter((f) => existsSync(join(worktreeDir, f)));
+  await git(['add', MANIFEST_FILE, ...existing]);
+  await git(['commit', '--quiet', '-m', `artifacts ${taskId} a${attempt}`, '--', MANIFEST_FILE, ...existing]);
+  // 每-attempt 分支 + 绝不 force:非快进冲突由 git 拒绝并抛错。
+  await git(['push', '--quiet', repo, `HEAD:refs/heads/${branch}`]);
+  return { branch, pushed: existing };
 }
 
 /** 牵头方收取产物:把 qlong/<task> 分支的产物树导出到本地目录 */

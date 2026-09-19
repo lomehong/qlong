@@ -75,13 +75,14 @@ if (cmd === 'enroll') {
   const registryUrl = (flag('--registry', process.env.QLONG_REGISTRY_URL) ?? 'http://127.0.0.1:3200') as string;
   const gatewayUrl = (flag('--gateway', process.env.QLONG_GATEWAY_URL) ?? 'ws://127.0.0.1:3100') as string;
   const caps = (flag('--caps', process.env.QLONG_CAPS ?? '') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const artifactRepo = flag('--artifact-repo', process.env.QLONG_ARTIFACT_REPO);
   if (!token) {
     console.error('缺少邀请码:请经 stdin 传入(qlong enroll --stdin < token)或作为位置参数');
     console.error('邀请码无效/过期时,请回到控制台或 /install 页面重新生成');
     process.exit(1);
   }
   try {
-    const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps });
+    const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps, artifactRepo });
     console.log('入网完成: node', cfg.node_id, '| team', cfg.team_id);
     // 不 process.exit:fetch 的空闲 TLSSocket 在强制退出时触发 libuv 断言崩溃
     // (Windows/Node24,src\winsync.c);空闲连接已 unref,自然排空即干净退出。
@@ -126,12 +127,14 @@ if (cmd === 'join') {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const artifactRepo = flag('--artifact-repo', process.env.QLONG_ARTIFACT_REPO);
   try {
-    const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps });
+    const cfg = await joinAndSave({ registryUrl, gatewayUrl, token, caps, artifactRepo });
     console.log('入网完成:');
     console.log('  node_id :', cfg.node_id);
     console.log('  team_id :', cfg.team_id);
     console.log('  caps    :', cfg.caps.join(', ') || '(无)');
+    if (cfg.artifact_repo) console.log('  artifact_repo :', cfg.artifact_repo);
     console.log('下一步: qlong run --storage-mode create --confirm-local-filesystem(首次;之后改 open)');
     // 同 enroll:自然排空退出,避免 TLS 句柄强制关闭崩溃
   } catch (e) {
@@ -216,6 +219,8 @@ if (cmd === 'run') {
         runHandles: new PersistentRunHandleStore(runtime),
       }),
       workspace: new FencedWorkspace(),
+      // e2d-2:节点级共享产物仓(配置后 PROJECT 交付才准入并发布签名产物;未配置则 PROJECT policy_denied)。
+      artifactRepo: cfg.artifact_repo,
       driverTimeoutMs: 15_000, // npx 冷启动可能较慢;有界等待仍封顶执行器契约
       capabilities: () => cfg.caps,
       reportIntervalMs: 60_000,

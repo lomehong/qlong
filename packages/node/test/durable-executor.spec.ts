@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { envelopeDigest, newId, type EnvelopeV1 } from '@qlong/core';
-import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
+import type { ArtifactPublisher, ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 import { DurableExecutor, type DurableExecutorOptions } from '../src/runtime/executor.js';
 import { NodeRuntimeStore, type RuntimeJson } from '../src/runtime/store.js';
 import type { Outbound } from '../src/wire.js';
@@ -40,6 +40,12 @@ function seal(out: Outbound): EnvelopeV1 {
 
 function control(input: EnvelopeV1, type: string, body: Record<string, unknown> = {}): EnvelopeV1 {
   return offer({ type, task_id: input.task_id, attempt: input.attempt, body });
+}
+
+/** e2d-2:携契约的 PROJECT offer(共享产物仓交付);与 lead 派发形状一致。 */
+function projectOffer(overrides: Partial<EnvelopeV1> = {}): EnvelopeV1 {
+  return offer({ body: { kind: 'project', summary: 'build it', lease_ms: 900, offer_ttl_ms: 300,
+    contract: { deliverables: [{ path: 'dist/report.md' }] } }, ...overrides });
 }
 
 class FakeDriver implements FencedDriver {
@@ -98,6 +104,39 @@ class FakeWorkspace implements ExecutorWorkspace {
     return { cwd: `/ws/${fence.run_id}` };
   }
   async release(fence: Readonly<RunFence>): Promise<void> { this.released.push({ ...fence }); }
+}
+
+/** e2d-2:记录型 ArtifactPublisher 桩——publish 断言其在事务外(结果尚未密封)运行,返回注入 artifacts 的 outcome。 */
+class FakePublisher implements ArtifactPublisher {
+  readonly published: Array<{ fence: RunFence; offer: Record<string, unknown>; ctx?: RunContext; outcome: RunOutcome }> = [];
+  fail = false;
+  invalid = false;
+  constructor(readonly store: NodeRuntimeStore) {}
+  async publish(fence: Readonly<RunFence>, offer: Record<string, unknown>, ctx: RunContext | undefined, outcome: RunOutcome): Promise<RunOutcome> {
+    // 读取会在事务重入时抛错;断言 publish 在 SQL 事务外、且结果尚未密封(slot 仍在)。
+    expect(this.store.state(KEY)?.value).toMatchObject({ slot: { fence } });
+    if (this.fail) throw new Error('publish boom');
+    this.published.push({ fence: { ...fence }, offer: structuredClone(offer), ctx, outcome: structuredClone(outcome) });
+    if (this.invalid) return { kind: 'bogus' } as unknown as RunOutcome;
+    return { kind: 'result', body: { ...outcome.body,
+      artifacts: [{ repo: 'r', manifest: 'm', branch: `qlong/${fence.task_id}/a${fence.attempt}` }] } };
+  }
+}
+
+/** 装配带 FakeDriver + FakeWorkspace + FakePublisher 的执行器;三者共享同一真实临时 SQLite。 */
+async function setupPub(recovered = true) {
+  const f = fixture();
+  const driver = new FakeDriver(f.runtime);
+  const workspace = new FakeWorkspace(f.runtime);
+  const publisher = new FakePublisher(f.runtime);
+  const executor = new DurableExecutor({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal, driver, workspace, publisher });
+  if (recovered) await executor.recover();
+  const deliver = (input: EnvelopeV1, authorized = true) => {
+    expect(['new', 'duplicate']).toContain(f.runtime.receive(input));
+    executor.consume(input, authorized);
+  };
+  const outputs = (type: string) => f.runtime.all().map((item) => item.envelope).filter((item) => item.type === type);
+  return { ...f, driver, workspace, publisher, executor, deliver, outputs };
 }
 
 /** 装配带 FakeDriver + FakeWorkspace 的执行器;两者共享同一真实临时 SQLite。 */
@@ -1012,5 +1051,121 @@ describe('DurableExecutor per-fence 工作区生命周期(e2d-1)', () => {
     const { ws2, ex2, fence } = await restartWith('unknown');
     expect(ex2.snapshot().slot).toMatchObject({ phase: 'recovery_required', fence });
     expect(ws2.released).toEqual([]); // 不可证静默时绝不清理
+  });
+});
+
+describe('DurableExecutor 完成路径产物发布(e2d-2)', () => {
+  it('结果完成时于事务外 publish(传 fence/offer/ctx/outcome),并把注入的 artifacts 密封进 task.result', async () => {
+    const f = await setupPub();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    const fence = f.executor.snapshot().slot!.fence;
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.publisher.published).toHaveLength(1);
+    expect(f.publisher.published[0]!.fence).toEqual({ ...fence });
+    expect(f.publisher.published[0]!.offer).toMatchObject({ kind: 'aid', summary: 'trusted embedded work' });
+    expect(f.publisher.published[0]!.ctx).toEqual({ cwd: `/ws/${fence.run_id}` }); // ctx 从 start 续接到完成路径
+    expect(f.publisher.published[0]!.outcome).toEqual(result);                      // 收到驱动原始 result
+    expect(f.executor.snapshot().slot).toBeNull();
+    const sealed = f.outputs('task.result');
+    expect(sealed).toHaveLength(1);
+    expect(sealed[0]!.body.artifacts).toEqual([{ repo: 'r', manifest: 'm', branch: `qlong/${fence.task_id}/a${fence.attempt}` }]);
+    expect(f.workspace.released).toEqual([{ ...fence }]); // publish 后仍 release
+  });
+
+  it('publish 抛错 → 干净 task.fail(artifact_publish_failed),绝不伪装成功交付,仍 release', async () => {
+    const f = await setupPub();
+    f.publisher.fail = true;
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    const fence = f.executor.snapshot().slot!.fence;
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.executor.snapshot().slot).toBeNull();          // 干净失败,未升级 recovery_required
+    expect(f.outputs('task.result')).toHaveLength(0);        // 未发布产物绝不密封为 result
+    expect(f.outputs('task.fail')[0]!.body.summary).toBe('artifact_publish_failed');
+    expect(f.workspace.released).toEqual([{ ...fence }]);
+  });
+
+  it('publish 返回非法 outcome → fail-closed task.fail,不密封畸形结果', async () => {
+    const f = await setupPub();
+    f.publisher.invalid = true;
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    expect(f.outputs('task.result')).toHaveLength(0);
+    expect(f.outputs('task.fail')[0]!.body.summary).toBe('artifact_publish_failed');
+    expect(f.executor.snapshot().slot).toBeNull();
+  });
+
+  it('结果已就绪但随后取消:stopReason 优先 → 不 publish,密封 cancel.ack 而非 result', async () => {
+    const f = await setupPub();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    f.driver.runs[0]!.outcome.resolve(result); // live.outcome = result
+    await Promise.resolve();
+    f.deliver(control(input, 'task.cancel'));    // slot.stopReason = 'cancel'
+    await f.executor.settle();
+    expect(f.publisher.published).toEqual([]);   // 取消的 run 不发布产物(避免为陈旧完成做 git I/O)
+    expect(f.outputs('task.result')).toHaveLength(0);
+    expect(f.outputs('task.cancel.ack')).toHaveLength(1);
+    expect(f.executor.snapshot().slot).toBeNull();
+  });
+
+  it('未注入 publisher → result 原样密封,无 artifacts(向后兼容)', async () => {
+    const f = await setupWs();
+    const input = offer();
+    f.deliver(input);
+    await f.executor.settle();
+    f.driver.runs[0]!.outcome.resolve(result);
+    await Promise.resolve();
+    await f.executor.settle();
+    const sealed = f.outputs('task.result');
+    expect(sealed).toHaveLength(1);
+    expect(sealed[0]!.body).toMatchObject(result.body); // 原样密封
+    expect(sealed[0]!.body.artifacts).toBeUndefined();  // 无 artifacts 注入
+  });
+});
+
+describe('DurableExecutor PROJECT 准入门控(e2d-2)', () => {
+  it('装配 publisher(共享产物仓已配置)→ PROJECT offer 准入,task.accept 并建槽', async () => {
+    const f = await setupPub();
+    const input = projectOffer();
+    f.deliver(input);
+    expect(f.outputs('task.accept')).toHaveLength(1);
+    expect(f.executor.snapshot().slot).toMatchObject({ offer: { kind: 'project' }, fence: { task_id: input.task_id, attempt: 1 } });
+  });
+
+  it('未装配 publisher(无共享产物仓)→ PROJECT offer policy_denied fail-closed,不建槽', async () => {
+    const f = await setup(); // 无 publisher
+    const input = projectOffer();
+    f.deliver(input);
+    expect(f.outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'policy_denied' });
+    expect(f.executor.snapshot().slot).toBeNull();
+  });
+
+  it('PROJECT offer 缺契约 → 即便装配 publisher 仍 policy_denied(形状闸)', async () => {
+    const f = await setupPub();
+    const input = offer({ body: { kind: 'project', summary: 'build it', lease_ms: 900, offer_ttl_ms: 300 } });
+    f.deliver(input);
+    expect(f.outputs('task.reject').at(-1)!.body).toMatchObject({ reason_code: 'policy_denied' });
+    expect(f.executor.snapshot().slot).toBeNull();
+  });
+
+  it('aid offer 不受门控影响:无 publisher 仍准入(向后兼容)', async () => {
+    const f = await setup(); // 无 publisher
+    const input = offer();
+    f.deliver(input);
+    expect(f.outputs('task.accept')).toHaveLength(1);
+    expect(f.executor.snapshot().slot).toMatchObject({ offer: { kind: 'aid' } });
   });
 });

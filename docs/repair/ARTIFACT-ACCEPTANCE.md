@@ -16,17 +16,19 @@
 ## 0. 实施状态（历史基线 vs 当前能力）
 
 > §2「现状（证据）」与 §3「缺口」表记录的是**设计定稿时**（E2a 之前）的基线，用于说明动机，不表示当前仍缺。
-> 截至当前工作树（HEAD `6bbda76` + 未提交 P0 复核修复）：
+> 截至当前工作树（HEAD `3918709` = e2d-1 已提交 + 未提交 e2d-2 执行侧产物发布）：
 > - **已落地**：e2a 清单/签名/摘要原语、e2b git 集成（pushSignedArtifacts/collectArtifacts）、e2c 牵头验收器
 >   （verifyArtifactDelivery 完整性判定 + LeadRecord.contract 持久化 + per-task 同步判定缓存 + stageArtifactVerification 异步预置）。
-> - **P0 复核加固（本轮，未提交）**：清单绑定 task/attempt/署名者 + 结构准入（validSignedManifest）；成功缓存改为**每任务一份**
+> - **P0 复核加固（已提交 `761b48a`/`9cc6117`）**：清单绑定 task/attempt/署名者 + 结构准入（validSignedManifest）；成功缓存改为**每任务一份**
 >   「完整信封摘要 + 持久验收上下文 + 判定/在途令牌」，杜绝跨任务/attempt/契约/签名上下文误复用；取消/改派/接管/终态/消费
 >   即回收，异步 I/O 完成后重读持久状态复核上下文；派发/改派对非法契约**改状态前**拒绝（不闭锁节点）；artifact-only 声明
 >   当前无字节映射端口 → 明确判 false（不静默跳过）。
-> - **e2d-1 已落地（本轮，未提交）**：durable per-fence 工作区生命周期——执行器新增 `workspace` 端口（`prepare`→解析 cwd 于 `'starting'` 提交前、事务外；结果/失败密封后 `release`；`unknown`/`recovery_required` 绝不 release），`FencedProcessDriver` 消费 `ctx.cwd`（优先于静态 workdir），`FencedWorkspace` 按精确 fence 派生隔离目录（跨 attempt/generation/run 不串产物、路径越界与非法 fence 拒绝、os.tmpdir 缺省根），`createDurableNode` 透传 + CLI 移除静态 `workdir: home`。
-> - **仍缺（e2d-2/3/4）**：执行侧产清单/签名/push、drain 默认接线、真实 git PROJECT 端到端。
-> - **验证**：node 定向 100 测绿 + 七靶点变异全捕获并字节还原；全仓 **1621 passed | 2 skipped**，七包 typecheck 绿。
->   P0 出口尚待用户确认后方进入 P1（e2d）。
+> - **e2d-1 已落地（已提交 `3918709`）**：durable per-fence 工作区生命周期——执行器新增 `workspace` 端口（`prepare`→解析 cwd 于 `'starting'` 提交前、事务外；结果/失败密封后 `release`；`unknown`/`recovery_required` 绝不 release），`FencedProcessDriver` 消费 `ctx.cwd`（优先于静态 workdir），`FencedWorkspace` 按精确 fence 派生隔离目录（跨 attempt/generation/run 不串产物、路径越界与非法 fence 拒绝、os.tmpdir 缺省根），`createDurableNode` 透传 + CLI 移除静态 `workdir: home`。
+> - **e2d-2 已落地（本轮，未提交）**：执行侧产物发布——执行器新增 `ArtifactPublisher` 端口，完成路径经 `publishAndFinish` 在 **SQL 事务外**调用 `publish(fence,offer,ctx,outcome)`（门控 `result + publisher + 同 fence + 无 stopReason`；发布抛错/返回非法 outcome → 干净 `task.fail(artifact_publish_failed)`，取消优先不发布）；`GitArtifactPublisher`（collab/artifact-publisher.ts）读契约声明文件（路径严格限定工作区内、缺件不入清单不伪造）、`buildManifest`+`signManifest`、异步 `publishSignedArtifacts` 发布到**每-attempt 分支** `qlong/<task>/a<attempt>`（绝不 force、`AbortSignal.timeout` + 字节预算），注入 `body.artifacts=[{repo,manifest,branch}]`；PROJECT 准入以**节点级 `artifactRepo` 配置**门控（未配置 → `policy_denied` fail-closed，aid 不受影响），`createDurableNode` 装配 + CLI `--artifact-repo`/config 接线。
+> - **仍缺（e2d-3/4）**：牵头侧 collect 适配**每-attempt 分支**（现 `collectArtifacts` 仍用单分支 `qlong/<task>`）、drain 默认接线（collect/resolvePubkey 端口 + git→字节适配）、真实 git PROJECT 端到端（执行产→牵头 collect→验签→done；篡改/缺件→acceptance_failed→改派）。
+> - **验证（e2d-2）**：adapter 6 测 + node 接线 2 测绿；4 靶点变异（M10 aid 短路 / M11 路径越界守卫 / M12 缺 cwd 抛错 / M13 缺件伪造）全捕获并字节还原；七包 typecheck 绿；
+>   全仓 node **842 passed**、cli 130、registry 243、core 205、gateway 170、console 36、storage 36|2skip（各包独立运行全绿；
+>   `pnpm -r` 合并运行偶发 tinypool `ERR_IPC_CHANNEL_CLOSED` 为 Windows/Node24 环境级 worker 拆卸 flake，非代码，registry 独立运行 exit 0）。
 
 ## 1. 约束（不可违背）
 
@@ -116,20 +118,35 @@ interface SignedManifest { alg: 'ed25519'; manifest: ArtifactManifest; sig: stri
   JCS 保证跨序列化字节一致（D23 同一规范化）。
 - 纯函数、无 I/O（除 buildManifest 接收已读字节）→ e2a 单测直接覆盖（含篡改/错钥/哈希不符）。
 
-### 4.2 执行侧：产清单 + 签名 + 入 git 分支（payload-git.ts 扩展 + executor 接线）
+### 4.2 执行侧：产清单 + 签名 + 入 git 分支（payload-git.ts 扩展 + ArtifactPublisher 端口 + executor 接线）
 
-- **扩展 `pushArtifacts`**（或新增 `pushSignedArtifacts`）：接收 `SignedManifest`，除 deliverable 文件外，
-  额外把 `qlong-manifest.json`（= `SignedManifest` 的 JSON）写入 worktree 并一并 commit/push 进 `qlong/<task>` 分支
-  —— 产物分支**自描述、自验签**（离线搬运仍可验，§1.2）。
-- **扩展 `collectArtifacts`**：导出树时一并读回 `qlong-manifest.json`，返回 `{ ok, files, manifest?: SignedManifest, reason? }`。
-- **执行侧产清单接线**（durable executor 消费路径，驱动完成后、发 task.result 前）：
-  1. 从 `ExecRecord.offerBody.contract.deliverables` 取声明产物路径；从工作区根读各文件字节。
-  2. `buildManifest(task_id, attempt, me.node_id, me.key_epoch, files)` → `signManifest(_, privKey)`。
-  3. `pushSignedArtifacts(worktree, repo, signed, taskId)`；缺失的声明 deliverable **不入清单**（由牵头方核完整性时判缺）。
-  4. `task.result.body.artifacts = [{ branch, repo, manifest: <SignedManifest 内联> }]` —— 内联签名清单随信封
-     （信封 ed25519 亦覆盖它，双保险）；牵头方以内联清单的 `jcs` 摘要为**判定关联键**（§4.3）。
-- **工作区接线缺口（§7 风险）**：durable 路径 `FencedProcessDriver` 用**静态 workdir**、未接 `WorkspaceManager`
-  （仅 legacy session.ts:330-343 接）。e2d 须把 per-task 工作区根接入 durable 执行侧，产物才可定位读取。
+> **e2d-2 落地形态**（与本节初版设计的差异已按实现校正）：发布接缝抽为 `ArtifactPublisher` 端口，git I/O 全异步、
+> 走**每-attempt 分支**，PROJECT 准入以节点级 `artifactRepo` 门控。
+
+- **`pushSignedArtifacts`（同步，e2b）**：接收 `SignedManifest`，把 `qlong-manifest.json`（= `SignedManifest` 的 JSON）连同
+  deliverable 一并 commit/push 进**单分支** `qlong/<task>` —— 保留供既有测试与向后兼容。
+- **`publishSignedArtifacts`（异步，e2d-2c）**：`(worktree, repo, signed, taskId, attempt, opts?)`，全程 `execFile` promisify +
+  `AbortSignal.timeout`（默认 120s，不阻塞事件循环——租约续租/取消轮询在发布期间继续），推到**每-attempt 分支**
+  `qlong/<task>/a<attempt>`（多 attempt 互不覆写、可审计），**绝不 force**（远端同分支历史分叉 → 非快进被拒并抛错），
+  字节预算（清单声明 deliverable 总字节超 `maxBytes`，默认 256MB → 先于任何 git I/O fail-fast）。失败一律抛错。
+- **`collectArtifacts`**：导出树时一并读回 `qlong-manifest.json`，返回 `{ ok, files, manifest?: SignedManifest, reason? }`
+  （**仍用单分支 `qlong/<task>`**；e2d-3 须扩展按 `artifacts[0].branch` 收取每-attempt 分支）。
+- **`ArtifactPublisher` 端口 + `publishAndFinish`（executor）**：执行器完成路径在 **SQL 事务外**调用
+  `publish(fence, offer, ctx, outcome) → Promise<RunOutcome>`（返回注入 `body.artifacts` 的新 outcome）。门控
+  `outcome.kind==='result' && publisher && 同 fence && !slot.stopReason`（取消/超时优先，绝不发布）；publish 抛错或返回非法
+  outcome → `failed('artifact_publish_failed')`。`ctx` 由 `start()` 事务外 `prepare` 解析并经 `LiveRun.ctx` 线程化到完成路径；
+  `finish()` 的 CAS 仍复核 fence/cancel/lease（陈旧完成不改变新任务）。执行器保持通用（可用 Fake 测试）。
+- **`GitArtifactPublisher`（collab/artifact-publisher.ts，e2d-2d）**：`ArtifactPublisher` 的 git 适配器，构造携
+  `{ repo, privKey, nodeId, keyEpoch, gitBin?/timeoutMs?/maxBytes? }`。`publish`：
+  1. `offer.kind!=='project'` → 原样返回 outcome（aid 绝不触碰 git）；`ctx.cwd` 缺失 → 抛错（拒绝发布，不伪造成功）。
+  2. 从 `offer.contract.deliverables[].path` 取声明路径，**严格限定工作区内**（`../`/绝对路径越界拒读，防契约诱导读工作区外文件）；
+     逐条读字节，**缺件不入清单**（由牵头方核契约完整性时判缺，绝不伪造）。
+  3. `buildManifest(task_id, attempt, nodeId, keyEpoch, files)` → `signManifest(_, privKey)`（nodeId/keyEpoch 与信封 from 同源）。
+  4. 工作区未 init 为 git 仓时异步 `git init`（`FencedWorkspace` 只保证目录存在），再 `publishSignedArtifacts(...)`。
+  5. 返回 `{ kind: outcome.kind, body: { ...outcome.body, artifacts: [{ repo, manifest: signed, branch }] } }`。
+- **PROJECT 准入门控（executor + node）**：`supportedKind` 要求 project 携 `contract.deliverables` 数组；`offer()` 运行时门控
+  `body.kind==='project'` 仅当 `publisher` 存在时准入，否则 `policy_denied` fail-closed（aid 恒可）。`createDurableNode` 据节点级
+  `artifactRepo` 配置装配 `GitArtifactPublisher`（携 `opts.privKey` + `me.node_id/key_epoch`）并透传执行器；未配置 → 无 publisher → PROJECT 被拒。
 
 ### 4.3 牵头侧：真实验收器（drain 异步预置 + 机器同步读判定）
 
@@ -179,8 +196,10 @@ machine.ts:93 的 `project→false` 仍是安全底线（machine-safety.spec.ts:
 
 ## 5. 装配（node.ts / lead.ts / payload-git.ts）
 
-- **执行侧**：`createDurableNode` 域内 `opts.privKey` + `me.{node_id,key_epoch}` 已在；产清单闭包接入 durable
-  executor 完成路径（驱动 settle → 产清单 → push → result.artifacts）。工作区根接线见下条（e2d-1 已落地）。
+- **执行侧（e2d-2，已落地）**：`DurableExecutor` 增 `publisher?: ArtifactPublisher` 端口，完成路径经 `publishAndFinish` 在事务外
+  调用（驱动 settle → publish 产清单/签名/push → 注入 result.artifacts → `finishAndRelease` 密封）。`createDurableNode` 域内
+  `opts.privKey` + `me.{node_id,key_epoch}` 装配 `GitArtifactPublisher`（以节点级 `artifactRepo` 选项为开关，与 driver/workspace 同解析时机），
+  透传执行器；CLI `run` 读 `cfg.artifact_repo`（`qlong join/enroll --artifact-repo` 或 `QLONG_ARTIFACT_REPO` 写入 config）并传 `artifactRepo`。工作区根接线见下条（e2d-1 已落地）。
 - **durable 工作区（e2d-1，已落地）**：`DurableExecutor` 增 `workspace?: ExecutorWorkspace` 端口，生命周期归执行器——
   `start()` 在 `'starting'`/`mayHaveStarted` 提交**之前**于事务外 `prepare(fence,offer)` 解析 `ctx.cwd` 传驱动（mkdir 是纯磁盘 I/O，
   崩溃重启可幂等重 prepare，不误升级 recovery_required；prepare 失败即干净 `task.fail(workspace_prepare_failed)` 并 release）；

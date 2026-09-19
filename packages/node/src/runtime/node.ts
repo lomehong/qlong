@@ -18,6 +18,7 @@ import {
 } from '@qlong/core';
 import { SqliteStore } from '../../../storage/src/index.js';
 import type { ExecutorWorkspace, FencedDriver } from '../driver/run-handle.js';
+import { GitArtifactPublisher } from '../collab/artifact-publisher.js';
 import { GatewayClient } from '../gateway-client.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { DurableExecutor } from './executor.js';
@@ -66,6 +67,13 @@ export interface DurableNodeOptions {
    * 亦可传工厂 (runtime) => ExecutorWorkspace,与 driver 工厂同一解析时机。
    */
   workspace?: ExecutorWorkspace | ((runtime: NodeRuntimeStore) => ExecutorWorkspace);
+  /**
+   * e2d-2: 节点级共享产物仓(git remote URL 或本地路径)。配置后 createDurableNode 装配
+   * GitArtifactPublisher(携登记私钥 + 身份纪元,与 task.result 信封 from 同源)并透传执行器——
+   * PROJECT offer 仅当此仓已配置时准入,否则 policy_denied fail-closed(执行器门控 supportedOffer/offer)。
+   * 缺省 undefined = 不发布产物(aid 不受影响)。
+   */
+  artifactRepo?: string;
   /** 有界 driver 等待(默认 5s;CLI spawn 建议放宽) */
   driverTimeoutMs?: number;
   /** 静态能力标签(闸3 与 caps 上报共用) */
@@ -183,6 +191,11 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   const driver = typeof opts.driver === 'function' ? opts.driver(runtime) : opts.driver;
   // e2d-1:workspace 与 driver 同一解析时机(均事务外、由执行器拥有生命周期)。
   const workspace = typeof opts.workspace === 'function' ? opts.workspace(runtime) : opts.workspace;
+  // e2d-2:节点级产物仓配置 → 装配 GitArtifactPublisher(登记私钥 + me.node_id/key_epoch,与信封 from 同源,
+  // 使牵头方防线①"清单钥标识 == 署名者"成立)。未配置 → publisher 缺省 → PROJECT offer 被门控拒绝。
+  const publisher = opts.artifactRepo !== undefined
+    ? new GitArtifactPublisher({ repo: opts.artifactRepo, privKey: opts.privKey, nodeId: me.node_id, keyEpoch: me.key_epoch })
+    : undefined;
 
   const params: QlongParams = { ...(opts.params ?? DEFAULT_PARAMS) };
   const tickIntervalMs = bounded(opts.tickIntervalMs, 1_000, 50, 60_000, 'tickIntervalMs');
@@ -263,6 +276,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     seal,
     driver,
     workspace,
+    publisher,
     driverTimeoutMs: opts.driverTimeoutMs,
     capabilities: opts.capabilities,
     policy: opts.policy,

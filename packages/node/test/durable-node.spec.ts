@@ -1,5 +1,6 @@
 import { once } from 'node:events';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,8 @@ import { SqliteStore, StorageError, type SqliteStoreOptions } from '../../storag
 import { NODE_SCHEMA } from '../src/runtime/schema.js';
 import { NodeRuntimeStore } from '../src/runtime/store.js';
 import { createDurableNode, type DurableNode } from '../src/runtime/node.js';
+import { FencedWorkspace } from '../src/collab/workspace.js';
+import { verifyManifest, type SignedManifest } from '../src/collab/artifact-manifest.js';
 import { TASK_REPORT_KIND, type TaskReport } from '../src/runtime/report.js';
 import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 
@@ -293,6 +296,53 @@ describe('DurableNode v2 task loop', () => {
     await wait(() => expect(f.sent('task.result')).toHaveLength(1));
     await wait(() => expect(workspace.released).toEqual([{ ...fence }])); // 结果提交后 release
     expect(node.executor.snapshot().slot).toBeNull();
+  });
+
+  it('artifactRepo 未配置 → PROJECT offer policy_denied(不装配 publisher、driver 不启动)(e2d-2d)', async () => {
+    const driver = new StubDriver();
+    const f = await fixture({ driver, onFrame: autoStored });
+    const node = await f.makeNode({ workspace: new StubWorkspace() });
+    await node.start();
+    f.send(delivery(f.signPeer({}, { kind: 'project', summary: 'build', lease_ms: 60_000, offer_ttl_ms: 30_000,
+      contract: { deliverables: [{ path: 'dist/report.md' }] } })));
+    await wait(() => expect(f.sent('task.reject')).toHaveLength(1));
+    expect(f.sent('task.reject')[0]!.body.reason_code).toBe('policy_denied');
+    expect(driver.started).toHaveLength(0); // 未配置产物仓 → PROJECT 不准入,绝不启动 harness
+    expect(node.executor.snapshot().slot).toBeNull();
+  });
+
+  it('artifactRepo 配置:createDurableNode 装配 GitArtifactPublisher → PROJECT 准入、真实产物入 git、task.result 携可验签 artifacts(e2d-2d)', async () => {
+    const driver = new StubDriver();
+    const f = await fixture({ driver, onFrame: autoStored });
+    const repo = join(f.root, 'artifacts.git');
+    execFileSync('git', ['init', '--bare', '--quiet', repo], { stdio: 'pipe' });
+    const node = await f.makeNode({
+      artifactRepo: repo,
+      workspace: new FencedWorkspace({ baseDir: join(f.root, 'ws') }), // 真实工作区(落 f.root,随 afterEach 清理)
+    });
+    await node.start();
+    const env = f.signPeer({}, { kind: 'project', summary: 'build', lease_ms: 60_000, offer_ttl_ms: 30_000,
+      contract: { deliverables: [{ path: 'dist/report.md' }] } });
+    f.send(delivery(env));
+    await wait(() => expect(driver.started).toHaveLength(1));
+    const { fence, ctx } = driver.started[0]!;
+    expect(ctx?.cwd).toBeTruthy(); // 执行器事务外 prepare 的真实工作区
+    // 真实子进程产物落入工作区(此处由测试代替 harness 写文件)
+    mkdirSync(join(ctx!.cwd!, 'dist'), { recursive: true });
+    writeFileSync(join(ctx!.cwd!, 'dist', 'report.md'), '# 真实产物');
+    driver.complete(fence.run_id);
+    await wait(() => expect(f.sent('task.result')).toHaveLength(1));
+    const resultEnv = f.sent('task.result')[0]!;
+    const artifacts = (resultEnv.body as { artifacts?: Array<{ repo: string; manifest: SignedManifest; branch: string }> }).artifacts;
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts![0]!.repo).toBe(repo);
+    expect(artifacts![0]!.branch).toBe(`qlong/${fence.task_id}/a${fence.attempt}`);
+    // 清单以节点登记私钥签名,登记公钥可独立验签;钥标识 == 信封署名者(牵头方防线①)
+    expect(verifyManifest(artifacts![0]!.manifest, f.identityKeys.publicKey)).toBe(true);
+    expect(artifacts![0]!.manifest.manifest.node_id).toBe(f.identity.node_id);
+    expect(artifacts![0]!.manifest.manifest.key_epoch).toBe(f.identity.key_epoch);
+    expect(resultEnv.from.node_id).toBe(f.identity.node_id);
+    await wait(() => expect(node.executor.snapshot().slot).toBeNull());
   });
 
   it('rejects a live offer without a driver instead of executing it', async () => {

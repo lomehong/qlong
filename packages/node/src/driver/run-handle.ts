@@ -33,6 +33,23 @@ export interface ExecutorWorkspace {
   release(fence: Readonly<RunFence>): Promise<void>;
 }
 
+/**
+ * e2d-2:执行器完成路径的产物发布端口(镜像 ExecutorWorkspace)。严格在 SQL 事务外调用:
+ * 执行器把已解析运行上下文(ctx.cwd)、任务契约(offer)与驱动产出的 result outcome 交给适配器,
+ * 适配器读取声明文件、构建并签署 manifest、push 到共享产物仓,返回**注入了 body.artifacts 的**
+ * 新 outcome。执行器保持通用(可用 Fake 测试);真正 git/文件 I/O 由 node/CLI 装配的适配器承担。
+ * 发布失败必须抛错——执行器据此干净 task.fail(artifact_publish_failed),绝不把未发布产物伪装成成功交付。
+ * 适配器自身须给 git I/O 设超时与字节预算,且异步等待不得同步阻塞事件循环(租约/取消轮询须继续)。
+ */
+export interface ArtifactPublisher {
+  publish(
+    fence: Readonly<RunFence>,
+    offer: Record<string, unknown>,
+    ctx: RunContext | undefined,
+    outcome: RunOutcome,
+  ): Promise<RunOutcome>;
+}
+
 export interface RunHandle {
   /** Immutable identity; stop must target this handle, never a driver's mutable current run. */
   readonly fence: Readonly<RunFence>;

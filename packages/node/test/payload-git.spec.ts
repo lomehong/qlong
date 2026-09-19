@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { GitPayloadStore, fetchPayloadGit, pushArtifacts, collectArtifacts, pushSignedArtifacts } from '../src/collab/payload-git.js';
+import { GitPayloadStore, fetchPayloadGit, pushArtifacts, collectArtifacts, pushSignedArtifacts, publishSignedArtifacts, GitPayloadError } from '../src/collab/payload-git.js';
 import { newKeyPair } from '@qlong/core';
 import { buildManifest, signManifest, verifyManifest } from '../src/collab/artifact-manifest.js';
 
@@ -191,6 +191,142 @@ describe('签名产物回传(pushSignedArtifacts / collectArtifacts 读回 manif
       expect(c.ok).toBe(true);
       expect(c.files).toContain('dist/plain.md');
       expect(c.manifest).toBeUndefined();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+/** e2d-2c:异步签名产物发布——每-attempt 分支 + 超时/字节预算 + 非快进拒绝(绝不 force) */
+describe('异步签名产物发布(publishSignedArtifacts)', () => {
+  const NODE_ID = '33333333-3333-4333-8333-333333333333';
+
+  /** 独立 init 一个带根提交的 worktree(与任何其他 worktree 历史分叉)。 */
+  function seed(base: string, name: string): { repo: string; worktree: string } {
+    const repo = join(base, 'shared.git');
+    const worktree = join(base, name);
+    if (!existsSync(repo)) execFileSync('git', ['init', '--bare', '--quiet', repo]);
+    execFileSync('git', ['init', '--quiet', worktree], { stdio: 'pipe' });
+    execFileSync('git', ['checkout', '--quiet', '-b', 'main'], { cwd: worktree, stdio: 'pipe' });
+    writeFileSync(join(worktree, 'README.md'), name);
+    execFileSync('git', ['add', 'README.md'], { cwd: worktree, stdio: 'pipe' });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', name], { cwd: worktree, stdio: 'pipe' });
+    return { repo, worktree };
+  }
+
+  /** 拉取指定分支并返回其文件树 + 清单内容(不依赖 collectArtifacts 的单分支约定)。 */
+  function readBranch(repo: string, branch: string, outDir: string): { files: string[]; manifest: string } {
+    execFileSync('git', ['init', '--quiet', outDir], { stdio: 'pipe' });
+    execFileSync('git', ['fetch', '--quiet', '--depth', '1', repo, `refs/heads/${branch}:refs/heads/${branch}`], { cwd: outDir, stdio: 'pipe' });
+    const files = execFileSync('git', ['ls-tree', '-r', '--name-only', branch], { cwd: outDir, stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8').split('\n').filter(Boolean);
+    const manifest = execFileSync('git', ['cat-file', 'blob', `${branch}:qlong-manifest.json`], { cwd: outDir, stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8');
+    return { files, manifest };
+  }
+
+  function signedFor(taskId: string, attempt: number, files: Array<{ path: string; bytes: Buffer }>) {
+    const { priv, publicKey } = newKeyPair();
+    return { signed: signManifest(buildManifest(taskId, attempt, NODE_ID, 3, files), priv), publicKey };
+  }
+
+  it('发布到每-attempt 分支 qlong/<task>/a<attempt>,清单+产物随分支幸存且可验签', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qlong-pub-'));
+    try {
+      const { repo, worktree } = seed(base, 'wt');
+      const taskId = 'task-pub';
+      mkdirSync(join(worktree, 'dist'), { recursive: true });
+      const reportBytes = Buffer.from('# async published body');
+      writeFileSync(join(worktree, 'dist', 'report.md'), reportBytes);
+      const { signed, publicKey } = signedFor(taskId, 1, [{ path: 'dist/report.md', bytes: reportBytes }]);
+
+      const r = await publishSignedArtifacts(worktree, repo, signed, taskId, 1);
+      expect(r.branch).toBe('qlong/task-pub/a1');
+      expect(r.pushed).toContain('dist/report.md');
+
+      const got = readBranch(repo, 'qlong/task-pub/a1', join(base, 'out'));
+      expect(got.files).toContain('dist/report.md');
+      const parsed = JSON.parse(got.manifest);
+      expect(verifyManifest(parsed, publicKey)).toBe(true); // 签名经 git 传输幸存,独立验签通过
+      expect(parsed.manifest.attempt).toBe(1);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('多 attempt 各占独立分支互不覆写(a1/a2 同时可取,清单 attempt 各异)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qlong-pub2-'));
+    try {
+      const { repo, worktree } = seed(base, 'wt');
+      const taskId = 'task-multi';
+      mkdirSync(join(worktree, 'dist'), { recursive: true });
+      const b1 = Buffer.from('attempt one');
+      writeFileSync(join(worktree, 'dist', 'report.md'), b1);
+      await publishSignedArtifacts(worktree, repo, signedFor(taskId, 1, [{ path: 'dist/report.md', bytes: b1 }]).signed, taskId, 1);
+      const b2 = Buffer.from('attempt two');
+      writeFileSync(join(worktree, 'dist', 'report.md'), b2);
+      await publishSignedArtifacts(worktree, repo, signedFor(taskId, 2, [{ path: 'dist/report.md', bytes: b2 }]).signed, taskId, 2);
+
+      const a1 = JSON.parse(readBranch(repo, `qlong/${taskId}/a1`, join(base, 'o1')).manifest);
+      const a2 = JSON.parse(readBranch(repo, `qlong/${taskId}/a2`, join(base, 'o2')).manifest);
+      expect(a1.manifest.attempt).toBe(1);
+      expect(a2.manifest.attempt).toBe(2); // a1 未被 a2 覆写
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('同一 attempt 分叉重推 → 非快进被拒(绝不 force 覆写既有交付)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qlong-pub3-'));
+    try {
+      const a = seed(base, 'wtA');
+      const taskId = 'task-nff';
+      mkdirSync(join(a.worktree, 'dist'), { recursive: true });
+      const bytes = Buffer.from('first delivery');
+      writeFileSync(join(a.worktree, 'dist', 'report.md'), bytes);
+      await publishSignedArtifacts(a.worktree, a.repo, signedFor(taskId, 1, [{ path: 'dist/report.md', bytes }]).signed, taskId, 1);
+
+      // 另一个独立 worktree(历史分叉)重推同一 attempt 分支 → 非快进
+      const b = seed(base, 'wtB');
+      mkdirSync(join(b.worktree, 'dist'), { recursive: true });
+      const bytes2 = Buffer.from('divergent delivery');
+      writeFileSync(join(b.worktree, 'dist', 'report.md'), bytes2);
+      await expect(publishSignedArtifacts(b.worktree, b.repo, signedFor(taskId, 1, [{ path: 'dist/report.md', bytes: bytes2 }]).signed, taskId, 1))
+        .rejects.toThrow();
+      // 既有 a1 交付未被覆写:仍为首次内容
+      const got = readBranch(a.repo, `qlong/${taskId}/a1`, join(base, 'out'));
+      expect(JSON.parse(got.manifest).manifest.deliverables[0].size).toBe(bytes.length);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('声明总字节超预算 → 先于任何 git I/O 拒绝(GitPayloadError,不建分支)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qlong-pub4-'));
+    try {
+      const { repo, worktree } = seed(base, 'wt');
+      const taskId = 'task-budget';
+      const big = Buffer.alloc(1024, 7);
+      writeFileSync(join(worktree, 'big.bin'), big);
+      const { signed } = signedFor(taskId, 1, [{ path: 'big.bin', bytes: big }]);
+      await expect(publishSignedArtifacts(worktree, repo, signed, taskId, 1, { maxBytes: 16 }))
+        .rejects.toBeInstanceOf(GitPayloadError);
+      // 未推送:远端无该分支
+      const ls = execFileSync('git', ['ls-remote', '--heads', repo], { stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8');
+      expect(ls).not.toContain(`qlong/${taskId}/a1`);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('git I/O 超时预算 → 中止并抛错(不静默截断)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qlong-pub5-'));
+    try {
+      const { repo, worktree } = seed(base, 'wt');
+      const taskId = 'task-timeout';
+      const bytes = Buffer.from('body');
+      writeFileSync(join(worktree, 'a.txt'), bytes);
+      const { signed } = signedFor(taskId, 1, [{ path: 'a.txt', bytes }]);
+      await expect(publishSignedArtifacts(worktree, repo, signed, taskId, 1, { timeoutMs: 0 }))
+        .rejects.toThrow();
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

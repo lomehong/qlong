@@ -15,6 +15,8 @@ export interface QlongConfig {
   node_token: string;
   key_epoch: number;
   caps: string[];
+  /** e2d-2:节点级共享产物仓(git remote URL / 本地路径);配置后 PROJECT 交付才准入并发布签名产物。 */
+  artifact_repo?: string;
 }
 
 export function qlongHome(): string {
@@ -22,7 +24,7 @@ export function qlongHome(): string {
 }
 
 export async function joinAndSave(
-  opts: { registryUrl: string; gatewayUrl: string; token?: string; caps?: string[]; home?: string },
+  opts: { registryUrl: string; gatewayUrl: string; token?: string; caps?: string[]; artifactRepo?: string; home?: string },
 ): Promise<QlongConfig> {
   const home = opts.home ?? qlongHome();
   mkdirSync(home, { recursive: true });
@@ -50,6 +52,7 @@ export async function joinAndSave(
     node_token: r.node_token,
     key_epoch: r.key_epoch,
     caps: opts.caps ?? [],
+    ...(opts.artifactRepo ? { artifact_repo: opts.artifactRepo } : {}),
   };
   const cfgPath = join(home, 'config.json');
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });

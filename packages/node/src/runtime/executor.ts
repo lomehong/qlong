@@ -1,11 +1,11 @@
 import { DEFAULT_PARAMS, envelopeDigest, isUuid, newId, type EnvelopeV1, type QlongParams } from '@qlong/core';
 import { canApplyLeaseRenewal, isLeaseFence } from '../../../core/src/lease.js';
-import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
+import type { ArtifactPublisher, ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
 import { gateCaps, gatePolicy, type LocalPolicy } from '../executor/gates.js';
 import type { Outbound } from '../wire.js';
 import type { NodeRuntimeStore, RuntimeJson, RuntimeState, RuntimeTransition } from './store.js';
 
-export type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
+export type { ArtifactPublisher, ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../driver/run-handle.js';
 
 const STATE_KEY = 'executor:v2';
 const EFFECT_KIND = 'executor.run';
@@ -47,6 +47,8 @@ export interface DurableExecutorOptions {
   driver?: FencedDriver;
   /** e2d-1: 执行器拥有的 per-fence 工作区端口;事务外 prepare/结果提交后 release。缺省则驱动退回静态 workdir。 */
   workspace?: ExecutorWorkspace;
+  /** e2d-2: 完成路径产物发布端口;事务外为 result 构建/签署/push 清单并注入 body.artifacts。缺省则 result 原样密封。 */
+  publisher?: ArtifactPublisher;
   /** Bound each driver wait, not execution time. Timeout never proves quiescence. */
   driverTimeoutMs?: number;
   capabilities?: () => string[];
@@ -61,6 +63,8 @@ interface LiveRun {
   closedFault: boolean;
   closure: Promise<RunOutcome>;
   quiescence?: Promise<RunOutcome>;
+  /** e2d-2: start 事务外解析的运行上下文(含 cwd);续接到完成路径供 publisher 读取产物。 */
+  ctx?: RunContext;
 }
 
 function same(a: RunFence, b: RunFence): boolean {
@@ -89,9 +93,15 @@ function protocolJson(value: unknown, depth = 0): boolean {
   return record(value) && Object.values(value).every((item) => protocolJson(item, depth + 1));
 }
 
+/** e2d-2:aid 恒可;project 须携契约(deliverables 数组)——无契约的 project 形状仍拒(与持久态损坏准入一致)。 */
+function supportedKind(value: Record<string, unknown>): boolean {
+  if (value.kind === 'aid') return true;
+  return value.kind === 'project' && record(value.contract) && Array.isArray(value.contract.deliverables);
+}
+
 /** The store already validates bounded, lossless JSON; validate the domain fields here. */
 function supportedOffer(value: unknown): value is Record<string, unknown> {
-  return record(value) && value.kind === 'aid' && typeof value.summary === 'string' && value.summary.length > 0 &&
+  return record(value) && supportedKind(value) && typeof value.summary === 'string' && value.summary.length > 0 &&
     value.project === undefined && value.payload_ref === undefined &&
     (value.lease_ms === undefined || positive(value.lease_ms)) &&
     (value.offer_ttl_ms === undefined || positive(value.offer_ttl_ms)) &&
@@ -268,9 +278,10 @@ export class DurableExecutor {
     let reason: string | undefined;
     if (denied) reason = denied;
     else if (!this.ready || state.slot || this.closing) reason = 'busy';
-    else if (!this.opts.driver || body.kind !== 'aid' || body.project !== undefined || body.payload_ref !== undefined ||
+    else if (!this.opts.driver || body.project !== undefined || body.payload_ref !== undefined ||
         !isUuid(env.task_id) || !positive(env.attempt) ||
-        (body.requires !== undefined && (!Array.isArray(body.requires) || body.requires.length > 0))) reason = 'policy_denied';
+        (body.requires !== undefined && (!Array.isArray(body.requires) || body.requires.length > 0)) ||
+        (body.kind !== 'aid' && !(body.kind === 'project' && this.opts.publisher))) reason = 'policy_denied';
     else if (!positive(ttl) || !positive(lease) || !Number.isSafeInteger(now + lease) ||
         !Number.isFinite(Date.parse(env.ts)) || now >= Date.parse(env.ts) + ttl) reason = 'expired';
     else if (!gatePolicy(this.opts.policy, structuredClone(body)).ok) reason = 'policy_denied';
@@ -382,6 +393,29 @@ export class DurableExecutor {
     try { await this.opts.workspace.release(fence); } catch { /* best-effort:清理失败不推翻已提交结果 */ }
   }
 
+  /**
+   * e2d-2:完成路径——若驱动产出 result 且装配了 publisher 且本 fence 未被取消/停止,则于 SQL 事务外
+   * 发布产物(构建/签署/push 清单)并把注入 artifacts 的新 outcome 密封为终态。发布抛错或返回非法
+   * outcome → 干净 task.fail(artifact_publish_failed),绝不把未发布产物伪装成成功交付。finish 的 CAS
+   * 仍复核 fence/cancel/lease:发布期间若取消到达,密封结果以 stopReason 优先(陈旧完成不改变新任务)。
+   */
+  private async publishAndFinish(fence: RunFence, outcome: RunOutcome, offer: Record<string, unknown>, ctx?: RunContext): Promise<void> {
+    let final = outcome;
+    const slot = this.snapshot().slot;
+    const sealResult = outcome.kind === 'result' && this.opts.publisher &&
+      slot && same(slot.fence, fence) && !slot.stopReason;
+    if (sealResult) {
+      try {
+        const published = await this.opts.publisher!.publish(
+          Object.freeze({ ...fence }), structuredClone(offer), ctx, structuredClone(outcome));
+        final = validOutcome(published) ? published : failed('artifact_publish_failed');
+      } catch {
+        final = failed('artifact_publish_failed');
+      }
+    }
+    await this.finishAndRelease(fence, final);
+  }
+
   private unknown(fence: RunFence, reason: StopReason = 'execution_interrupted'): void {
     this.change((state) => {
       if (!state.slot || !same(state.slot.fence, fence)) return false;
@@ -462,7 +496,7 @@ export class DurableExecutor {
           try {
             let late: RunHandle;
             try { late = await pending; } catch { return; }
-            const live = this.attach(run, late);
+            const live = this.attach(run, late, ctx);
             let outcome: RunOutcome;
             try { outcome = await this.quiesce(live); }
             catch {
@@ -470,7 +504,7 @@ export class DurableExecutor {
               return;
             }
             if (!this.faulted) {
-              await this.finishAndRelease(run.fence, outcome);
+              await this.publishAndFinish(run.fence, outcome, run.offer, ctx);
               this.completeOldEffects();
             }
           } finally { this.starting = false; }
@@ -480,7 +514,7 @@ export class DurableExecutor {
       return;
     }
     this.starting = false;
-    const live = this.attach(run, handle);
+    const live = this.attach(run, handle, ctx);
     // A consume/tick storage failure can happen while start is awaiting the driver.
     if (this.faulted) {
       try { await this.quiesce(live); } catch { this.notifyFault(); }
@@ -492,8 +526,8 @@ export class DurableExecutor {
     });
   }
 
-  private attach(run: DurableRun, handle: RunHandle): LiveRun {
-    const live: LiveRun = { fence: { ...run.fence }, handle, closedFault: false, closure: handle.closed };
+  private attach(run: DurableRun, handle: RunHandle, ctx?: RunContext): LiveRun {
+    const live: LiveRun = { fence: { ...run.fence }, handle, closedFault: false, closure: handle.closed, ctx };
     // Callbacks only update their own captured handle, never SQL or a newer run.
     void live.closure.then((outcome) => {
       try {
@@ -527,7 +561,7 @@ export class DurableExecutor {
     let outcome: RunOutcome;
     try { outcome = await this.quiesce(live); }
     catch { this.unknown(run.fence); return; }
-    await this.finishAndRelease(run.fence, outcome);
+    await this.publishAndFinish(run.fence, outcome, run.offer, live.ctx);
   }
 
   /**
@@ -546,7 +580,7 @@ export class DurableExecutor {
         if (!run) break;
         const live = this.live;
         if (live && !same(live.fence, run.fence)) throw new Error('Executor live fence mismatch');
-        if (live?.outcome) { await this.finishAndRelease(run.fence, live.outcome); continue; }
+        if (live?.outcome) { await this.publishAndFinish(run.fence, live.outcome, run.offer, live.ctx); continue; }
         if (run.phase === 'prepared') {
           if (!this.opts.driver) { await this.finishAndRelease(run.fence, failed('driver_unavailable')); continue; }
           await this.start(run);
