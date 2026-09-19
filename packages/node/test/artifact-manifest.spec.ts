@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { newKeyPair, publicKeyFromPrivate, jcs } from '@qlong/core';
 import {
-  buildManifest, signManifest, verifyManifest, manifestDigest,
+  buildManifest, signManifest, verifyManifest, manifestDigest, verifyArtifactDelivery,
   type ArtifactManifest,
 } from '../src/collab/artifact-manifest.js';
 
@@ -109,5 +109,103 @@ describe('manifestDigest(JCS 规范化摘要 = 判定关联键)', () => {
     const pub = publicKeyFromPrivate(priv);
     const m = buildManifest(TASK, 1, NODE, 3, [{ path: 'a.txt', bytes: Buffer.from('A') }]);
     expect(verifyManifest(signManifest(m, priv), pub)).toBe(true);
+  });
+});
+
+describe('verifyArtifactDelivery(牵头方完整性判定:验签+钥标识+重新哈希+契约完整性)', () => {
+  const reportBytes = Buffer.from('# report body');
+  const logBytes = Buffer.from('log-lines');
+  const OTHER_NODE = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+
+  function setup() {
+    const { priv, publicKey } = newKeyPair();
+    const files = [
+      { path: 'dist/report.md', bytes: reportBytes },
+      { path: 'build.log', bytes: logBytes },
+    ];
+    const manifest = buildManifest(TASK, 1, NODE, 3, files);
+    const signed = signManifest(manifest, priv);
+    const contract = { deliverables: [{ path: 'dist/report.md' }, { path: 'build.log' }] };
+    return { priv, publicKey, signed, manifest, files, contract };
+  }
+
+  it('全部满足(验签通过+钥标识匹配+逐产物重新哈希+契约完整)→ true', () => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: s.files, contract: s.contract,
+    })).toBe(true);
+  });
+
+  it('清单 node_id 与信封署名者不符 → false(防他人清单冒充本次交付)', () => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: OTHER_NODE, fromKeyEpoch: 3,
+      collected: s.files, contract: s.contract,
+    })).toBe(false);
+  });
+
+  it('清单 key_epoch 与信封署名者不符 → false', () => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 4,
+      collected: s.files, contract: s.contract,
+    })).toBe(false);
+  });
+
+  it('错误公钥(非登记钥)→ false(验签防线)', () => {
+    const s = setup();
+    const stranger = newKeyPair();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: stranger.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: s.files, contract: s.contract,
+    })).toBe(false);
+  });
+
+  it('收取字节被篡改(等长但哈希不符)→ false(传输损坏/掉包)', () => {
+    const s = setup();
+    // 等长篡改(13 字节):size 防线不拦,专验重新哈希防线
+    const tampered = s.files.map((f) => (f.path === 'dist/report.md' ? { path: f.path, bytes: Buffer.from('# REPORT BODY') } : f));
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: tampered, contract: s.contract,
+    })).toBe(false);
+  });
+
+  it('清单声明的产物未收到(缺件)→ false', () => {
+    const s = setup();
+    const partial = s.files.filter((f) => f.path !== 'build.log');
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: partial, contract: { deliverables: [{ path: 'dist/report.md' }] },
+    })).toBe(false);
+  });
+
+  it('契约声明的 deliverable 不在清单(契约不完整)→ false', () => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: s.files, contract: { deliverables: [{ path: 'dist/report.md' }, { path: 'extra.md' }] },
+    })).toBe(false);
+  });
+
+  it('清单 size 被改后重签(哈希仍符但 size 不符)→ false(size 独立校验)', () => {
+    const { priv, publicKey } = newKeyPair();
+    const files = [{ path: 'a.txt', bytes: Buffer.from('AAA') }];
+    const m = buildManifest(TASK, 1, NODE, 3, files);
+    const bad: ArtifactManifest = { ...m, deliverables: [{ ...m.deliverables[0]!, size: 999 }] };
+    const signed = signManifest(bad, priv); // 重签使签名自洽,唯 size 与真实字节不符
+    expect(verifyArtifactDelivery({
+      signed, pub: publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: files, contract: { deliverables: [{ path: 'a.txt' }] },
+    })).toBe(false);
+  });
+
+  it('无契约(contract 缺席)→ 仅验签+重新哈希,完整即 true', () => {
+    const s = setup();
+    expect(verifyArtifactDelivery({
+      signed: s.signed, pub: s.publicKey, fromNodeId: NODE, fromKeyEpoch: 3,
+      collected: s.files,
+    })).toBe(true);
   });
 });

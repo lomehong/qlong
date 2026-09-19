@@ -17,6 +17,7 @@ import { LeadTaskMachine, type LeadAction, type LeadRecord, type LeadState, type
 import type { Outbound } from '../wire.js';
 import { taskReportEffect } from './report.js';
 import type { EffectIntent, NodeRuntimeStore, RuntimeJson, RuntimeState, RuntimeTransition } from './store.js';
+import { manifestDigest, verifyArtifactDelivery, type SignedManifest } from '../collab/artifact-manifest.js';
 
 const LEAD_STATE_PREFIX = 'lead:v2:';
 const LEAD_STATES: readonly string[] = [
@@ -79,6 +80,10 @@ export interface DurableLeadOptions {
   selectTarget?: TargetSelector;
   /** PROJECT 验收判据注入(缺省用机器默认:project 拒绝、aid 兼容 acceptance_results)。 */
   validateAcceptance?: (resultBody: Record<string, unknown>) => boolean;
+  /** E2 端口:收取某任务产物字节(实现走 git fetch+临时目录+读盘,e2d 适配 payload-git collectArtifacts);缺省 → PROJECT 无法预置判定 → fail-closed(ARTIFACT-ACCEPTANCE §4.3)。 */
+  collectArtifacts?: (repo: string, taskId: string) => Promise<{ ok: boolean; files?: ReadonlyArray<{ path: string; bytes: Uint8Array }>; reason?: string }>;
+  /** E2 端口:解析执行方登记公钥(实现走 registry HTTP GET /v1/nodes/{id}/pubkey?epoch=);缺省 → 无法验签 → fail-closed。 */
+  resolvePubkey?: (nodeId: string, keyEpoch: number) => Promise<Uint8Array | undefined>;
   onFault?: () => void;
 }
 
@@ -115,6 +120,12 @@ function validTask(value: unknown): value is DurableLeadTask {
       !optionalDeadline(value.drainUntil) || !optionalDeadline(value.cancelWaitUntil)) return false;
   if (value.drainClosed !== undefined && typeof value.drainClosed !== 'boolean') return false;
   if (value.completedBeforeCancel !== undefined && typeof value.completedBeforeCancel !== 'boolean') return false;
+  // E2:contract 为可选新字段(§4.4)——旧状态无 contract 视为 undefined 不判损坏;存在则须为对象且 deliverables(若在)为数组。
+  if (value.contract !== undefined) {
+    if (!record(value.contract)) return false;
+    const deliverables = (value.contract as { deliverables?: unknown }).deliverables;
+    if (deliverables !== undefined && !Array.isArray(deliverables)) return false;
+  }
   for (const scope of Object.values(value.excluded)) if (scope !== 'permanent' && scope !== 'once') return false;
   if (value.attempt === 0) {
     return value.state === 'drafting' && value.target === null && value.task_seq === 0;
@@ -125,6 +136,8 @@ function validTask(value: unknown): value is DurableLeadTask {
 export class DurableLead {
   private readonly params: QlongParams;
   private faulted = false;
+  /** E2:同步判定缓存(键=内联清单 JCS 摘要);drain 异步预置写入,机器回调同步读取(§4.3)。内存态,重启清空 → 重投由 drain 重新预置(幂等,§7)。 */
+  private readonly verdicts = new Map<string, boolean>();
 
   constructor(private readonly opts: DurableLeadOptions) {
     if (opts.store.nodeId !== opts.nodeId || !opts.teamId) throw new TypeError('Invalid lead identity');
@@ -162,11 +175,33 @@ export class DurableLead {
   /** 从持久状态复原一台纯机器(深拷贝,避免别名污染已持久快照)。 */
   private machine(task: DurableLeadTask): LeadTaskMachine {
     const machine = new LeadTaskMachine({
-      task_id: task.task_id, kind: task.kind, params: this.params, validateAcceptance: this.opts.validateAcceptance,
+      task_id: task.task_id, kind: task.kind, params: this.params,
+      // E2:显式注入优先(测试/替代信任根);缺省用 per-task 验收器(闭包捕获 task,§4.3/§5)。
+      validateAcceptance: this.opts.validateAcceptance ?? this.projectValidator(task),
     });
     machine.rec = structuredClone(task) as LeadRecord;
     machine.terminal = TERMINAL_STATES.includes(task.state);
     return machine;
+  }
+
+  /**
+   * per-task 验收器(闭包捕获 task,机器签名不变;ARTIFACT-ACCEPTANCE §4.3):
+   *  - aid:复制机器 v1 兼容(acceptance_results 缺省 → true;含 pass:false → false),绝不查判定缓存(不回归);
+   *  - project:从 body 内联清单复算 JCS 摘要,仅当 drain 已预置判定 true 才放行;无判定/无清单 → fail-closed false。
+   * 纯同步读缓存,重 I/O 全在 stageArtifactVerification 预置完成(§1.3)。
+   */
+  private projectValidator(task: DurableLeadTask): (body: Record<string, unknown>) => boolean {
+    if (task.kind !== 'project') {
+      return (body) => {
+        const arr = body.acceptance_results;
+        if (!Array.isArray(arr)) return true;
+        return arr.every((x) => (x as { pass?: boolean } | null)?.pass !== false);
+      };
+    }
+    return (body) => {
+      const digest = manifestDigestOf(body);
+      return digest !== undefined && this.verdicts.get(digest) === true;
+    };
   }
 
   /** 追加一条上报意图;task_seq 由调用方在状态净变化时自增后传入。 */
@@ -385,6 +420,41 @@ export class DurableLead {
   }
 
   /**
+   * drain 异步预置(ARTIFACT-ACCEPTANCE §4.3):对本节点牵头的 project 任务 task.result,收取产物字节 + 解析
+   * 执行方登记公钥 → 纯判定(verifyArtifactDelivery:验签+钥标识+重新哈希+契约完整性)→ 存同步判定缓存,供
+   * 机器回调同步读取。best-effort:端口缺席 / 内联清单缺失 / I/O 失败 / 任何异常 → 不写判定 → 机器 fail-closed
+   * (绝不误判 done,也绝不把预置失败放大为节点 fault)。仅 project+task.result 触发;aid / 其他信封 → no-op。
+   * 幂等:同一内联清单摘要已预置则跳过 I/O(重投不重复收取,§7)。由 createDurableNode 的 drain 在 consume 前 await(e2d)。
+   */
+  async stageArtifactVerification(envelope: EnvelopeV1): Promise<void> {
+    try {
+      if (envelope.type !== 'task.result' || envelope.to.node_id !== this.opts.nodeId) return;
+      if (!isUuid(envelope.task_id)) return;
+      const collect = this.opts.collectArtifacts;
+      const resolve = this.opts.resolvePubkey;
+      if (!collect || !resolve) return; // 端口缺席 → 无法预置 → 机器 fail-closed
+      const signed = inlineSignedManifest(envelope.body);
+      if (!signed) return; // 无合法内联清单 → 机器 fail-closed
+      const digest = manifestDigest(signed.manifest);
+      if (this.verdicts.has(digest)) return; // 幂等:已预置(重投)不重复 I/O
+      let task: DurableLeadTask | undefined;
+      try { task = this.decode(this.opts.store.state(leadStateKey(envelope.task_id))); } catch { return; }
+      if (!task || task.kind !== 'project') return; // aid / 未牵头 → 跳过
+      const repo = inlineRepo(envelope.body);
+      if (repo === undefined) return;
+      const collected = await collect(repo, envelope.task_id);
+      if (!collected.ok || !collected.files) return; // 收取失败(可能瞬态)→ 不缓存,重投再试
+      const pub = await resolve(envelope.from.node_id, envelope.from.key_epoch);
+      if (!pub) return; // 公钥不可解析 → 不缓存,重投再试
+      const verdict = verifyArtifactDelivery({
+        signed, pub, fromNodeId: envelope.from.node_id, fromKeyEpoch: envelope.from.key_epoch,
+        collected: collected.files, contract: task.contract,
+      });
+      this.verdicts.set(digest, verdict); // 确定性判定(通过/否决)入缓存,供机器同步读
+    } catch { /* best-effort:任何异常 → 无判定 → 机器 fail-closed,绝不放大为节点 fault */ }
+  }
+
+  /**
    * 消费一条指向本节点、且本节点牵头的入站信封。授权/新鲜度复核后交机器转移;无论是否转移,都原子记录
    * 收件箱判定(R1 去重 + 保管复核),与执行方 consume 同一模式。未牵头的任务在此忽略(路由交由 B1d 泵)。
    */
@@ -423,4 +493,34 @@ export class DurableLead {
       });
     });
   }
+}
+
+/** 取 result body 内联产物条目(artifacts[0]);形状不符 → undefined。 */
+function inlineArtifact(body: Record<string, unknown>): Record<string, unknown> | undefined {
+  const arts = body.artifacts;
+  if (!Array.isArray(arts) || arts.length === 0) return undefined;
+  const first = arts[0];
+  return record(first) ? first : undefined;
+}
+
+/** 内联签名清单(artifacts[0].manifest):须 ed25519 + sig 字符串 + manifest.deliverables 数组,否则 undefined(fail-closed)。 */
+function inlineSignedManifest(body: Record<string, unknown>): SignedManifest | undefined {
+  const art = inlineArtifact(body);
+  if (!art || !record(art.manifest)) return undefined;
+  const signed = art.manifest as Record<string, unknown>;
+  if (signed.alg !== 'ed25519' || typeof signed.sig !== 'string' || !record(signed.manifest)) return undefined;
+  if (!Array.isArray((signed.manifest as Record<string, unknown>).deliverables)) return undefined;
+  return art.manifest as unknown as SignedManifest;
+}
+
+/** 内联产物仓库(artifacts[0].repo);非字符串 → undefined。 */
+function inlineRepo(body: Record<string, unknown>): string | undefined {
+  const art = inlineArtifact(body);
+  return art && typeof art.repo === 'string' ? art.repo : undefined;
+}
+
+/** 内联清单的 JCS 摘要 = 判定关联键(§4.3);无合法内联清单 → undefined。 */
+function manifestDigestOf(body: Record<string, unknown>): string | undefined {
+  const signed = inlineSignedManifest(body);
+  return signed ? manifestDigest(signed.manifest) : undefined;
 }

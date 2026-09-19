@@ -54,6 +54,8 @@ export interface LeadRecord {
   completedBeforeCancel?: boolean;
   resultBody?: Record<string, unknown>;
   cancelReason?: 'user' | 'reclaim' | 'acceptance_failed' | 'project_aborted';
+  /** E2:本任务契约(派发时从 offerBody.contract 持久化);牵头验收器据此核对交付完整性(ARTIFACT-ACCEPTANCE §4.4)。仅 project 有意义。 */
+  contract?: { deliverables?: Array<{ path?: string; artifact?: string; desc?: string }>; acceptance?: unknown[] };
 }
 
 export type TimerName = 'offer_ttl' | 'lease' | 'drain' | 'cancel_wait';
@@ -136,6 +138,8 @@ export class LeadTaskMachine {
     this.rec.target = target;
     this.rec.acceptedThisAttempt = false;
     this.rec.state = 'offered';
+    const contract = asContract(offerBody.contract); // E2:契约线入(§4.4),供牵头验收器核对完整性
+    if (contract !== undefined) this.rec.contract = contract;
     const ttl = typeof offerBody.offer_ttl_ms === 'number' ? offerBody.offer_ttl_ms : defaultOfferTtlMs(this.rec.kind, this.params);
     this.rec.offerTtlUntil = now + ttl;
     delete this.rec.drainUntil;
@@ -154,6 +158,8 @@ export class LeadTaskMachine {
     this.rec.target = target;
     this.rec.acceptedThisAttempt = false;
     this.rec.state = 'offered';
+    const contract = asContract(offerBody.contract); // E2:改派同样线入契约(值稳定,幂等)
+    if (contract !== undefined) this.rec.contract = contract;
     const ttl =
       typeof offerBody.offer_ttl_ms === 'number'
         ? offerBody.offer_ttl_ms
@@ -472,4 +478,10 @@ export class LeadTaskMachine {
 /** reject/fail 码统一走 core 登记表归一(未知码按 other,不报错;评审 M1-ARCH:避免语义分叉) */
 function normalizeFailCodeOrReject(raw: unknown): { code: string } {
   return { code: normalizeFailCode(typeof raw === 'string' ? raw : 'other').code };
+}
+
+/** E2:从 offerBody.contract 提取可持久化契约(仅普通对象;非法 → undefined,绝不污染 rec)。 */
+function asContract(value: unknown): LeadRecord['contract'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  return value as LeadRecord['contract'];
 }

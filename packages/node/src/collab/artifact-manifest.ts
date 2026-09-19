@@ -81,3 +81,48 @@ export function verifyManifest(signed: SignedManifest, pub: Uint8Array): boolean
 export function manifestDigest(manifest: ArtifactManifest): string {
   return hashBytes(te.encode(jcs(manifest)));
 }
+
+/** 契约声明的单条交付物(01 §5.2:path 或 artifact 命名 + desc);完整性核对按 path 匹配清单。 */
+export interface ContractDeliverable {
+  path?: string;
+  artifact?: string;
+  desc?: string;
+}
+
+/**
+ * 牵头方对一次交付的**完整性判定**(纯逻辑,无 I/O;调用方已 collect 并读取产物字节)。
+ * 四道防线全过才 true(fail-closed,ARTIFACT-ACCEPTANCE §4.3):
+ *  1. 清单钥标识(node_id/key_epoch)== 信封署名者 —— 防他人清单冒充本次交付;
+ *  2. ed25519 验签(登记公钥)—— 防清单伪造/篡改;
+ *  3. 逐 manifest deliverable 在收取集存在且 sha256+size 一致 —— 防传输损坏/掉包/缺件;
+ *  4. 契约声明的每条 path deliverable 都在清单 —— 防契约不完整(少交)。
+ * 收取集的多余文件(不在清单)忽略:清单是权威交付集,契约是完整性下界。
+ */
+export function verifyArtifactDelivery(input: {
+  signed: SignedManifest;
+  pub: Uint8Array;
+  fromNodeId: string;
+  fromKeyEpoch: number;
+  collected: ReadonlyArray<{ path: string; bytes: Uint8Array }>;
+  contract?: { deliverables?: ContractDeliverable[] };
+}): boolean {
+  const { signed, pub, fromNodeId, fromKeyEpoch, collected, contract } = input;
+  // 1. 清单钥标识 == 信封署名者
+  if (signed.manifest.node_id !== fromNodeId || signed.manifest.key_epoch !== fromKeyEpoch) return false;
+  // 2. ed25519 验签(登记公钥)
+  if (!verifyManifest(signed, pub)) return false;
+  // 3. 逐 deliverable 重新哈希:收取集存在 + size + sha256 一致
+  const byPath = new Map(collected.map((c) => [c.path, c.bytes]));
+  for (const d of signed.manifest.deliverables) {
+    const bytes = byPath.get(d.path);
+    if (bytes === undefined) return false; // 清单声明但未收到 → 缺件
+    if (bytes.length !== d.size) return false; // 尺寸不符
+    if (hashBytes(bytes) !== d.sha256) return false; // 重新哈希不符 → 损坏/掉包
+  }
+  // 4. 契约完整性:每条声明 path deliverable 都在清单
+  const manifestPaths = new Set(signed.manifest.deliverables.map((d) => d.path));
+  for (const c of contract?.deliverables ?? []) {
+    if (typeof c?.path === 'string' && !manifestPaths.has(c.path)) return false;
+  }
+  return true;
+}

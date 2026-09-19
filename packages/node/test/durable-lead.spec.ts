@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_PARAMS, lostAfterMs, newId, type EnvelopeV1 } from '@qlong/core';
+import { DEFAULT_PARAMS, lostAfterMs, newId, newKeyPair, type EnvelopeV1 } from '@qlong/core';
 import { DurableLead, leadStateKey, type DurableLeadOptions } from '../src/runtime/lead.js';
 import { NodeRuntimeStore, type RuntimeJson } from '../src/runtime/store.js';
 import { DurableTaskReporter, TASK_REPORT_KIND, type TaskReport, type TaskReportSink } from '../src/runtime/report.js';
 import type { Outbound } from '../src/wire.js';
 import { env, fixture, LOCAL, open, OTHER } from './runtime-store-helpers.js';
+import { buildManifest, signManifest } from '../src/collab/artifact-manifest.js';
 
 const TEAM = 'lead-test-team';
 const EXEC = '20000000-0000-4000-8000-000000000009';
@@ -455,5 +456,184 @@ describe('DurableLead owner 强制改派适配器(E3/OWNER-COMMAND §4.4: redisp
     f.runtime.transition(key, f.runtime.state(key)!.revision, () => ({ state: saved as RuntimeJson }));
     const lead = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal });
     expect(() => lead.redispatch(taskId, now)).toThrow('recovery required');
+  });
+});
+
+describe('E2c 契约线入(LeadRecord.contract 持久化,ARTIFACT-ACCEPTANCE §4.4)', () => {
+  it('dispatch 把 offerBody.contract 持久化入牵头状态(project),snapshot 可读回', () => {
+    const f = setup();
+    const taskId = newId();
+    const contract = { deliverables: [{ path: 'dist/report.md', desc: '报告' }], acceptance: [{ check: 'c1' }] };
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract });
+    expect(f.lead.snapshot(taskId)?.contract).toEqual(contract);
+  });
+
+  it('contract 跨 store 重开幸存(持久于 RuntimeJson,validTask 容错新可选字段)', () => {
+    const f = setup();
+    const taskId = newId();
+    const contract = { deliverables: [{ path: 'a.txt' }, { path: 'b.txt' }] };
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract });
+    const reopened = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal });
+    expect(reopened.snapshot(taskId)?.contract).toEqual(contract); // 未抛错 = validTask 容错;值幸存 = 持久
+  });
+
+  it('无 contract 的派发(旧状态/aid)→ snapshot.contract undefined,不判损坏', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody()); // 无 contract 字段
+    expect(f.lead.snapshot(taskId)?.contract).toBeUndefined();
+  });
+});
+
+describe('E2c 牵头验收器(stageArtifactVerification 异步预置 + machine(task) per-task 同步读判定,ARTIFACT-ACCEPTANCE §4.3)', () => {
+  const execKey = newKeyPair();
+  const reportBytes = Buffer.from('# report body');
+
+  // 执行方签名交付:manifest 由 EXEC(key_epoch=1,与 receipt from 一致)签名并内联于 result.body.artifacts[0]。
+  function signedDelivery(
+    taskId: string,
+    files: ReadonlyArray<{ path: string; bytes: Uint8Array }> = [{ path: 'dist/report.md', bytes: reportBytes }],
+  ) {
+    const signed = signManifest(buildManifest(taskId, 1, EXEC, 1, files), execKey.priv);
+    return { files, signed };
+  }
+  const deliveryBody = (taskId: string, signed: unknown): Record<string, unknown> =>
+    ({ status: 'done', artifacts: [{ repo: 'https://git.example/repo', branch: `qlong/${taskId}`, manifest: signed }] });
+  const contract1 = { deliverables: [{ path: 'dist/report.md' }] };
+  // 端口双替身:collect 回内联清单声明的字节;resolvePubkey 回 EXEC 登记公钥。
+  const happyPorts = (files: ReadonlyArray<{ path: string; bytes: Uint8Array }>) =>
+    ({ collectArtifacts: vi.fn(async () => ({ ok: true, files })), resolvePubkey: vi.fn(async () => execKey.publicKey) });
+
+  it('T1 project task.result:预置判定 true(验签+钥标识+重新哈希+契约完整)→ 机器同步读缓存 → done', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const f = setup(happyPorts(files));
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    await f.lead.stageArtifactVerification(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'running' }); // 预置不消费
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done', task_seq: 3 });
+  });
+
+  it('T2 project task.result 未预置判定 → 机器 fail-closed → acceptance_failed(reclaiming),绝不误判 done', () => {
+    const taskId = newId();
+    const { signed } = signedDelivery(taskId);
+    const f = setup();
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, offerBody('project'));
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.deliver(receipt('task.result', taskId, 1, deliveryBody(taskId, signed)));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+    expect(f.lead.snapshot(taskId)?.history.at(-1)?.outcome).toBe('acceptance_failed');
+  });
+
+  it('T3 project 预置:契约声明的 deliverable 不在清单 → 判定 false → acceptance_failed(契约不完整)', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId); // 清单仅 dist/report.md
+    const f = setup(happyPorts(files));
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: { deliverables: [{ path: 'dist/report.md' }, { path: 'build.log' }] } });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    await f.lead.stageArtifactVerification(result);
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+  });
+
+  it('T4 aid task.result 无 acceptance_results → v1 兼容放行 done(aid 不查判定缓存,不回归)', () => {
+    const taskId = newId();
+    const f = setup();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.deliver(receipt('task.result', taskId, 1, { status: 'done' }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done' });
+  });
+
+  it('T5 aid acceptance_results 含 pass:false → v1 兼容否决 → acceptance_failed', () => {
+    const taskId = newId();
+    const f = setup();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.deliver(receipt('task.result', taskId, 1, { status: 'done', acceptance_results: [{ pass: false }] }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+  });
+
+  it('T6 显式注入 validateAcceptance 优先于 E2 验收器(project 无预置也 done,§5 注入优先级)', () => {
+    const taskId = newId();
+    const f = setup({ validateAcceptance: () => true });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, offerBody('project'));
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.deliver(receipt('task.result', taskId, 1, { status: 'done' }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done' });
+  });
+
+  it('T7 stageArtifactVerification best-effort:端口抛错 → 不抛/不 fault → 消费后 acceptance_failed', async () => {
+    const taskId = newId();
+    const { signed } = signedDelivery(taskId);
+    const f = setup({ collectArtifacts: vi.fn(async () => { throw new Error('git down'); }), resolvePubkey: vi.fn(async () => execKey.publicKey) });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, offerBody('project'));
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    await expect(f.lead.stageArtifactVerification(result)).resolves.toBeUndefined();
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+    expect(f.lead.snapshot(taskId)).not.toBeNull(); // lead 未 fault,snapshot 仍可用
+  });
+
+  it('T8 stageArtifactVerification 仅对 project+task.result 触发:aid result / project 非 result → no-op(不收产物)', async () => {
+    const collectArtifacts = vi.fn(async () => ({ ok: true, files: [] }));
+    const resolvePubkey = vi.fn(async () => execKey.publicKey);
+    const f = setup({ collectArtifacts, resolvePubkey });
+    const aidTask = newId();
+    f.lead.originate(aidTask, 'aid');
+    f.lead.dispatch(aidTask, EXEC, offerBody());
+    f.deliver(receipt('task.accept', aidTask, 1, { lease_ms: LEASE }));
+    await f.lead.stageArtifactVerification(receipt('task.result', aidTask, 1, { status: 'done' }));
+    expect(collectArtifacts).not.toHaveBeenCalled(); // aid 跳过
+    const projTask = newId();
+    f.lead.originate(projTask, 'project');
+    f.lead.dispatch(projTask, EXEC, offerBody('project'));
+    f.deliver(receipt('task.accept', projTask, 1, { lease_ms: LEASE }));
+    await f.lead.stageArtifactVerification(receipt('task.progress', projTask, 1, { seq: 1 }));
+    expect(collectArtifacts).not.toHaveBeenCalled(); // 非 task.result 跳过
+  });
+
+  it('T9 判定缓存为内存态(重启清空):另建实例未预置 → 同 result 消费 fail-closed(不复活陈旧判定)', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const f = setup(happyPorts(files));
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    await f.lead.stageArtifactVerification(result); // 实例 A 缓存判定 true
+    const restarted = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal }); // 模拟重启:空缓存
+    expect(f.runtime.receive(result)).toBe('new');
+    restarted.consume(result, true);
+    expect(restarted.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
+  });
+
+  it('T10 project 预置:收取字节被篡改(等长,重新哈希不符)→ 判定 false → acceptance_failed', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const tampered = files.map((x) => ({ path: x.path, bytes: Buffer.from('# REPORT BODY') })); // 等长篡改
+    const f = setup({ collectArtifacts: vi.fn(async () => ({ ok: true, files: tampered })), resolvePubkey: vi.fn(async () => execKey.publicKey) });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1, deliveryBody(taskId, signed));
+    await f.lead.stageArtifactVerification(result);
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
   });
 });
