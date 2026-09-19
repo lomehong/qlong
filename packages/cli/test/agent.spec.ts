@@ -31,7 +31,9 @@ describe('qlong agent(粘合层:每行输入直调本机 dsh)', () => {
     });
     expect(code).toBe(0);
     expect(execLog).toHaveLength(2);
-    expect(execLog[0]).toMatchObject({ cmd: 'dsh', prompt: '帮我打印 pong' });
+    // 'dsh' 标记被解析为本机运行时真实入口(node + lib/bin.js,绕开 .cmd 垫片)
+    expect(execLog[0]!.cmd).toBe(process.execPath);
+    expect(execLog[0]!.prompt).toBe('帮我打印 pong');
     expect(execLog[1]!.prompt).toBe('再打印一行 good');
     expect(out.join('')).toContain('✔ 完成');
     expect(out.join('')).toContain('再见');
