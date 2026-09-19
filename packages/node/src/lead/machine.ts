@@ -355,6 +355,8 @@ export class LeadTaskMachine {
     if (timer === 'offer_ttl' && this.rec.state === 'offered') {
       // R2/R4:expired 也先撤销、后改派(评审 I-08)
       this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'expired' });
+      // R8/T6(同机演练发现):静默目标进排除表 —— 否则死节点被反复选中直至预算耗尽
+      if (this.rec.target) this.rec.excluded[this.rec.target] = 'once';
       return this.beginReclaim('reclaim', now);
     }
     if (timer === 'lease' && this.rec.state === 'running') {
@@ -362,8 +364,9 @@ export class LeadTaskMachine {
       if (this.rec.leaseDeadline !== undefined && now < this.rec.leaseDeadline) {
         return [{ kind: 'schedule', timer: 'lease', atMs: this.rec.leaseDeadline }];
       }
-      // R3 判 lost → reclaim(R4)
+      // R3 判 lost → reclaim(R4);R8/T6:失联目标同样进排除表
       this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'lost' });
+      if (this.rec.target) this.rec.excluded[this.rec.target] = 'once';
       const actions = this.beginReclaim('reclaim', now);
       return [{ kind: 'audit', event: 'reclaim', reason: 'lease lost' }, ...actions];
     }

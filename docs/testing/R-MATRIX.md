@@ -67,7 +67,7 @@
 | T3 | 单 exec 归属:stale_attempt 守卫 + lead+attempt 身份匹配 + busy 串行 | 双 lead 竞争同一执行方 | 只认高水位,单槽不双跑 | durable-executor • C2b 组 |
 | T4 | 单机自洽:自派单 offer/renew/cancel 路由进本机执行半 | 单龙 originate→self | 全链 done,不滞留 | durable-node.spec • 单机形态自派单闭环 |
 | ⚠️ T5 | 活孤儿安全接管(依赖 E1 进程身份证据;E1 已跳过) | 存活孤儿 + 接管 | 现状 unknown/recovery_required(安全但不可自动接管) | 无——演练人工注入项 |
-| 🔴 T6 | **R8 排除缺口(2026-09-19 同机演练发现)**:offer TTL 过期目标不进排除表(applyExclusion 只挂 reject/fail) | 死节点目标过期 | 应 excluded[target]='once' 避开,实际反复选中直至 escalate | 演练实录(走查 §6.0);TDD 修复待做 |
+| T6 | R8 排除:offer TTL 过期 / 租约 lost 的静默目标进排除表('once')✅ 已修(2026-09-19 同机演练发现,TDD) | 死节点目标过期/失联 | excluded[target]='once',重派避开死节点 | lead.spec • expired/lost 静默目标进排除表;演练实录(走查 §6.0) |
 | T7 | 接管撞单槽:重派单被仍在执行原 attempt 的节点 policy_denied(单槽 + 租约未到期,行为正确) | 接管窗口与原租约重叠 | 拒单不双跑;接管节奏应避开原租约或先 cancel | 演练实录(走查 §6.0);durable-executor • busy 串行 |
 
 ## 6. 集群归属(D1 claim 注册表 + 中继)

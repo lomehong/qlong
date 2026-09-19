@@ -104,6 +104,23 @@ describe('牵头方状态机:R4/R7/R8/D25', () => {
     expect(m.rec.state).toBe('done');
   });
 
+  it('expired/lost 静默目标进排除表(R8/T6):重派必须避开失联节点', () => {
+    // 过期路径:offer TTL 到期,target 从未接受 —— 同机演练发现死节点被反复选中(走查 §6.0)
+    const m1 = mk();
+    m1.dispatchTo(B, offerBody(), 0);
+    m1.onTimer('offer_ttl', 60_001);
+    m1.onTimer('drain', 60_001 + 30_000);
+    expect(m1.rec.excluded[B]).toBe('once');
+
+    // lost 路径:接受后租约死线无心跳(执行方静默)
+    const m2 = mk();
+    m2.dispatchTo(C, offerBody(), 0);
+    m2.onMessage('task.accept', C, 1, { lease_ms: 300000 }, 0);
+    m2.onTimer('lease', 230_000);
+    m2.onTimer('drain', 230_000 + 30_000);
+    expect(m2.rec.excluded[C]).toBe('once');
+  });
+
   it('expired → 也先撤销后改派(R2/R4,评审 I-08);从未接受计 dispatch_rounds', () => {
     const m = mk();
     m.dispatchTo(B, offerBody(), 0);
