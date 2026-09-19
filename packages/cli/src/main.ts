@@ -14,6 +14,7 @@ import { QLONG_USER_AGENT } from '@qlong/core';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { readLocalDshCmd } from './dsh-cmd.js';
 
 try {
@@ -401,6 +402,27 @@ if (cmd === 'solo') {
   // 自然排空退出(不 process.exit,同 enroll 注)
 }
 
+if (cmd === 'agent') {
+  // 单机的"龙"对话入口(粘合层):你输入目标,直接调本机 dsh 运行时执行。
+  // Agent 的实现就是 dsh 本身;qlong 只做粘合 —— 装 dsh、管工作区、展示输出。
+  const { runAgentSession } = await import('./agent.js');
+  const { readLocalDshCmd } = await import('./dsh-cmd.js');
+  const sflag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  const workdir = sflag('--workdir') ?? join(qlongHome(), 'agent-workspace');
+  mkdirSync(workdir, { recursive: true });
+  const localDsh = readLocalDshCmd(qlongHome());
+  const code = await runAgentSession({
+    workdir,
+    dshCmd: localDsh ?? sflag('--dsh-cmd'),
+    profile: sflag('--profile') ?? undefined,
+  });
+  process.exitCode = code;
+  // 自然排空退出
+}
+
 if (cmd === 'server') {
   const { startQlongServer } = await import('./server.js');
   const { serverStorageOptions } = await import('./server-storage-options.js');
@@ -638,8 +660,8 @@ if (cmd === 'doctor') {
 }
 
 // 已匹配命令的块走"自然排空退出"(见 enroll 注);仅未知命令落到这里。
-const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate', 'solo'];
+const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'solo', 'agent', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate'];
 if (!KNOWN_COMMANDS.includes(cmd)) {
-  console.log('usage: qlong <demo|takeover|enroll|join|run|solo|service|server|doctor|status|tasks|task|lead|migrate>');
+  console.log('usage: qlong <demo|takeover|enroll|join|run|solo|agent|service|server|doctor|status|tasks|task|lead|migrate>');
   process.exit(2);
 }
