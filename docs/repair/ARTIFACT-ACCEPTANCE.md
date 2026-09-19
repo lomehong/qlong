@@ -13,6 +13,20 @@
 >
 > 本文是**设计**，不是计划文件；实施按 §6 分片走 TDD（RED→GREEN→变异检验 + 独立提交）。
 
+## 0. 实施状态（历史基线 vs 当前能力）
+
+> §2「现状（证据）」与 §3「缺口」表记录的是**设计定稿时**（E2a 之前）的基线，用于说明动机，不表示当前仍缺。
+> 截至当前工作树（HEAD `6bbda76` + 未提交 P0 复核修复）：
+> - **已落地**：e2a 清单/签名/摘要原语、e2b git 集成（pushSignedArtifacts/collectArtifacts）、e2c 牵头验收器
+>   （verifyArtifactDelivery 完整性判定 + LeadRecord.contract 持久化 + per-task 同步判定缓存 + stageArtifactVerification 异步预置）。
+> - **P0 复核加固（本轮，未提交）**：清单绑定 task/attempt/署名者 + 结构准入（validSignedManifest）；成功缓存改为**每任务一份**
+>   「完整信封摘要 + 持久验收上下文 + 判定/在途令牌」，杜绝跨任务/attempt/契约/签名上下文误复用；取消/改派/接管/终态/消费
+>   即回收，异步 I/O 完成后重读持久状态复核上下文；派发/改派对非法契约**改状态前**拒绝（不闭锁节点）；artifact-only 声明
+>   当前无字节映射端口 → 明确判 false（不静默跳过）。
+> - **仍缺（e2d，暂停）**：执行侧产清单、durable per-task 工作区、drain 默认接线、真实 git PROJECT 端到端。
+> - **验证**：node 定向 100 测绿 + 七靶点变异全捕获并字节还原；全仓 **1621 passed | 2 skipped**，七包 typecheck 绿。
+>   P0 出口尚待用户确认后方进入 P1（e2d）。
+
 ## 1. 约束（不可违背）
 
 1. **验收方 ≠ 执行方自证**：牵头方对 `contract.deliverables` 独立复核——**重新哈希**收取到的产物字节、
@@ -126,23 +140,33 @@ interface SignedManifest { alg: 'ed25519'; manifest: ArtifactManifest; sig: stri
    → `verifyManifest(signed, pub)`；false → 判定 false（篡改/伪造清单）。
 5. **重新哈希**收取到的每个 deliverable 文件字节，比对 manifest 的 `sha256+size`；任一不符 → false（传输损坏/掉包）。
 6. **契约完整性**：`task.contract.deliverables` 每条声明产物都在 manifest 且收取成功；缺 → false（契约不符）。
-7. 判定（boolean）存**同步判定缓存**，键 = `manifestDigest = sha256(jcs(manifest))`（执行方内联于 artifacts，牵头方预置时可复算）。
+7. 判定存**每任务至多一份**的同步缓存条目 `verdicts[task_id] = { context, delivery, verdict? }`：`context = sha256(jcs(task_id/attempt/target/kind/state/task_seq/drainClosed/contract))`（持久验收上下文），`delivery = envelopeDigest(信封)`（含内外层签名/repo/msg_id），`verdict` 为布尔判定；无 `verdict` 的条目是异步**在途令牌**。异步 I/O 完成后**重读持久状态并复核 context**，令牌被撤销或上下文变化则丢弃，旧快照绝不回写。
 
-**机器内（同步）** —— `DurableLead.machine(task)` 注入 per-task 验收器（闭包捕获 task，机器签名不变）：
+**机器内（同步）** —— `DurableLead.machine(task, envelope?)` 注入 per-task 验收器（闭包捕获 task + 本次 consume 的信封，机器签名不变）：
 ```
 validateAcceptance: (body) => {
-  if (task.kind !== 'project') return this.defaultAidValidator(body);   // aid 兼容(machine.ts:94-96 语义)
-  const digest = manifestDigestOf(body);                                 // 从 body.artifacts[0].manifest 复算
-  return digest !== undefined && this.verdicts.get(digest) === true;     // 无预置判定 → fail-closed false
+  if (task.kind !== 'project') {                                        // aid 兼容(machine.ts:94-96 语义，不查缓存)
+    const arr = body.acceptance_results;
+    return !Array.isArray(arr) || arr.every((x) => x?.pass !== false);
+  }
+  if (!envelope) return false;                                          // 派发/定时器路径无信封 → 不放行
+  const c = this.verdicts.get(task.task_id);
+  return c?.context === acceptanceContext(task)                         // 持久验收上下文一致
+    && c.delivery === envelopeDigest(envelope)                          // 完整信封一致（防换签名/纪元/repo 借用）
+    && c.verdict === true;                                              // 无预置判定 → fail-closed false
 }
 ```
-—— 纯同步读缓存，重 I/O 全在 drain 预置完成（§1.3）。判定缓存按 (task_id, attempt) 生命周期回收，终态后清理。
+—— 纯同步读缓存，重 I/O 全在 drain 预置完成（§1.3）。缓存按 `acceptanceContext` 回收：任一 context 字段（含 contract/state/drainClosed）变化、取消/改派/接管/终态提交、或 task.result 被消费即清理；仅更新 leaseDeadline/renewalSeq 的 progress 心跳**不**使既有判定失效。
 
 ### 4.4 契约线入（machine.ts / lead.ts）
 
 - `LeadRecord` 增可选 `contract?: { deliverables: Array<{path?: string; artifact?: string; desc?: string}>; acceptance?: unknown[] }`。
-- `dispatchTo(target, offerBody, now)`：派发时 `this.rec.contract = offerBody.contract`（仅 project 有意义）持久化入 lead 状态。
-- `validTask` 容错新可选字段（旧状态无 contract → 视为 undefined，不判损坏）；接管 bundle（exportTasks/importTasks）
+- **共用结构准入 `isLeadContract`**（machine.ts）：`undefined`/`{}`/`deliverables:[]` 视为零交付兼容；`deliverables` 若在须为数组，
+  每项须为对象且至少有非空 `path` 或 `artifact`，`path`/`artifact` 若给须非空字符串、`desc` 若给须字符串，`acceptance` 若给须数组。
+- `dispatchTo`/`redispatchTo`：在**任何状态修改前**先 `if (!isLeadContract(offerBody.contract)) return []`——非法契约 → 空动作，
+  durable dispatch 返回 false，不发 offer、不污染持久状态、不闭锁节点；非法自动改派目标保留 `drafting`，选择器纠正后下一次 tick 可推进。
+  合法时 `this.rec.contract = structuredClone(offerBody.contract)`（仅 project 有意义）持久化入 lead 状态。
+- `validTask` 与派发共用 `isLeadContract`（旧状态无 contract → undefined，不判损坏）；接管 bundle（exportTasks/importTasks）
   原样携带（contract 随 LeadRecord 序列化，无额外 fence 语义）。
 - 该字段仅牵头侧持久（执行侧已有 `ExecRecord.offerBody`，无需新增）。
 
@@ -172,20 +196,28 @@ machine.ts:93 的 `project→false` 仍是安全底线（machine-safety.spec.ts:
 | **e2c** | 牵头验收器 + 契约线入：LeadRecord.contract（dispatchTo 持久化）+ per-task 闭包注入 + 同步判定缓存 + 契约完整性核对 | `node/test/durable-lead.spec.ts`、`machine-safety.spec.ts` 扩展 | 验收器忽略判定缓存 → 无清单也 done（RED）；契约缺 deliverable 未判不完整（RED）；aid 回归 v1 兼容被破坏（RED） |
 | **e2d** | 执行侧产清单 + drain 异步预置 + 工作区接线 + e2e（执行产→牵头 collect→验签→done；篡改→acceptance_failed→改派）+ 全量验证 + 文档回填 + 独立提交 | `node/test/durable-node.spec.ts` 扩展、`cli/test/server-*.spec.ts`、全仓 7 包 test + typecheck | drain 移除预置 → PROJECT 恒 acceptance_failed 或未验即 done（RED）；执行侧不产清单 → 牵头无 manifest 可验（RED） |
 
-**验证基线**（HEAD 9321967）：全仓 1543 passed | 3 skipped；7 包 typecheck 绿。每片提交后重跑。
+**验证基线**：
+- 历史（E3，HEAD `9321967`）：全仓 1543 passed | 3 skipped；7 包 typecheck 绿。
+- 当前（P0 复核修复后工作树，HEAD `6bbda76` + 未提交修复）：全仓 **1621 passed | 2 skipped**（cli130/console36/core205/
+  gateway170/node801/registry243/storage36|2skip）；7 包 typecheck 绿；node 定向 100 测 + 七靶点变异全捕获并字节还原。
+- 命令：`pnpm -r --if-present run typecheck`；`pnpm -r --workspace-concurrency=1 --if-present run test --exclude '**/dsh-e2e.spec.ts' --retry 0 --maxWorkers=2`。
 
 ## 7. 风险与开放
 
 - **工作区接线（最大风险）**：durable 执行路径当前无 per-task 工作区（FencedProcessDriver 静态 workdir），
   产物字节无处定位。e2d 须接 `WorkspaceManager`（或等价）到 durable executor，且 `offer.workspace` 缺省时
   D33 一次性临时目录的产物如何回传需明确（临时目录内产文件 → push → destroy 前完成）。
-- **同步/异步边界**：机器纯同步（§1.3）；预置在 drain 异步完成。判定缓存键 = manifest 摘要，须保证执行方内联
-  清单与牵头方 collect 清单摘要一致（同一 JCS 规范化）。缓存缺失/预置失败 → fail-closed（不误判 done）。
+- **同步/异步边界**：机器纯同步（§1.3）；预置在 drain 异步完成。判定缓存**每任务一份**，命中须同时满足
+  `acceptanceContext`（含 contract/state/attempt/target/task_seq/drainClosed）与 `envelopeDigest`（完整信封）——仅 manifest
+  摘要相同不足以复用（防换签名/纪元/repo/契约借用成功判定）。缓存缺失/预置失败 → fail-closed（不误判 done）。
 - **公钥现势性**：manifest 声明 `key_epoch` 须与信封 from 一致；historical 纪元公钥可验签（registry-verifier.ts:100
   允许 current|historical），但改钥窗口内旧 attempt 产物的验签语义须与信封验签一致（复用同一端点即自然一致）。
 - **git 可用性 / 大产物**：collectArtifacts 依赖 git 子进程（payload-git.ts:218）；大产物 fetch 耗时在 drain 异步
   预置内，不阻塞机器事务，但可能拖慢 pump 批处理——保留 `maxBytes` 上限（payload-git.ts:65）+ 判定缓存去重。
-- **判定缓存生命周期**：按 (task_id, attempt) 回收；接管/重启后缓存清空 → 若 result 重投，drain 重新预置（幂等）。
+- **判定缓存生命周期**：按 `acceptanceContext` 回收（context 任一字段变化即失效），并在取消/改派/接管/终态提交与 task.result
+  消费后清理；`failClosed` 时整表清空。接管/重启后缓存为空 → result 重投由 drain 重新预置。**幂等仅限**同信封、同上下文的
+  已完成判定；I/O（collect/公钥）暂不可用时**不写判定**，可在 consume 前重新预置；一旦 result 已 consume，R1 去重决议
+  **不因依赖恢复自动重试**（同 attempt 的同 msg_id 或新 msg_id 重投仍受去重/冲突规则约束）——「不缓存失败」不等于「具备收件重试保证」。
 - **多中心 / 跨队**：本设计假定单中心 + 同队验收（同 D1/E3）；跨队 grant（D2）产物的验收公钥解析沿用 registry-verifier 同队约束。
 
 ## 8. 不做（YAGNI 边界）
