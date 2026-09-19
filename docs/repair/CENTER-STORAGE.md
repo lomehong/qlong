@@ -62,9 +62,9 @@
 ## 仍未完成 / 不允许的推论
 
 - 连接登记 generation/TTL(D1 claim 注册表)与跨队节点能力范围执行(D2 grant caps)已实现:多 authority 共享同一中心库,经 `/internal/pump` 中继做定向泵通知(不搬 payload);legacy `QLONG_CLUSTER_*` 仅限 ephemeral 演示,持久模式拒绝。仍待实现:多中心 claim 一致性(§12.5)、Redis 传输替换。
-- 单 authority v2 `stored/receipt` 及节点事务存储已接通；节点侧任务 pump 已由 `createDurableNode` + `FencedProcessDriver` 接通（单 executor aid 闭环，见 [协议与节点事务边界](PROTOCOL-V2.md)）；业务续租（多网关接续）、多 lead、产物验收与容器级恢复仍未完成。当前 v2 inbox 保留 pending，不能接旧会话直接执行。
-- Docker/Podman 强隔离、模型 broker、RunHandle、产物采集/可信验收、IPC/owner command 与显式旧数据迁移仍在后续阶段。
-- 当前验证覆盖中心目录/Auth/投影及单 authority 消息接管恢复，**不是任务与外部副作用均可恢复**；不要向不受信节点开放远端执行。tombstone 暂无 GC，计入容量上限，满时拒收而非淘汰。
+- 单 authority v2 `stored/receipt` 及节点事务存储已接通；节点侧任务 pump 已由 `createDurableNode` + `FencedProcessDriver` 接通（单 executor aid 闭环，见 [协议与节点事务边界](PROTOCOL-V2.md)）；业务续租（B2，多网关接续）、多 lead / 单 exec 归属仲裁（C2）、持久 RunHandle 与已退出孤儿恢复（C1）、owner 命令通道（E3）与 PROJECT 产物完整性验收（E2：牵头侧独立收取 / 验签 / 重哈希 / 契约核对，缺清单 / 篡改 / 错钥 / 缺件一律 fail-closed）均已实现；容器级强隔离（E1）经用户确认跳过（仅受信自托管节点）。当前 v2 inbox 保留 pending，不能接旧会话直接执行。
+- 显式旧数据迁移与全链系统性故障矩阵（F1）仍在后续阶段；Docker/Podman 强隔离与模型 broker（E1）已跳过（容器仅用于 ModelScope 部署中心，节点受信自托管）。
+- 当前验证覆盖中心目录/Auth/投影及单 authority 消息接管恢复，**不是任务与外部副作用均可恢复**；不要向不受信节点开放远端执行。终态投递 tombstone 已支持可选保留窗口 GC（A1：超窗 `prune()` 回收 stored/received/expired，未配置窗口则永久保留）；dedup/inbox/state/effects 仍永不回收，计入容量上限，满时拒收而非淘汰。
 - Registry 草稿克隆/校验扫描状态，Auth 查询校验全部认证记录。这是优先兑现单实例一致性的实现，不是容量基准；后续须测同步 SQLite 延迟、限制会话/任务数据规模，不能据单元测试声称大规模可用。
 - 备份必须使用 SQLite backup API 或经验证的停机一致备份；禁止在线只复制主库、删除 WAL/SHM 或替换 ownership 文件。
 

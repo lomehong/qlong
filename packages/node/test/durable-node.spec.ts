@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -16,6 +16,7 @@ import { NodeRuntimeStore } from '../src/runtime/store.js';
 import { createDurableNode, type DurableNode } from '../src/runtime/node.js';
 import { FencedWorkspace } from '../src/collab/workspace.js';
 import { buildManifest, signManifest, verifyManifest, type SignedManifest } from '../src/collab/artifact-manifest.js';
+import { publishSignedArtifacts } from '../src/collab/payload-git.js';
 import { TASK_REPORT_KIND, type TaskReport } from '../src/runtime/report.js';
 import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 
@@ -235,6 +236,55 @@ async function startCommandCenter(nodeId: string, teamId: string, nodeToken = 't
     setFailGets: (v: boolean): void => { failGets = v; },
     setFailAcks: (v: boolean): void => { failAcks = v; },
   };
+}
+
+/**
+ * e2d-4:独立 init 一个带根提交的 worktree(bare 共享仓 + main 种子提交),供 publishSignedArtifacts 推每-attempt
+ * 分支(镜像 artifact-collector.spec.ts 同名装置)。测试代替执行方 harness 产出真实签名产物入 git。
+ */
+function seedWorktree(base: string, name: string): { repo: string; worktree: string } {
+  const repo = join(base, 'shared.git');
+  const worktree = join(base, name);
+  if (!existsSync(repo)) execFileSync('git', ['init', '--bare', '--quiet', repo], { stdio: 'pipe' });
+  execFileSync('git', ['init', '--quiet', worktree], { stdio: 'pipe' });
+  execFileSync('git', ['checkout', '--quiet', '-b', 'main'], { cwd: worktree, stdio: 'pipe' });
+  writeFileSync(join(worktree, 'README.md'), name);
+  execFileSync('git', ['add', 'README.md'], { cwd: worktree, stdio: 'pipe' });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', name], { cwd: worktree, stdio: 'pipe' });
+  return { repo, worktree };
+}
+
+/**
+ * e2d-4:最小 registry /pubkey 桩——服务牵头方**默认** createPubkeyResolver 的公钥回源
+ * (GET /v1/nodes/{id}/pubkey?epoch=N),镜像 registry-verifier 响应契约({node_id,status:'current',key_epoch,pubkey},
+ * 不含 team_id)。记录每次回源供断言(证明走真实 HTTP 而非注入假件)。PUT/POST(start 的 reportCaps + 默认上报汇)一律 200 消噪。
+ */
+async function startPubkeyRegistry(keys: Record<string, string>, nodeToken = 'test-only') {
+  const keyRequests: Array<{ nodeId: string; epoch: string }> = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    const send = (status: number, body: unknown): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.headers.authorization !== 'Bearer ' + nodeToken) { send(401, { error: 'unauthorized' }); return; }
+    const m = /^\/v1\/nodes\/([^/]+)\/pubkey$/.exec(url.pathname);
+    if (req.method === 'GET' && m) {
+      const nodeId = decodeURIComponent(m[1]!);
+      const epoch = url.searchParams.get('epoch') ?? '';
+      keyRequests.push({ nodeId, epoch });
+      const pubkey = keys[nodeId];
+      if (!pubkey || epoch !== '1') { send(404, { error: 'no key' }); return; }
+      send(200, { node_id: nodeId, status: 'current', key_epoch: Number(epoch), pubkey });
+      return;
+    }
+    if (req.method === 'PUT' || req.method === 'POST') { send(200, {}); return; }
+    send(404, {});
+  });
+  httpServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, keyRequests };
 }
 
 describe('DurableNode v2 task loop', () => {
@@ -805,6 +855,82 @@ describe('DurableNode v2 lead PROJECT artifact verification (e2d-3e)', () => {
     expect(collectArtifacts).toHaveBeenCalledWith(repo, taskId, branch); // 每-attempt 分支透传
     expect(resolvePubkey).toHaveBeenCalledWith(f.peerId, 1);             // 按信封署名者回源公钥
     expect(node.executor.snapshot().slot).toBeNull();                    // 牵头任务绝不落本机执行槽
+  });
+});
+
+describe('DurableNode v2 lead PROJECT end-to-end acceptance (e2d-4)', () => {
+  // 牵头 PROJECT offer,携一条 path deliverable 的契约(执行方须交付 dist/report.md)。
+  const ledProjectOffer = (contract: Record<string, unknown>): Record<string, unknown> =>
+    ({ kind: 'project', summary: 'led project', offer_ttl_ms: 30_000, lease_ms: 60_000, contract });
+  const peerPubkey = (f: Awaited<ReturnType<typeof fixture>>): string =>
+    Buffer.from(f.peerKeys.publicKey).toString('base64');
+
+  it('默认装配端到端:真实 git 收取 + registry 回源执行方公钥 → 完整签名产物四道防线全过 → done', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const taskReportSink = vi.fn(async () => ({ ok: true, status: 200 }));
+    // 执行方(peer)用其登记私钥签名产物,推每-attempt 分支 qlong/<task>/a1 到真实 bare 仓。
+    const { repo, worktree } = seedWorktree(f.root, 'exec-wt');
+    const taskId = newId();
+    const body = Buffer.from('# 真实交付产物\n');
+    mkdirSync(join(worktree, 'dist'), { recursive: true });
+    writeFileSync(join(worktree, 'dist', 'report.md'), body);
+    const signed = signManifest(buildManifest(taskId, 1, f.peerId, 1, [{ path: 'dist/report.md', bytes: body }]), f.peerKeys.priv);
+    await publishSignedArtifacts(worktree, repo, signed, taskId, 1);
+    // registry 桩服务 peer 登记公钥;牵头节点**不注入** collect/resolve/validateAcceptance → 全走默认真实装配。
+    const registry = await startPubkeyRegistry({ [f.peerId]: peerPubkey(f) });
+    const node = await f.makeNode({ registryUrl: registry.url, taskReportSink });
+    await node.start();
+
+    expect(node.lead.originate(taskId, 'project')).toBe(true);
+    expect(node.lead.dispatch(taskId, f.peerId, ledProjectOffer({ deliverables: [{ path: 'dist/report.md' }] }))).toBe(true);
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+    f.send(delivery(f.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running' }));
+
+    // 执行方回 PROJECT task.result,内联 { repo, branch, manifest };drain 前默认 collector 真实 git fetch、
+    // 默认 resolver 真实 registry HTTP 回源公钥 → verifyArtifactDelivery 四道防线全过 → 机器放行 → done。
+    const branch = `qlong/${taskId}/a1`;
+    f.send(delivery(f.signPeer({ type: 'task.result', task_id: taskId, attempt: 1 },
+      { status: 'done', artifacts: [{ repo, branch, manifest: signed }] })));
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'done' }));
+    // 默认 createPubkeyResolver 确实经真实 HTTP 回源了执行方公钥(证明默认装配,而非 e2d-3e 的注入假件)。
+    expect(registry.keyRequests.some((r) => r.nodeId === f.peerId && r.epoch === '1')).toBe(true);
+    expect(node.executor.snapshot().slot).toBeNull(); // 牵头任务绝不落本机执行槽
+  });
+
+  it('默认装配 fail-closed:产物被掉包(重新哈希不符)→ 验收拒绝 → reclaiming + cancel(acceptance_failed),绝不误判 done', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const taskReportSink = vi.fn(async () => ({ ok: true, status: 200 }));
+    const { repo, worktree } = seedWorktree(f.root, 'exec-wt');
+    const taskId = newId();
+    const declared = Buffer.from('# 声明的交付产物\n');
+    const tampered = Buffer.from('# 被掉包\n');
+    mkdirSync(join(worktree, 'dist'), { recursive: true });
+    writeFileSync(join(worktree, 'dist', 'report.md'), tampered); // 实际推入 git 的是被掉包字节
+    // 清单仍由 peer 私钥签名、声明 declared 的 sha256:验签(防线②)通过,但收取字节重新哈希(防线③)不符。
+    const signed = signManifest(buildManifest(taskId, 1, f.peerId, 1, [{ path: 'dist/report.md', bytes: declared }]), f.peerKeys.priv);
+    await publishSignedArtifacts(worktree, repo, signed, taskId, 1);
+    const registry = await startPubkeyRegistry({ [f.peerId]: peerPubkey(f) });
+    const node = await f.makeNode({ registryUrl: registry.url, taskReportSink });
+    await node.start();
+
+    node.lead.originate(taskId, 'project');
+    node.lead.dispatch(taskId, f.peerId, ledProjectOffer({ deliverables: [{ path: 'dist/report.md' }] }));
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+    f.send(delivery(f.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running' }));
+
+    const branch = `qlong/${taskId}/a1`;
+    f.send(delivery(f.signPeer({ type: 'task.result', task_id: taskId, attempt: 1 },
+      { status: 'done', artifacts: [{ repo, branch, manifest: signed }] })));
+
+    // 重新哈希不符 → 判定 false → 机器 acceptance_failed → beginReclaim:reclaiming + 撤销当前 attempt,绝不 done。
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' }));
+    expect(node.lead.snapshot(taskId)!.state).not.toBe('done');
+    await wait(() => expect(f.sent('task.cancel').some((e) => e.body.reason === 'acceptance_failed')).toBe(true));
+    // 确经真实回源+验签(管线跑通),败在重新哈希——区别于端口缺席的短路(短路则 keyRequests 为空)。
+    expect(registry.keyRequests.some((r) => r.nodeId === f.peerId)).toBe(true);
+    expect(node.executor.snapshot().slot).toBeNull();
   });
 });
 

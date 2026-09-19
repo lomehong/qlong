@@ -16,7 +16,7 @@
 ## 0. 实施状态（历史基线 vs 当前能力）
 
 > §2「现状（证据）」与 §3「缺口」表记录的是**设计定稿时**（E2a 之前）的基线，用于说明动机，不表示当前仍缺。
-> 截至当前工作树（HEAD `3918709` = e2d-1 已提交 + 未提交 e2d-2 执行侧产物发布）：
+> 截至当前工作树（HEAD `959f3fc` = e2d-1/2/3 已提交 + 未提交 e2d-4 端到端收口）：
 > - **已落地**：e2a 清单/签名/摘要原语、e2b git 集成（pushSignedArtifacts/collectArtifacts）、e2c 牵头验收器
 >   （verifyArtifactDelivery 完整性判定 + LeadRecord.contract 持久化 + per-task 同步判定缓存 + stageArtifactVerification 异步预置）。
 > - **P0 复核加固（已提交 `761b48a`/`9cc6117`）**：清单绑定 task/attempt/署名者 + 结构准入（validSignedManifest）；成功缓存改为**每任务一份**
@@ -24,11 +24,12 @@
 >   即回收，异步 I/O 完成后重读持久状态复核上下文；派发/改派对非法契约**改状态前**拒绝（不闭锁节点）；artifact-only 声明
 >   当前无字节映射端口 → 明确判 false（不静默跳过）。
 > - **e2d-1 已落地（已提交 `3918709`）**：durable per-fence 工作区生命周期——执行器新增 `workspace` 端口（`prepare`→解析 cwd 于 `'starting'` 提交前、事务外；结果/失败密封后 `release`；`unknown`/`recovery_required` 绝不 release），`FencedProcessDriver` 消费 `ctx.cwd`（优先于静态 workdir），`FencedWorkspace` 按精确 fence 派生隔离目录（跨 attempt/generation/run 不串产物、路径越界与非法 fence 拒绝、os.tmpdir 缺省根），`createDurableNode` 透传 + CLI 移除静态 `workdir: home`。
-> - **e2d-2 已落地（本轮，未提交）**：执行侧产物发布——执行器新增 `ArtifactPublisher` 端口，完成路径经 `publishAndFinish` 在 **SQL 事务外**调用 `publish(fence,offer,ctx,outcome)`（门控 `result + publisher + 同 fence + 无 stopReason`；发布抛错/返回非法 outcome → 干净 `task.fail(artifact_publish_failed)`，取消优先不发布）；`GitArtifactPublisher`（collab/artifact-publisher.ts）读契约声明文件（路径严格限定工作区内、缺件不入清单不伪造）、`buildManifest`+`signManifest`、异步 `publishSignedArtifacts` 发布到**每-attempt 分支** `qlong/<task>/a<attempt>`（绝不 force、`AbortSignal.timeout` + 字节预算），注入 `body.artifacts=[{repo,manifest,branch}]`；PROJECT 准入以**节点级 `artifactRepo` 配置**门控（未配置 → `policy_denied` fail-closed，aid 不受影响），`createDurableNode` 装配 + CLI `--artifact-repo`/config 接线。
-> - **仍缺（e2d-3/4）**：牵头侧 collect 适配**每-attempt 分支**（现 `collectArtifacts` 仍用单分支 `qlong/<task>`）、drain 默认接线（collect/resolvePubkey 端口 + git→字节适配）、真实 git PROJECT 端到端（执行产→牵头 collect→验签→done；篡改/缺件→acceptance_failed→改派）。
-> - **验证（e2d-2）**：adapter 6 测 + node 接线 2 测绿；4 靶点变异（M10 aid 短路 / M11 路径越界守卫 / M12 缺 cwd 抛错 / M13 缺件伪造）全捕获并字节还原；七包 typecheck 绿；
->   全仓 node **842 passed**、cli 130、registry 243、core 205、gateway 170、console 36、storage 36|2skip（各包独立运行全绿；
->   `pnpm -r` 合并运行偶发 tinypool `ERR_IPC_CHANNEL_CLOSED` 为 Windows/Node24 环境级 worker 拆卸 flake，非代码，registry 独立运行 exit 0）。
+> - **e2d-2 已落地（已提交 `71c502e`）**：执行侧产物发布——执行器新增 `ArtifactPublisher` 端口，完成路径经 `publishAndFinish` 在 **SQL 事务外**调用 `publish(fence,offer,ctx,outcome)`（门控 `result + publisher + 同 fence + 无 stopReason`；发布抛错/返回非法 outcome → 干净 `task.fail(artifact_publish_failed)`，取消优先不发布）；`GitArtifactPublisher`（collab/artifact-publisher.ts）读契约声明文件（路径严格限定工作区内、缺件不入清单不伪造）、`buildManifest`+`signManifest`、异步 `publishSignedArtifacts` 发布到**每-attempt 分支** `qlong/<task>/a<attempt>`（绝不 force、`AbortSignal.timeout` + 字节预算），注入 `body.artifacts=[{repo,manifest,branch}]`；PROJECT 准入以**节点级 `artifactRepo` 配置**门控（未配置 → `policy_denied` fail-closed，aid 不受影响），`createDurableNode` 装配 + CLI `--artifact-repo`/config 接线。
+> - **e2d-3 已落地（已提交 `959f3fc`）**：牵头侧默认接线——`collectSignedArtifacts`（payload-git，异步按**每-attempt 分支** `qlong/<task>/a<attempt>` 收取，branch 缺省回落单分支）+ `createGitArtifactCollector`（collab/artifact-collector.ts，git→字节端口适配，派生唯一 scratch 读完即清、传输失败/超时/预算超限 → `{ok:false,reason}` 绝不抛到 drain）+ `createPubkeyResolver`（registry-verifier.ts，`GET /v1/nodes/{id}/pubkey?epoch=N` 回源执行方登记公钥，守卫 node_id/key_epoch/status，失败一律 `undefined` fail-closed）；`DurableLead` 装配 collect/resolve 端口，`node.ts` **无条件默认接线**（`?? createGitArtifactCollector()` / `?? createPubkeyResolver(opts, me)`，不 gate on `artifactRepo`——纯牵头节点仍需验收），drain `ledByUs` 分支在 `lead.consume` 前 `await lead.stageArtifactVerification(env)`。
+> - **e2d-4 已落地（本轮，未提交）**：E2 端到端收口——真实 git bare 仓 + registry HTTP 桩，**不注入端口走默认装配**，PROJECT 正向（完整签名产物四道防线全过 → `done`）与反向（产物被掉包/重新哈希不符 → 验收拒绝 → `reclaiming` + `task.cancel(acceptance_failed)`，绝不误判 done）；`keyRequests` 断言证明 collect+resolve 管线跑通（区别于端口缺席短路——短路则 keyRequests 空）。
+> - **验证（e2d-4）**：durable-node.spec.ts e2d-4 描述块 2 测绿（正向 done / 反向 reclaiming+cancel）；2 靶点变异（M1 移 `?? createGitArtifactCollector()` / M2 移 `?? createPubkeyResolver(opts,me)`）均捕获（正+反向 RED：正向 done→reclaiming、反向 keyRequests 空），node.ts 字节还原（sha256 `35586B82…D0D0B` 匹配基线）；七包 typecheck 绿；
+>   node 全量独立运行 **42 文件 864 passed、0 skip、exit 0**；全仓 cli 130、console 36、core 205、gateway 170、node 864、registry 243、storage 36|2skip（合计 **1684 passed**；各包独立运行全绿；
+>   `pnpm -r` 串行合并运行触发 tinypool `ERR_IPC_CHANNEL_CLOSED`——pnpm→vitest→tinypool 嵌套 worker 拆卸 IPC 竞态，Windows/Node24 环境级 flake 非代码，崩溃落在未改动的 gateway 包，逐包独立运行 exit 0 规避）。
 
 ## 1. 约束（不可违背）
 
@@ -150,10 +151,10 @@ interface SignedManifest { alg: 'ed25519'; manifest: ArtifactManifest; sig: stri
 
 ### 4.3 牵头侧：真实验收器（drain 异步预置 + 机器同步读判定）
 
-**预置（异步，node.ts drain，`lead.consume` 前）** —— `stageArtifactVerification(task, env)`：
-1. 仅对 `env.type==='task.result'` 且本节点牵头且 `task.kind==='project'` 触发；aid 跳过（走 v1 兼容）。
-2. 从 `env.body.artifacts[0]` 取内联 `SignedManifest` + branch/repo；`collectArtifacts(repo, task_id, tmpOutDir)` 收取产物字节。
-3. 校验 `manifest.node_id===env.from.node_id && manifest.key_epoch===env.from.key_epoch`（清单钥 == 信封署名者，否则拒）。
+**预置（异步，node.ts drain，`lead.consume` 前）** —— `stageArtifactVerification(envelope)`（单参：从信封自足取 task_id/attempt/from/body，事务外重读持久 task 复核上下文）：
+1. 仅对 `envelope.type==='task.result'` 且本节点牵头且 `task.kind==='project'` 触发；aid 跳过（走 v1 兼容）。
+2. 从 `envelope.body.artifacts[0]` 取内联 `SignedManifest`（`inlineSignedManifest`）+ repo（`inlineRepo`）+ branch（`inlineBranch`）；`collectArtifacts(repo, taskId, branch)` 收取产物字节（branch 缺省回落单分支 `qlong/<task>`）。
+3. 校验 `manifest.node_id===envelope.from.node_id && manifest.key_epoch===envelope.from.key_epoch`（清单钥 == 信封署名者，否则拒）。
 4. `resolvePubkey(node_id, key_epoch)`（异步 HTTP，复用 registry-verifier 端点；drain 已 `verifySafely` 取过 → 可缓存）
    → `verifyManifest(signed, pub)`；false → 判定 false（篡改/伪造清单）。
 5. **重新哈希**收取到的每个 deliverable 文件字节，比对 manifest 的 `sha256+size`；任一不符 → false（传输损坏/掉包）。
@@ -209,7 +210,7 @@ machine.ts:93 的 `project→false` 仍是安全底线（machine-safety.spec.ts:
   选项（值或 `(runtime)=>` 工厂，与 driver 同解析时机）透传；CLI `run` 装配 `new FencedWorkspace()` 并移除静态 `workdir: home`。
 - **牵头侧**：`DurableLead` 增 `resolvePubkey?` 端口（缺省用 registry-verifier 同款 HTTP 查询）+ 内部 `verdicts` 同步缓存
   + `stageArtifactVerification` 预置方法；`machine(task)` 注入 per-task 验收器（§4.3）。
-- **drain**：node.ts:320 `ledByUs` 分支在 `lead.consume(env,true)` 前 `await lead.stageArtifactVerification(task, env)`
+- **drain**：node.ts:358 `ledByUs` 分支在 `lead.consume(env,true)` 前 `await lead.stageArtifactVerification(env)`
   （仅 project + task.result；best-effort：预置异常 → 判定缺席 → 机器 fail-closed，绝不放大为节点 fault）。
 - **validateAcceptance 注入优先级**：`createDurableNode` 若显式传入 `opts.validateAcceptance` 仍优先（测试/替代信任根）；
   缺省时用 E2 真实验收器（此前缺省 = machine 的 project→false）。
@@ -225,8 +226,14 @@ machine.ts:93 的 `project→false` 仍是安全底线（machine-safety.spec.ts:
 
 **验证基线**：
 - 历史（E3，HEAD `9321967`）：全仓 1543 passed | 3 skipped；7 包 typecheck 绿。
-- 当前（P0 复核修复后工作树，HEAD `6bbda76` + 未提交修复）：全仓 **1621 passed | 2 skipped**（cli130/console36/core205/
+- P0（复核修复后，HEAD `6bbda76`）：全仓 1621 passed | 2 skipped（cli130/console36/core205/
   gateway170/node801/registry243/storage36|2skip）；7 包 typecheck 绿；node 定向 100 测 + 七靶点变异全捕获并字节还原。
+- e2d-3（HEAD `959f3fc`）：全仓 1682 passed | 2 skipped（cli130/console36/core205/gateway170/node862/registry243/storage36|2skip）；
+  7 包 typecheck 绿；3c 七靶点 + 3d 三靶点 + 3e 三靶点变异全捕获并字节还原。
+- 当前（e2d-4，HEAD `959f3fc` + 未提交 e2d-4）：全仓 **1684 passed | 2 skipped**（cli130/console36/core205/gateway170/
+  node**864**/registry243/storage36|2skip）；7 包 typecheck 绿；durable-node e2d-4 描述块 2 测（真实 git bare 仓 + registry HTTP 桩、
+  默认装配正/反向）+ M1/M2 变异全捕获并字节还原（node.ts sha256 `35586B82…D0D0B`）。node 全量独立运行 **42 文件 864 passed、0 skip、exit 0**；
+  各包独立运行 exit 0；`pnpm -r` 串行因 tinypool `ERR_IPC_CHANNEL_CLOSED` 环境级 worker 拆卸竞态崩溃（落在未改动的 gateway），逐包独立运行规避。
 - 命令：`pnpm -r --if-present run typecheck`；`pnpm -r --workspace-concurrency=1 --if-present run test --exclude '**/dsh-e2e.spec.ts' --retry 0 --maxWorkers=2`。
 
 ## 7. 风险与开放

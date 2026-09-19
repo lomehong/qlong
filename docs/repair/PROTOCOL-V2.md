@@ -37,7 +37,7 @@
 - 中心每次新接管必须有有效绝对 exp，剩余寿命不超过 24 小时，严格到期不继续投递。到期 payload 转为持久 expired 记录；重复接管不会延长寿命。
 - 客户端到期停止重发，但保留未获 stored 的 payload/tracking；没有伪造成功或静默清理。
 - 默认中心上限：10,000 个身份（含终结记录）、64 MiB 待投 payload、每目标 1,000 条 pending。默认节点：10,000 个领域记录、64 MiB 逻辑字节。
-- **本批无 tombstone/dedup GC**：上限是累计记录预算，不是仅待处理队列预算，长时运行会满；必须在实现保留窗口/归档与收尾预留后才能视为长期运行版本。不可删库或淘汰已接管记录解决满库。
+- **tombstone GC 已实现，dedup/inbox/state 仍无 GC**：终态投递 tombstone（stored/received/expired）可由可选保留窗口 `retentionMs` 驱动 `prune()` 超窗回收（A1；未配置窗口则永久保留，pending/未投递 payload 永不淘汰）。但 dedup/inbox/state/effects 永不回收，上限仍是累计记录预算而非仅待处理队列预算，长时运行仍会满；须再实现 dedup/状态归档与收尾预留才能视为长期运行版本。不可删库或淘汰已接管记录解决满库。
 - 逻辑字节限制不是物理数据库/WAL/磁盘配额；尚无容量/吞吐量基准，同步 SQLite 的事件循环阻塞仍须测量。
 
 ## 节点事务存储，不是旧会话包装
@@ -47,8 +47,9 @@
 - `consume` 在一个短事务内提交 inbox 决议、任务消息 dedup、state revision CAS、固定签名 outbox 和 effect intent。失败全回滚，回调不得进行网络、容器、Git 等外部 IO。
 - 启动及相关读/写路径验证摘要、规范化 JSON、身份、delivery/outbox 配对、状态修订及关联。损坏状态拒绝恢复；不能隐藏损坏 payload 后继续确认。
 - effect 由 `DurableExecutor` 以 RunHandle fence（task/attempt/generation/run_id）防陈旧完成；提交后由节点 pump 驱动 fenced driver（`FencedDriver`）。`FencedProcessDriver` 提供进程级 start/stop；注入持久 `RunHandleStore` 后于 start 返回前落盘 fence→pid+启动证据，recover 据此可判定：所记录 pid 已释放（`ESRCH`）即证明该精确 fence 跨重启静默 → `stopped`（执行器安全 settle 为 `execution_interrupted`，绝不重放 start）；pid 仍存活或无法跨平台核验身份（防 PID 复用误杀）、无句柄、fence 不符 → `unknown`（fail-closed → recovery_required）。未注入端口时退回恒 `unknown`。
+- PROJECT 产物交付与验收（E2，详见 [产物可信验收设计](ARTIFACT-ACCEPTANCE.md)）：`FencedProcessDriver` 在按 fence 派生的隔离工作区执行（e2d-1）；PROJECT 完成路径在 SQL 事务外读契约声明文件、`buildManifest`+`signManifest`（ed25519 单独签名）、异步 `publishSignedArtifacts` 发布到每-attempt 分支 `qlong/<task>/a<attempt>`（绝不 force），注入 `task.result.body.artifacts=[{repo,manifest,branch}]`（e2d-2）。牵头侧 drain 在 `lead.consume` 前 `stageArtifactVerification(envelope)`（单参）独立收取产物字节、按 registry 登记纪元公钥验签、逐 deliverable 重哈希、核对契约完整性（四道防线），判定入每任务同步缓存供机器纯同步读取；缺清单 / 篡改 / 错钥 / 契约缺件一律 fail-closed → `acceptance_failed` → 改派，绝不误判 done（e2d-3/4）。
 - v2 不调用旧 `onEnvelope`；旧 `RemoteNodeSession` 构造时拒绝 v2 client。旧演示链路仅保留 delivered 续租兼容；stored/queued/rejected/receipt 都不续租。
-- 下一阶段须把实际 task reducer、计时器、命令、业务续租与恢复 pump 接入同事务，提交后执行 fenced intent。不能消费 inbox 后再异步写状态，也不能先开容器再补意图。
+- 实际 task reducer、计时器（B1）、命令（E3）、业务续租（B2）与恢复 pump（C1）已接入同事务：`consume` 原子提交 inbox 决议/dedup/state CAS/签名 outbox/effect intent，提交后由节点 pump 驱动 fenced intent（`DurableExecutor`/`FencedDriver`）。仍不可消费 inbox 后再异步写状态，也不可先开容器再补意图。
 
 ## 已运行的测试入口
 

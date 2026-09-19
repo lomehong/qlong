@@ -15,7 +15,7 @@
 |---|------|------|--------|
 | W1 | A、B 入网 | 各得 node_id/team_id/node_token;通讯录互见(online=true) | A1 |
 | W2 | A 派 aid 单 → B 五道闸通过 → accept → 驱动执行 → result | A 侧 done(attempt=1) | A2 |
-| W3 | A 派 project 单(带 contract.acceptance)→ B 回 acceptance_results 全过 → done;验收失败 → cancel(acceptance_failed)+attempt+1 | A 侧 done / 重做 | A3 |
+| W3 | A 派 project 单(带 contract.deliverables)→ B 执行→读声明文件产**签名清单**→发布到每-attempt git 分支→回 task.result(内联签名 manifest+branch)→ A **独立**收取/验签/重哈希/契约核对全过 → done;篡改/缺件/错钥/契约不符 → cancel(acceptance_failed)+attempt+1 | A 侧 done / 重做 | A3 |
 | W4 | B 执行中心跳停止 → A 判 lost(≈2×lease/3+grace)→ cancel(reclaim)→ drain → 改派 C(attempt+1)续跑 | done(attempt=2)或 escalate | A4 |
 | W5 | 重放旧 offer → B 去重忽略;exp 过期信封 → 静默丢弃 + exp_rejected 审计 | 无二次执行;审计留痕 | A5 |
 | W6 | 派 required_caps 给无标签节点 → reject(unsupported_caps)+missing → 改派有标签节点 → done | A6 |
@@ -32,4 +32,4 @@
 ## 当前状态
 
 - W1/W2/W4(改派段)/W5/W9 已由 cross-machine.spec、lost-redelivery.spec、ws-hardening.spec 及 core/node 单测覆盖(✅)。
-- W3 acceptance_results 链路、W6 能力反馈链路、W7 执行档案沙箱 → M4;W8 日志还原 → M3 收口核验。
+- W3 PROJECT 产物完整性验收链路由 E2 落地(执行侧产签名清单发布每-attempt git 分支 → 牵头侧独立收取/验签/重哈希/契约核对,fail-closed),自动化见 node `durable-node.spec.ts` e2d-4 描述块(真实 git+registry 默认装配,正/反向);双机人工走查待 P4 受信环境执行。W6 能力反馈链路、W7 执行档案沙箱 → M4;W8 日志还原 → M3 收口核验。
