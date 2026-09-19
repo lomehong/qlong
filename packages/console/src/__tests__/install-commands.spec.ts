@@ -28,5 +28,17 @@ describe('安装命令生成', () => {
     expect(cmd).toContain('https://lomehong-qlong.ms.show/install.sh');
     expect(unixInstallCommand(TOKEN, 'v0.9.0')).toContain('--version v0.9.0');
   });
+
+  it('dsh 版本:命令携带 QLONG_DSH_VERSION(安装器按选定版本落 dsh 运行时)', () => {
+    const win = winInstallCommand(TOKEN, 'latest', '0.1.6-alpha.2');
+    expect(win.startsWith('$env:QLONG_DSH_VERSION="0.1.6-alpha.2"; ')).toBe(true);
+    expect(win).toContain(`-EnrollToken "${TOKEN}"`);
+    const unix = unixInstallCommand(TOKEN, 'latest', '0.1.6-alpha.2');
+    expect(unix.startsWith('QLONG_DSH_VERSION=0.1.6-alpha.2 curl ')).toBe(true);
+    expect(unix).toContain('QLONG_DSH_VERSION=0.1.6-alpha.2 sh /tmp/qlong-install.sh');
+    // 未选 dsh 版本时不出现该变量
+    expect(winInstallCommand(TOKEN)).not.toContain('QLONG_DSH_VERSION');
+    expect(unixInstallCommand(TOKEN)).not.toContain('QLONG_DSH_VERSION');
+  });
 });
 

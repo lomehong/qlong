@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { unixInstallCommand, winInstallCommand } from './install-commands';
+import { fetchDshVersions, type DshVersionInfo } from '../api/dsh';
 
 /**
  * 节点安装页(纪要 §4 入网体验的页面侧):
@@ -10,11 +11,23 @@ export default function Install({ teamId }: { teamId: string }) {
   const issueToken = useStore((s) => s.issueToken);
   const [token, setToken] = useState('');
   const [version, setVersion] = useState('latest');
+  const [dshVersion, setDshVersion] = useState('latest');
+  const [dshInfo, setDshInfo] = useState<DshVersionInfo | null>(null);
+  const [dshError, setDshError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState('');
 
-  const unixCmd = token ? unixInstallCommand(token, version) : '# 先生成邀请码';
-  const winCmd = token ? winInstallCommand(token, version) : '# 先生成邀请码';
+  // 真实读取 npm 上 dsh 的可选版本(dist-tags + 全部版本;npmjs 失败回退 npmmirror)
+  useEffect(() => {
+    let alive = true;
+    fetchDshVersions()
+      .then((info) => { if (alive) setDshInfo(info); })
+      .catch(() => { if (alive) setDshError(true); });
+    return () => { alive = false; };
+  }, []);
+
+  const unixCmd = token ? unixInstallCommand(token, version, dshVersion) : '# 先生成邀请码';
+  const winCmd = token ? winInstallCommand(token, version, dshVersion) : '# 先生成邀请码';
 
   const copy = (key: string, text: string): void => {
     void navigator.clipboard.writeText(text).then(() => {
@@ -59,11 +72,31 @@ export default function Install({ teamId }: { teamId: string }) {
       <div className="card">
         <div className="form-grid">
           <div className="field">
-            <label className="field-label" htmlFor="install-version">安装版本</label>
+            <label className="field-label" htmlFor="install-version">qlong 安装版本</label>
             <select id="install-version" className="select" value={version} onChange={(e) => setVersion(e.target.value)}>
               <option value="latest">latest(最新)</option>
               <option value="0.1.0">v0.1.0</option>
             </select>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="dsh-version">dsh 运行时版本</label>
+            <select id="dsh-version" className="select" value={dshVersion} onChange={(e) => setDshVersion(e.target.value)}>
+              {dshInfo ? (
+                <>
+                  {Object.entries(dshInfo.tags).map(([tag, v]) => (
+                    <option key={tag} value={v}>{tag}(= {v})</option>
+                  ))}
+                  {dshInfo.versions.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </>
+              ) : (
+                <option value="latest">{dshError ? 'latest(版本目录加载失败,重进页面重试)' : '加载中…'}</option>
+              )}
+            </select>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
+              安装器将把选定版本的 dsh 运行时装到客户端(离线可用、版本固定);不选则任务时走 npx 临时通道。
+            </div>
           </div>
           <button className="btn btn-primary" onClick={() => { void generate(); }} disabled={busy || !teamId}>
             {busy ? '生成中…' : '生成邀请码'}
