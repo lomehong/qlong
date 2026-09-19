@@ -19,6 +19,7 @@ import {
 import { SqliteStore } from '../../../storage/src/index.js';
 import type { ExecutorWorkspace, FencedDriver } from '../driver/run-handle.js';
 import { GitArtifactPublisher } from '../collab/artifact-publisher.js';
+import { createGitArtifactCollector } from '../collab/artifact-collector.js';
 import { GatewayClient } from '../gateway-client.js';
 import type { LocalPolicy, LoadSnapshot } from '../executor/gates.js';
 import { DurableExecutor } from './executor.js';
@@ -29,7 +30,7 @@ import {
 import { DurableTaskReporter, type TaskReportSink } from './report.js';
 import { NODE_SCHEMA } from './schema.js';
 import { NodeRuntimeStore } from './store.js';
-import { createRegistryVerifier, loadRegistryIdentity, type RegistryIdentity } from '../remote/registry-verifier.js';
+import { createPubkeyResolver, createRegistryVerifier, loadRegistryIdentity, type RegistryIdentity } from '../remote/registry-verifier.js';
 import type { Outbound } from '../wire.js';
 
 /** 每次 pump 批量上限(与传输层在投票据窗口一致) */
@@ -107,6 +108,13 @@ export interface DurableNodeOptions {
   selectTarget?: TargetSelector;
   /** PROJECT 验收判据注入(牵头方判定 task.result);缺省用机器默认(project 拒绝、aid 兼容规则) */
   validateAcceptance?: (resultBody: Record<string, unknown>) => boolean;
+  /**
+   * e2d-3: 牵头侧产物收取端口注入(测试/替代信任根用);缺省 = createGitArtifactCollector() 真实 git 收取。
+   * 无条件装配(不 gate on artifactRepo):纯牵头节点(不执行、无产物仓)仍需验收 PROJECT 产物,repo 来自信封 inlineRepo。
+   */
+  collectArtifacts?: (repo: string, taskId: string, branch?: string) => Promise<{ ok: boolean; files?: ReadonlyArray<{ path: string; bytes: Uint8Array }>; reason?: string }>;
+  /** e2d-3: 牵头侧验签公钥解析端口注入(测试/替代信任根用);缺省 = createPubkeyResolver(registry HTTP GET /v1/nodes/{id}/pubkey)。 */
+  resolvePubkey?: (nodeId: string, keyEpoch: number) => Promise<Uint8Array | undefined>;
   /** 持久任务上报投递汇注入(默认 POST /v1/teams/:id/tasks);测试/替代中心用 */
   taskReportSink?: TaskReportSink;
   /** 存储或执行器故障:节点已停止接入,保留现场等待显式恢复 */
@@ -294,6 +302,11 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     seal,
     selectTarget: opts.selectTarget,
     validateAcceptance: opts.validateAcceptance,
+    // e2d-3: 牵头侧 E2 验收端口无条件装配(不 gate on artifactRepo)——纯牵头节点(不执行、无产物仓)仍需验收
+    // PROJECT 产物:collect 的 repo 来自信封 inlineRepo、resolve 用 {registryUrl,nodeToken}+me 恒可用。缺省走真实
+    // git 收取 + registry HTTP 回源公钥;测试/替代信任根可注入。端口缺席 → stageArtifactVerification 短路 → fail-closed。
+    collectArtifacts: opts.collectArtifacts ?? createGitArtifactCollector(),
+    resolvePubkey: opts.resolvePubkey ?? createPubkeyResolver(opts, me),
     onFault: failClosed,
   });
 
@@ -340,6 +353,9 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
           // 路由:本节点牵头该任务 → 回执走牵头方(绝不落入本机执行槽);否则 → 执行方消费。
           const ledByUs = env.task_id !== undefined && runtime.state(leadStateKey(env.task_id)) !== undefined;
           if (ledByUs) {
+            // e2d-3: PROJECT task.result 在 consume 前异步预置验收判定(collect+验签+重新哈希+契约核对)。
+            // best-effort——方法内部 try/catch 全吞:预置异常/端口缺席 → 判定缺席 → 机器 fail-closed,绝不放大为节点 fault。
+            await lead.stageArtifactVerification(env);
             lead.consume(env, true); // 故障在牵头方内闭锁并回调;错误向调用方传播
           } else {
             executor.consume(env, true); // 故障在执行器内闭锁并回调;错误向调用方传播

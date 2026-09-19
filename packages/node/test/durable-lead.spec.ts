@@ -843,4 +843,39 @@ describe('E2c 牵头验收器(stageArtifactVerification 异步预置 + machine(t
     f.deliver(result);
     expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming' });
   });
+
+  // e2d-3d:stageArtifactVerification 须把信封内联 branch(artifacts[0].branch,每-attempt 分支)透传给 collect 端口,
+  // 使牵头方按执行方实际推送的分支收取(而非硬编码单分支);branch 缺席时第三参 undefined(向后兼容旧执行方)。
+  it('T11 内联 branch 透传给 collect(每-attempt 分支收取,ARTIFACT-ACCEPTANCE §4.3)', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const branch = `qlong/${taskId}/a1`; // 每-attempt 分支,区别于缺省单分支 qlong/<task>
+    const collectArtifacts = vi.fn(async () => ({ ok: true, files }));
+    const f = setup({ collectArtifacts, resolvePubkey: vi.fn(async () => execKey.publicKey) });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1,
+      { status: 'done', artifacts: [{ repo: 'https://git.example/repo', branch, manifest: signed }] });
+    await f.lead.stageArtifactVerification(result);
+    expect(collectArtifacts).toHaveBeenCalledWith('https://git.example/repo', taskId, branch);
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done' }); // 分支透传不破坏验收
+  });
+
+  it('T12 内联 branch 缺席(旧执行方/单分支)→ collect 第三参 undefined,验收仍按内联清单判定', async () => {
+    const taskId = newId();
+    const { files, signed } = signedDelivery(taskId);
+    const collectArtifacts = vi.fn(async () => ({ ok: true, files }));
+    const f = setup({ collectArtifacts, resolvePubkey: vi.fn(async () => execKey.publicKey) });
+    f.lead.originate(taskId, 'project');
+    f.lead.dispatch(taskId, EXEC, { ...offerBody('project'), contract: contract1 });
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    const result = receipt('task.result', taskId, 1,
+      { status: 'done', artifacts: [{ repo: 'https://git.example/repo', manifest: signed }] });
+    await f.lead.stageArtifactVerification(result);
+    expect(collectArtifacts).toHaveBeenCalledWith('https://git.example/repo', taskId, undefined);
+    f.deliver(result);
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'done' });
+  });
 });

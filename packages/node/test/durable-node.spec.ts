@@ -15,7 +15,7 @@ import { NODE_SCHEMA } from '../src/runtime/schema.js';
 import { NodeRuntimeStore } from '../src/runtime/store.js';
 import { createDurableNode, type DurableNode } from '../src/runtime/node.js';
 import { FencedWorkspace } from '../src/collab/workspace.js';
-import { verifyManifest, type SignedManifest } from '../src/collab/artifact-manifest.js';
+import { buildManifest, signManifest, verifyManifest, type SignedManifest } from '../src/collab/artifact-manifest.js';
 import { TASK_REPORT_KIND, type TaskReport } from '../src/runtime/report.js';
 import type { ExecutorWorkspace, FencedDriver, RunContext, RunFence, RunHandle, RunOutcome } from '../src/driver/run-handle.js';
 
@@ -159,7 +159,7 @@ async function fixture(options: FixtureOptions = {}) {
     body, ...overrides,
   }, peerKeys.priv);
   return {
-    root, dataDir, identity, peerId, frames, sockets, makeNode, signPeer, identityKeys,
+    root, dataDir, identity, peerId, frames, sockets, makeNode, signPeer, identityKeys, peerKeys,
     setVerify: (next: (env: EnvelopeV1) => Promise<boolean>) => { verify = next; },
     get socket() { return sockets.at(-1)!; },
     send: (frame: unknown) => write(sockets.at(-1)!, frame),
@@ -765,6 +765,46 @@ describe('DurableNode v2 owner command PULL (E3c)', () => {
     await node.pullCommands(); // next pull retries and succeeds
     expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'cancelling' });
     expect(center.acks).toEqual([cmd.id]);
+  });
+});
+
+describe('DurableNode v2 lead PROJECT artifact verification (e2d-3e)', () => {
+  // 牵头 PROJECT offer,携一条 path deliverable 的契约(执行方须交付 dist/report.md)。
+  const ledProjectOffer = (contract: Record<string, unknown>): Record<string, unknown> =>
+    ({ kind: 'project', summary: 'led project', offer_ttl_ms: 30_000, lease_ms: 60_000, contract });
+
+  it('drain 在 lead.consume 前预置 stageArtifactVerification:牵头 PROJECT task.result 经 collect+验签+重新哈希+契约核对 → done', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const taskId = newId();
+    const files = [{ path: 'dist/report.md', bytes: new TextEncoder().encode('# 真实产物') }];
+    const contract = { deliverables: [{ path: 'dist/report.md' }] };
+    const repo = join(f.root, 'artifacts.git');
+    const branch = `qlong/${taskId}/a1`;
+    // 注入牵头验收端口(替代信任根):collect 回真字节、resolve 回执行方(peer)登记公钥。
+    const collectArtifacts = vi.fn(async () => ({ ok: true, files }));
+    const resolvePubkey = vi.fn(async () => f.peerKeys.publicKey);
+    const node = await f.makeNode({ collectArtifacts, resolvePubkey });
+    await node.start();
+
+    // 牵头发起 + 派发 PROJECT(携契约),泵密封 offer 到网关。
+    expect(node.lead.originate(taskId, 'project')).toBe(true);
+    expect(node.lead.dispatch(taskId, f.peerId, ledProjectOffer(contract))).toBe(true);
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+
+    // 执行方(peer)接受 → running。
+    f.send(delivery(f.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running' }));
+
+    // 执行方回 PROJECT task.result,内联由 peer 登记私钥签名的清单(钥标识 == 信封署名者 peerId/纪元1)。
+    const signed = signManifest(buildManifest(taskId, 1, f.peerId, 1, files), f.peerKeys.priv);
+    f.send(delivery(f.signPeer({ type: 'task.result', task_id: taskId, attempt: 1 },
+      { status: 'done', artifacts: [{ repo, branch, manifest: signed }] })));
+
+    // drain 路由到牵头方 → stageArtifactVerification 预置判定 true → consume → 机器读缓存放行 → done。
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'done' }));
+    expect(collectArtifacts).toHaveBeenCalledWith(repo, taskId, branch); // 每-attempt 分支透传
+    expect(resolvePubkey).toHaveBeenCalledWith(f.peerId, 1);             // 按信封署名者回源公钥
+    expect(node.executor.snapshot().slot).toBeNull();                    // 牵头任务绝不落本机执行槽
   });
 });
 

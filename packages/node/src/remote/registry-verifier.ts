@@ -108,3 +108,34 @@ export function createRegistryVerifier(
     }
   };
 }
+
+/**
+ * e2d-3c:牵头方产物验签公钥回源(ARTIFACT-ACCEPTANCE §4.3)。复用 fetchRegistryJson + createRegistryVerifier
+ * 内层同款校验(node_id/key_epoch/status current|historical/team),独立导出、返回 Uint8Array|undefined
+ * (对齐 lead.ts resolvePubkey 端口)。无额外缓存——verdicts 缓存已保证每个唯一 (context,delivery) 至多解析一次。
+ * 失败一律 undefined(fail-closed):非法输入不回源、目录故障/畸形响应/非白名单纪元/跨队均静默降级为无法验签。
+ */
+export function createPubkeyResolver(
+  opts: RegistryConnection,
+  identity: RegistryIdentity,
+): (nodeId: string, keyEpoch: number) => Promise<Uint8Array | undefined> {
+  // Capture immutable config/identity; callers cannot mutate the trust binding after construction.
+  const connection = { registryUrl: opts.registryUrl, nodeToken: opts.nodeToken };
+  const teamId = identity.team_id;
+  return async (nodeId, keyEpoch) => {
+    try {
+      // Validate inputs before any I/O: non-UUID sender or non-positive-integer epoch never hits the directory.
+      if (!isUuid(nodeId) || !epoch(keyEpoch)) return undefined;
+      const key = await fetchRegistryJson(connection, `/v1/nodes/${encodeURIComponent(nodeId)}/pubkey?epoch=${keyEpoch}`);
+      // Same authenticated-endpoint guards as the envelope verifier: exact sender/epoch, current|historical only,
+      // and team match when the directory echoes team_id (defense-in-depth; the live endpoint omits it).
+      if (!record(key) || key.node_id !== nodeId || key.key_epoch !== keyEpoch ||
+          (key.status !== 'current' && key.status !== 'historical') ||
+          (key.team_id !== undefined && key.team_id !== teamId)) return undefined;
+      return publicKey(key.pubkey) ?? undefined;
+    } catch {
+      // Includes directory outages, malformed keys and transport exceptions: never throw into acceptance.
+      return undefined;
+    }
+  };
+}

@@ -354,3 +354,68 @@ export function collectArtifacts(
     return { ok: false, reason: String(e instanceof Error ? e.message : e) };
   }
 }
+
+export interface CollectSignedOptions {
+  /** git 可执行(默认稳健解析) */
+  gitBin?: string;
+  /** 每个 git 子进程调用的墙钟超时(ms);默认 120000。超时即中止并抛错,绝不静默截断。 */
+  timeoutMs?: number;
+  /** 收取产物字节总和上限;默认 256MB。超限即中止并抛错。 */
+  maxBytes?: number;
+}
+
+/**
+ * e2d-3:异步签名产物收取(ARTIFACT-ACCEPTANCE §4.3 的牵头侧生产半)。镜像 publishSignedArtifacts:
+ * - 全程异步(execFile promisify + AbortSignal.timeout),不同步阻塞事件循环——牵头方自身租约续租/
+ *   取消轮询/心跳在大产物 fetch 期间继续,避免事件循环阻塞导致租约误过期→误 reclaim;
+ * - 按**显式 branch**收取(每-attempt 分支 qlong/<task>/a<attempt>);branch 命名策略由调用方(适配器)决定;
+ * - 逐文件 cat-file blob 以 **buffer 编码**回读原始字节(二进制产物不经 utf8 损坏),牵头方据此重新哈希核对清单;
+ * - 读回 qlong-manifest.json → SignedManifest(损坏/不可解析 → manifest 缺席,验收 fail-closed);
+ *   清单文件本身不计入返回 files(与同步 collectArtifacts 一致);
+ * - 字节预算:收取总字节超 maxBytes → 先于返回中止并抛错(绝不静默截断)。
+ * scratchDir 由调用方(适配器)派生并在收取后清理;本函数只负责 init-if-needed + fetch + 回读。
+ * 失败一律抛错——由适配器转 {ok:false, reason},牵头方验收 fail-closed。
+ */
+export async function collectSignedArtifacts(
+  scratchDir: string,
+  repo: string,
+  branch: string,
+  opts: CollectSignedOptions = {},
+): Promise<{ files: Array<{ path: string; bytes: Uint8Array }>; manifest?: SignedManifest }> {
+  const bin = resolveGitBin(opts.gitBin);
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const maxBytes = opts.maxBytes ?? 256 * 1024 * 1024;
+  // buffer 编码:cat-file 回读的是原始产物字节,绝不能按 utf8 解码(否则二进制产物损坏)。
+  // encoding:'buffer' 保证运行时 stdout 为 Buffer;TS 重载可能仍标 string,故显式收敛为 Buffer。
+  const git = async (args: string[], cwd?: string): Promise<Buffer> => {
+    const { stdout } = await execFileAsync(bin, args, {
+      cwd,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      maxBuffer: 512 * 1024 * 1024,
+      signal: AbortSignal.timeout(timeoutMs),
+      encoding: 'buffer',
+    });
+    return stdout as unknown as Buffer;
+  };
+  if (!existsSync(scratchDir)) mkdirSync(scratchDir, { recursive: true });
+  if (!existsSync(join(scratchDir, '.git'))) await git(['init', '--quiet', scratchDir]);
+  await git(['fetch', '--quiet', '--depth', '1', repo, `refs/heads/${branch}:refs/heads/${branch}`], scratchDir);
+  const names = (await git(['ls-tree', '-r', '--name-only', branch], scratchDir)).toString('utf8').split('\n').filter(Boolean);
+  const files: Array<{ path: string; bytes: Uint8Array }> = [];
+  let manifest: SignedManifest | undefined;
+  let total = 0;
+  for (const name of names) {
+    const bytes = await git(['cat-file', 'blob', `${branch}:${name}`], scratchDir);
+    total += bytes.length;
+    if (total > maxBytes) throw new GitPayloadError(`产物收取总字节超过预算 ${maxBytes}`);
+    if (name === MANIFEST_FILE) {
+      try {
+        const parsed = JSON.parse(bytes.toString('utf8')) as SignedManifest;
+        if (parsed && parsed.alg === 'ed25519' && parsed.manifest && typeof parsed.sig === 'string') manifest = parsed;
+      } catch { /* 清单不可解析 → 缺席,验收 fail-closed */ }
+      continue; // 清单文件不计入 deliverable files
+    }
+    files.push({ path: name, bytes: new Uint8Array(bytes) });
+  }
+  return { files, manifest };
+}

@@ -80,8 +80,8 @@ export interface DurableLeadOptions {
   selectTarget?: TargetSelector;
   /** PROJECT 验收判据注入(缺省用机器默认:project 拒绝、aid 兼容 acceptance_results)。 */
   validateAcceptance?: (resultBody: Record<string, unknown>) => boolean;
-  /** E2 端口:收取某任务产物字节(实现走 git fetch+临时目录+读盘,e2d 适配 payload-git collectArtifacts);缺省 → PROJECT 无法预置判定 → fail-closed(ARTIFACT-ACCEPTANCE §4.3)。 */
-  collectArtifacts?: (repo: string, taskId: string) => Promise<{ ok: boolean; files?: ReadonlyArray<{ path: string; bytes: Uint8Array }>; reason?: string }>;
+  /** E2 端口:按 branch(每-attempt 分支;缺席→实现回退单分支 qlong/<task>)收取某任务产物字节(实现走 git fetch+临时目录+读盘,e2d 适配 createGitArtifactCollector);缺省 → PROJECT 无法预置判定 → fail-closed(ARTIFACT-ACCEPTANCE §4.3)。 */
+  collectArtifacts?: (repo: string, taskId: string, branch?: string) => Promise<{ ok: boolean; files?: ReadonlyArray<{ path: string; bytes: Uint8Array }>; reason?: string }>;
   /** E2 端口:解析执行方登记公钥(实现走 registry HTTP GET /v1/nodes/{id}/pubkey?epoch=);缺省 → 无法验签 → fail-closed。 */
   resolvePubkey?: (nodeId: string, keyEpoch: number) => Promise<Uint8Array | undefined>;
   onFault?: () => void;
@@ -456,6 +456,7 @@ export class DurableLead {
       if (!task || !acceptsArtifactResult(task) || envelope.attempt !== task.attempt || envelope.from.node_id !== task.target) return;
       const repo = inlineRepo(envelope.body);
       if (repo === undefined) return;
+      const branch = inlineBranch(envelope.body);
       const context = acceptanceContext(task);
       const delivery = envelopeDigest(envelope);
       const cached = this.verdicts.get(taskId);
@@ -463,7 +464,7 @@ export class DurableLead {
       const pending: { context: string; delivery: string; verdict?: boolean } = { context, delivery };
       this.verdicts.set(taskId, pending);
       try {
-        const collected = await collect(repo, taskId);
+        const collected = await collect(repo, taskId, branch);
         if (!collected.ok || !collected.files) return; // 未判定，不等于收件可重试
         const pub = await resolve(envelope.from.node_id, envelope.from.key_epoch);
         if (!pub) return;
@@ -544,6 +545,12 @@ function inlineSignedManifest(body: Record<string, unknown>): SignedManifest | u
 function inlineRepo(body: Record<string, unknown>): string | undefined {
   const art = inlineArtifact(body);
   return art && typeof art.repo === 'string' ? art.repo : undefined;
+}
+
+/** 内联产物分支(artifacts[0].branch,执行方推送的每-attempt 分支);非字符串 → undefined(collect 实现据此回退单分支)。 */
+function inlineBranch(body: Record<string, unknown>): string | undefined {
+  const art = inlineArtifact(body);
+  return art && typeof art.branch === 'string' ? art.branch : undefined;
 }
 
 /** 与机器的 result 可达状态保持一致，取消/回收窗口仍可重新预置并参与既有竞态。 */
