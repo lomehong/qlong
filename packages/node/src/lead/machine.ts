@@ -24,7 +24,7 @@ export type LeadTerminal = Extract<LeadState, 'done' | 'failed' | 'escalated' | 
 export interface LeadHistoryEntry {
   node: string;
   attempt: number;
-  outcome: 'offered' | 'accepted' | 'rejected' | 'expired' | 'lost' | 'fail_retryable' | 'fail_fatal' | 'acceptance_failed' | 'result_delivered';
+  outcome: 'offered' | 'accepted' | 'rejected' | 'expired' | 'lost' | 'fail_retryable' | 'fail_fatal' | 'acceptance_failed' | 'result_delivered' | 'owner_redispatch';
   reason_code?: string;
 }
 
@@ -385,6 +385,25 @@ export class LeadTaskMachine {
       ...sendCancel,
       { kind: 'schedule', timer: 'cancel_wait', atMs: this.rec.cancelWaitUntil },
     ];
+  }
+
+  /**
+   * owner 强制改派(E3 / OWNER-COMMAND §4.4):排除当前 target('once')后复用标准 reclaim 路径重派。
+   * 幂等守卫(§1.7 at-least-once):终态 / cancelling(用户取消优先)/ 已 reclaiming(重拉不重复撤销)一律 no-op。
+   * drafting(已在等待重派)只补排除 + requestDispatch,不重复撤销、不追加历史、不改状态。
+   */
+  redispatchByOwner(now: number): LeadAction[] {
+    if (this.terminal) return [];
+    if (this.rec.state === 'cancelling') return []; // 用户取消优先,不被改派覆盖
+    if (this.rec.state === 'reclaiming') return []; // §1.7 幂等:已在回收途中,重拉不重复撤销
+    if (this.rec.target) this.rec.excluded[this.rec.target] = 'once'; // 改派 = 离开当前节点
+    if (this.rec.state === 'drafting') {
+      // 已在等待改派:补排除当前 target 后请求重派(selectTarget 避开),不重复撤销
+      return [{ kind: 'requestDispatch', nextAttempt: this.rec.attempt + 1 }];
+    }
+    // offered/running:先撤销当前 attempt(task.cancel reason:reclaim)后经 drain→budgetOrEscalate 改派
+    this.rec.history.push({ node: this.rec.target ?? '?', attempt: this.rec.attempt, outcome: 'owner_redispatch' });
+    return this.beginReclaim('reclaim', now);
   }
 
   /** R4:一切回收路径统一 先撤销、后改派 */

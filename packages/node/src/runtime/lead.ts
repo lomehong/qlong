@@ -274,6 +274,15 @@ export class DurableLead {
     });
   }
 
+  /** owner 强制改派(E3/OWNER-COMMAND §4.4):排除当前 target 经 reclaim→selectTarget 重派;单任务 CAS 事务(镜像 cancel)。 */
+  redispatch(taskId: string, now = Date.now()): boolean {
+    return this.checked(() => {
+      this.assertHealthy();
+      if (!isUuid(taskId)) throw new TypeError('redispatch taskId must be a UUID');
+      return this.transitionEvent(taskId, (machine) => machine.redispatchByOwner(now), now);
+    });
+  }
+
   /** 单任务事务:读→跑事件→(有副作用则)CAS 提交;返回状态是否净变化。 */
   private transitionEvent(taskId: string, runner: (machine: LeadTaskMachine) => LeadAction[], now: number): boolean {
     const stateKey = leadStateKey(taskId);

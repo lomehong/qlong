@@ -33,9 +33,18 @@ export interface RegistryServerOptions {
    * 形态)→ 503 失败关闭,绝不伪称“查无此投递”。
    */
   deliveryOutcome?: (fromNode: string, msgId: string) => undefined | { status: string; digest: string; toNode: string };
+  /**
+   * owner 命令通道(E3,设计 docs/repair/OWNER-COMMAND.md):中心持久命令队列。owner 路由 enqueue 任务级
+   * cancel/redispatch 命令意图(投影只读,返回 202),节点经 PULL 取回路由到自己(lead=本机)的命令、
+   * 事务化应用后 ack。未配置(无中心 SQLite 的 ephemeral 形态)→ 相关路由 503 失败关闭,绝不伪称“查无命令”。
+   */
+  commandStore?: import('./command-store.js').SqliteCommandStore;
 }
 
 const MAX_BODY = 1 << 20;
+
+/** 节点单次 PULL 命令上限(防单次响应过大;剩余命令下轮泵续拉)。 */
+const COMMAND_PULL_LIMIT = 64;
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -434,6 +443,22 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           return;
         }
 
+        // owner 命令 PULL(E3,§4.3):节点取回路由到自己(lead=本机)的 pending 命令。身份强制取自
+        // nodeToken(self.node_id),绝不取自请求 → 同队他节点取不到、无法窃取/伪造(防越权)。
+        if (seg[2] === 'me' && seg[3] === 'commands' && seg.length === 4 && method === 'GET') {
+          const self = registry.authByToken(token);
+          if (!opts.commandStore) throw new ApiError('bad_request', '命令通道未配置', 503);
+          sendJson(res, 200, { commands: opts.commandStore.pendingFor(self.node_id, COMMAND_PULL_LIMIT) });
+          return;
+        }
+        // 命令 ack(E3,§4.3):以 (id, lead=本机, status='pending') 为栅栏置 acked;被栅栏返回 ok:false(幂等)。
+        if (seg[2] === 'me' && seg[3] === 'commands' && seg[5] === 'ack' && seg.length === 6 && method === 'POST') {
+          const self = registry.authByToken(token);
+          if (!opts.commandStore) throw new ApiError('bad_request', '命令通道未配置', 503);
+          sendJson(res, 200, { ok: opts.commandStore.ack(seg[4] as string, self.node_id, Date.now()) });
+          return;
+        }
+
         // /v1/nodes/{id}/pubkey
         if (seg[3] === 'pubkey' && seg.length === 4 && method === 'GET') {
           const self = registry.authByToken(token);
@@ -511,6 +536,22 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
           const task = registry.getTask(teamId, seg[4] as string);
           if (!task) throw new ApiError('bad_request', '任务不存在', 404);
           sendJson(res, 200, task);
+          return;
+        }
+        // owner 任务级控制命令(E3,§4.2):cancel/redispatch。assertOwner 授权 → 解析任务(getTask 按 team
+        // 作用域,跨队/不存在皆 404)→ enqueue 命令意图(路由到 task.lead 牵头节点)。**中心投影只读**:绝不翻
+        // task 行,返回 202(受理待执行);命令由牵头节点 PULL 后经 lead.cancel/redispatch 事务化执行、回报新投影。
+        if (seg[3] === 'tasks' && (seg[5] === 'cancel' || seg[5] === 'redispatch') && method === 'POST' && seg.length === 6) {
+          await assertOwner(opts, req, teamId);
+          const taskId = seg[4] as string;
+          const task = registry.getTask(teamId, taskId);
+          if (!task) throw new ApiError('bad_request', '任务不存在', 404);
+          if (!opts.commandStore) throw new ApiError('bad_request', '命令通道未配置', 503);
+          const cmd = opts.commandStore.enqueue(
+            { team_id: teamId, lead: task.lead, task_id: taskId, kind: seg[5] as 'cancel' | 'redispatch' },
+            Date.now(),
+          );
+          sendJson(res, 202, { command_id: cmd.id, kind: cmd.kind, task_id: cmd.task_id, lead: cmd.lead });
           return;
         }
         // 暂停/恢复属于 owner 管理,普通成员不得调用;目标必须属于 URL team。

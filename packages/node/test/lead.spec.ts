@@ -213,3 +213,93 @@ describe('牵头方状态机:R3 业务续租生产半(B2a)', () => {
     expect(m.rec.leaseDeadline).toBe(200_000 + 230_000);
   });
 });
+
+describe('牵头方状态机:owner 强制改派 redispatchByOwner(E3/OWNER-COMMAND §4.4)', () => {
+  it('running → 排除当前 target(once) + 先撤销(task.cancel reason:reclaim)后改派 + 记 owner_redispatch 历史', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
+    expect(m.rec.state).toBe('running');
+    const actions = m.redispatchByOwner(1_000);
+    expect(m.rec.state).toBe('reclaiming');
+    expect(m.rec.excluded[B]).toBe('once');
+    expect(m.rec.history.at(-1)).toMatchObject({ node: B, attempt: 1, outcome: 'owner_redispatch' });
+    const msgs = sends(actions);
+    expect(msgs[0]?.type).toBe('task.cancel');
+    expect(msgs[0]?.body).toEqual({ reason: 'reclaim' });
+  });
+
+  it('running 改派 → drain 到期烧 acceptedFailedBudget → drafting + requestDispatch(attempt+1)', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
+    m.redispatchByOwner(1_000);
+    expect(m.rec.excluded[B]).toBe('once');
+    const afterDrain = m.onTimer('drain', 1_000 + 30_000);
+    expect(m.rec.acceptedFailedBudget).toBe(1); // §4.4:复用 reclaim 路径,running→已接受烧 acceptedFailedBudget
+    expect(m.rec.state).toBe('drafting');
+    expect(dispatched(afterDrain)[0]?.nextAttempt).toBe(2);
+  });
+
+  it('offered(未接受)改派 → reclaiming;drain 后烧 dispatchRounds(非 acceptedFailedBudget)', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    expect(m.rec.state).toBe('offered');
+    const actions = m.redispatchByOwner(1_000);
+    expect(m.rec.state).toBe('reclaiming');
+    expect(m.rec.excluded[B]).toBe('once');
+    expect(sends(actions)[0]?.body).toEqual({ reason: 'reclaim' });
+    const afterDrain = m.onTimer('drain', 1_000 + 30_000);
+    expect(m.rec.dispatchRounds).toBe(1);
+    expect(m.rec.acceptedFailedBudget).toBe(0);
+    expect(dispatched(afterDrain)[0]?.nextAttempt).toBe(2);
+  });
+
+  it('drafting(等待重派)改派 → 排除当前 target + requestDispatch,不重复撤销/不追加历史/不改状态', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onTimer('offer_ttl', 60_001);
+    m.onTimer('drain', 60_001 + 30_000);
+    expect(m.rec.state).toBe('drafting');
+    expect(m.rec.target).toBe(B);
+    const historyLen = m.rec.history.length;
+    const actions = m.redispatchByOwner(100_000);
+    expect(m.rec.state).toBe('drafting'); // drafting 分支不改状态(等选择器)
+    expect(m.rec.excluded[B]).toBe('once');
+    expect(dispatched(actions)[0]?.nextAttempt).toBe(2);
+    expect(sends(actions)).toEqual([]); // 不重复发 task.cancel
+    expect(m.rec.history.length).toBe(historyLen);
+  });
+
+  it('cancelling 改派 → no-op(用户取消优先,不被改派覆盖,不排除 target)', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
+    m.cancelByUser(500);
+    expect(m.rec.state).toBe('cancelling');
+    expect(m.redispatchByOwner(1_000)).toEqual([]);
+    expect(m.rec.state).toBe('cancelling');
+    expect(m.rec.excluded[B]).toBeUndefined();
+  });
+
+  it('已 reclaiming 改派 → no-op(§1.7 at-least-once 幂等:重拉不重复撤销/不重复追加历史)', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
+    m.redispatchByOwner(1_000); // running→reclaiming,excluded[B] 已置,历史已追加一条
+    expect(m.rec.state).toBe('reclaiming');
+    expect(m.redispatchByOwner(2_000)).toEqual([]);
+    expect(m.rec.state).toBe('reclaiming');
+    expect(m.rec.history.filter((h) => h.outcome === 'owner_redispatch')).toHaveLength(1);
+  });
+
+  it('终态(done)改派 → no-op', () => {
+    const m = mk();
+    m.dispatchTo(B, offerBody(), 0);
+    m.onMessage('task.accept', B, 1, { lease_ms: 300000 }, 0);
+    m.onMessage('task.result', B, 1, { status: 'done', summary: 'ok' }, 100);
+    expect(m.rec.state).toBe('done');
+    expect(m.redispatchByOwner(1_000)).toEqual([]);
+    expect(m.rec.state).toBe('done');
+  });
+});

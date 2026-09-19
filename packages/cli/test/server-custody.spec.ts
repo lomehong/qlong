@@ -10,7 +10,7 @@ import {
   cleanupServerFixtures, nodeHeaders, ownerHeaders, persistedSnapshot, type Owner,
 } from './server-durable-fixtures.js';
 import {
-  centerView, claimTablesExist, CustodyFixture, failCommit, inspectSql, offer, readCenter, readClaim,
+  centerView, claimTablesExist, CustodyFixture, failCommit, inspectSql, offer, readCenter, readClaim, readCommands,
   repairCommit, setup, wait,
 } from './server-custody-helpers.js';
 
@@ -331,7 +331,7 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await Promise.all([a.close(), b.close()]);
   }, 20_000);
 
-  it('appends center schema v2+v3 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
+  it('appends center schema v2+v3+v4 to an actual v1 DB without rewriting v1 checksums or losing registry/auth data', async () => {
     const f = new CustodyFixture();
     const v1 = CENTER_SCHEMA.migrations[0]!;
     const store = SqliteStore.open({ ...f.options(), filename: 'center.sqlite',
@@ -363,14 +363,16 @@ describe('startQlongServer v2 custody with real node runtimes', () => {
     await f.stop();
     // Check the migration before authenticated HTTP requests can legitimately touch last_seen.
     f.offline((storage) => {
-      expect(storage.version).toBe(3);
+      expect(storage.version).toBe(4);
       expect(persistedSnapshot(storage) === before).toBe(true);
-      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2, 3]);
+      expect(storage.database.prepare('SELECT version FROM _qlong_migrations ORDER BY version').all().map((row) => row.version)).toEqual([1, 2, 3, 4]);
       expect(storage.database.prepare('SELECT checksum FROM _qlong_migrations WHERE version = 1').get()?.checksum === v1.checksum).toBe(true);
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_custody').get()?.count).toBe(0);
       // v3 claim 双表追加为空(不触碰既有数据);迁移仅追加,绝不重写 v1/v2。
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_claim').get()?.count).toBe(0);
       expect(storage.database.prepare('SELECT count(*) AS count FROM gateway_claim_seq').get()?.count).toBe(0);
+      // v4 owner 命令表追加为空(E3a);迁移仅追加,绝不重写 v1/v2/v3。
+      expect(storage.database.prepare('SELECT count(*) AS count FROM registry_commands').get()?.count).toBe(0);
     });
     await f.start('open');
     const me = await f.call<{ csrf: string }>('GET', '/v1/auth/me', undefined, ownerHeaders(owner));
@@ -471,7 +473,7 @@ describe('startQlongServer D1c: durable cross-process claim registry (center sch
 
     await f.stop();
     f.offline((storage) => {
-      expect(storage.version).toBe(3); // v3 迁移已应用
+      expect(storage.version).toBe(4); // v4 迁移已应用
       // seq 高水位跨停机持久(fencing token 绝不复用);活跃行已随 release 清空。
       expect(storage.database.prepare('SELECT last_generation FROM gateway_claim_seq WHERE node_id = ?')
         .get(node.node_id)?.last_generation).toBe(1);
@@ -522,4 +524,66 @@ describe('startQlongServer D1d: custody pump relay (single-port /internal/pump)'
     await expect(f.start('create', { relaySecret: 'x', clusterSecret: 'y' }))
       .rejects.toThrow(/legacy cluster routing/i);
   });
+});
+
+describe('startQlongServer E3d: owner command channel end-to-end (owner to center to lead PULL to projection)', () => {
+  // E3 全链收尾:真实 owner 会话经授权 API 下 cancel 命令 → 中心持久命令队列 → 真实牵头节点 commandTimer
+  // PULL → lead.cancel 单任务事务 → task.report 投影 'cancelling' 回报中心 + 命令 ack。覆盖 e3a(owner 路由)
+  // 与 e3c(节点 PULL)之间此前无端到端测试的组成缺口。变异靶点(§6):移除节点 PULL → 投影永停 'running'(RED)。
+  it('applies an owner cancel to a running led task, projects cancelling back, and acks the command', async () => {
+    const { f, handles, owner, teamId, sender, receiver } = await setup();
+    const leadNode = await createDurableNode({
+      registryUrl: `http://127.0.0.1:${handles.registryPort}`,
+      gatewayUrl: `ws://127.0.0.1:${handles.registryPort}${handles.gatewayPath}`,
+      nodeToken: sender.credentials.node_token,
+      privKey: sender.pair.priv,
+      storage: {
+        allowedBase: f.root, dataDir: sender.dataDir, mode: 'create', filename: 'node.sqlite',
+        localFilesystemConfirmed: true, windowsAclConfirmed: true, busyTimeoutMs: 25,
+      },
+      validateAcceptance: () => true,
+      reportIntervalMs: 0,
+      tickIntervalMs: 50,
+      commandIntervalMs: 30, // E3d:命令泵活跃,周期 PULL 中心 owner 命令
+      shutdownFlushMs: 2_000,
+    });
+    try {
+      await leadNode.start();
+      const path = `/v1/teams/${teamId}/tasks`;
+      const taskId = newId();
+      const readTask = async (): Promise<TaskRecord> =>
+        (await f.call<TaskRecord>('GET', `${path}/${taskId}`, undefined, ownerHeaders(owner))).body;
+      const receipt = (type: string, body: Record<string, unknown>): EnvelopeV1 => signEnvelope({
+        v: 1, type, msg_id: newId(), task_id: taskId, attempt: 1, hops: 0,
+        ts: new Date().toISOString(), exp: new Date(Date.now() + 120_000).toISOString(),
+        from: { node_id: receiver.credentials.node_id, team_id: receiver.credentials.team_id, key_epoch: receiver.credentials.key_epoch },
+        to: { node_id: sender.credentials.node_id, team_id: sender.credentials.team_id },
+        trace: { trace_id: newId(), parent_span: null, origin_node: receiver.credentials.node_id },
+        body,
+      }, receiver.pair.priv);
+
+      // 牵头方发起并派发;执行方(真实签名)经真实网关回执 accept → 投影单调到 'running'。
+      expect(leadNode.lead.originate(taskId, 'project')).toBe(true);
+      expect(leadNode.lead.dispatch(taskId, receiver.credentials.node_id, {
+        kind: 'project', summary: 'owner-cancel e2e', offer_ttl_ms: 60_000, lease_ms: 60_000,
+      })).toBe(true);
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('offered');
+      const exec = await f.rawSender(handles, receiver);
+      await exec.send(receipt('task.accept', { lease_ms: 60_000 }), 'stored');
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('running');
+
+      // owner 经授权 API(会话 Cookie + CSRF)下 cancel → 202 受理;此刻中心投影仍 'running'(投影只读,§1.4)。
+      const cmd = await f.call<{ command_id: string; kind: string; task_id: string; lead: string }>(
+        'POST', `${path}/${taskId}/cancel`, undefined, ownerHeaders(owner));
+      expect(cmd.status).toBe(202);
+      expect(cmd.body).toMatchObject({ kind: 'cancel', task_id: taskId, lead: sender.credentials.node_id });
+
+      // 牵头节点命令泵 PULL → lead.cancel(单任务 CAS 事务)→ 投影 'cancelling' 回报中心;命令 ack(pending 清零)。
+      await expect.poll(async () => (await readTask()).status, { timeout: 4_000, interval: 20 }).toBe('cancelling');
+      await wait(() => expect(readCommands(f, sender.credentials.node_id)).toMatchObject({ pending: 0, acked: 1 }));
+      await exec.close();
+    } finally {
+      await leadNode.stop().catch(() => { /* 已故障/已停的 stop 在部分断言失败路径下属预期 */ });
+    }
+  }, 20_000);
 });

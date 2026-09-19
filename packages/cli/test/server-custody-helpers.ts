@@ -189,6 +189,16 @@ export function readClaim(f: DurableServerFixture, nodeId: string) {
   });
 }
 
+/** Read-only peek at the durable owner-command queue (E3) while the center runs; WAL-concurrent like readClaim. */
+export function readCommands(f: DurableServerFixture, leadNodeId: string) {
+  return inspectSql(join(f.dataDir, 'center.sqlite'), (db) => {
+    const count = (status: string): number =>
+      Number(db.prepare('SELECT count(*) AS n FROM registry_commands WHERE lead = ? AND status = ?')
+        .get(leadNodeId, status)?.n ?? 0);
+    return { pending: count('pending'), acked: count('acked') };
+  });
+}
+
 /** True once center schema v3 has landed both claim tables (D1c migration). */
 export function claimTablesExist(f: DurableServerFixture): boolean {
   return inspectSql(join(f.dataDir, 'center.sqlite'), (db) =>

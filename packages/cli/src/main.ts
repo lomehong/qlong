@@ -423,6 +423,39 @@ if (cmd === 'tasks') {
   process.exit(0);
 }
 
+if (cmd === 'task') {
+  // owner 任务级控制(E3,OWNER-COMMAND §4.2):cancel/redispatch 经授权 API 事务化下达。授权 = owner 会话
+  // (Cookie + CSRF,与 console 同源);命令入队中心持久队列,由牵头节点周期 PULL 后经 lead.cancel/redispatch
+  // 单任务 CAS 事务执行。202 = 已受理待执行(非即时完成);投影只读,新状态由牵头节点回报(§1.4)。
+  const sub = process.argv[3] ?? '';
+  const taskId = process.argv[4] ?? '';
+  if ((sub !== 'cancel' && sub !== 'redispatch') || !taskId) {
+    console.error('用法: qlong task <cancel|redispatch> <task_id>');
+    console.error('  环境: QLONG_REGISTRY_URL QLONG_TEAM_ID QLONG_OWNER_COOKIE QLONG_OWNER_CSRF');
+    process.exit(2);
+  }
+  const regUrl = process.env.QLONG_REGISTRY_URL ?? 'http://127.0.0.1:3200';
+  const teamId = process.env.QLONG_TEAM_ID ?? '';
+  const cookie = process.env.QLONG_OWNER_COOKIE ?? '';
+  const csrf = process.env.QLONG_OWNER_CSRF ?? '';
+  if (!teamId || !cookie || !csrf) {
+    console.error('set QLONG_TEAM_ID + QLONG_OWNER_COOKIE + QLONG_OWNER_CSRF(owner 会话凭证;控制台登录后从浏览器会话取得)');
+    process.exit(1);
+  }
+  const res = await fetch(`${regUrl}/v1/teams/${teamId}/tasks/${taskId}/${sub}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-CSRF-Token': csrf },
+  });
+  const d = (await res.json().catch(() => ({}))) as { command_id?: string; kind?: string; task_id?: string; lead?: string; error?: { message?: string } };
+  if (res.status === 202) {
+    console.log('已受理(202):', d.kind ?? sub, (d.task_id ?? taskId).slice(0, 12), '→ 牵头节点', (d.lead ?? '').slice(0, 12), '| 命令', (d.command_id ?? '').slice(0, 12));
+    console.log('命令已入队中心;牵头节点下次 PULL 时事务化执行(取消/改派),非即时完成。');
+    process.exit(0);
+  }
+  console.error(`命令被拒(${res.status}):`, d.error?.message ?? res.statusText);
+  process.exit(1);
+}
+
 if (cmd === 'doctor') {
   console.log('qlong doctor(真实联调前检查)');
   const nodeMajor = Number(process.versions.node.split('.')[0]);
@@ -449,5 +482,5 @@ if (cmd === 'doctor') {
   process.exit(0);
 }
 
-console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks>');
+console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead>');
 process.exit(2);

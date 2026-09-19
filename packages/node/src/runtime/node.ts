@@ -13,7 +13,7 @@
  */
 import { dirname } from 'node:path';
 import {
-  DEFAULT_PARAMS, newId, newTraceContext, publicKeyFromPrivate, signEnvelope, toBase64, validateEnvelope,
+  DEFAULT_PARAMS, isUuid, newId, newTraceContext, publicKeyFromPrivate, signEnvelope, toBase64, validateEnvelope,
   type EnvelopeV1, type QlongParams,
 } from '@qlong/core';
 import { SqliteStore } from '../../../storage/src/index.js';
@@ -84,6 +84,8 @@ export interface DurableNodeOptions {
   custodyRetentionMs?: number;
   /** 投递墓碑 GC 周期 ms(默认 6h;0 = 关闭);仅在 custodyRetentionMs 配置后生效 */
   gcIntervalMs?: number;
+  /** owner 命令 PULL 周期 ms(E3,OWNER-COMMAND §4.3;0 = 关闭周期泵,仍可手动 pullCommands);默认 2000,边界 [0, 600000] */
+  commandIntervalMs?: number;
   /** 显式身份注入(默认经 registry /v1/nodes/me 发现;测试/替代信任根用) */
   identity?: RegistryIdentity;
   /** 入站授权钩子注入(默认 registry 验签;测试/替代信任根用) */
@@ -112,6 +114,13 @@ export interface DurableNode {
   /** 手动泵动:重授权并消费 pending 收件,推进 executor(测试/宿主用) */
   drain(): Promise<void>;
   /**
+   * owner 命令 PULL(E3,OWNER-COMMAND §4.3):从中心取回路由到本机(lead=me)的 pending 命令,逐条经
+   * lead.cancel/redispatch 事务化应用后 ack(at-least-once + 幂等)。命令指向非本机牵头的任务时 ack 丢弃,
+   * 绝不让陈旧命令 fail-closed 整节点;传输失败可重试(留 pending 下轮续拉)。暴露供测试/手动驱动,亦由
+   * start() 的 commandTimer 周期调用。
+   */
+  pullCommands(): Promise<void>;
+  /**
    * 跨机牵头接管(C2d):导入 origin 导出的 bundle 并按 attempt 高水位 fence(禁双主/终态归档),
    * 随即驱动一次重派——归位 drafting 的在途任务经注入的 selectTarget 立即改派并 flush 新 offer 与
    * 首条上报修订,无需等待下个周期泵。等价 v1 lead/takeover.ts importCheckpoints 的 onNeedDispatch
@@ -129,6 +138,18 @@ function bounded(value: number | undefined, fallback: number, min: number, max: 
     throw new TypeError(`${name} must be an integer in [${min}, ${max}]`);
   }
   return n;
+}
+
+/**
+ * owner 命令的节点侧最小投影(E3,OWNER-COMMAND §4.3):pullCommands 只需 id/task_id/kind 即可应用与 ack;
+ * 完整 CommandRecord 由中心 command-store 校验并投影,节点侧只做防御性解析(绝不盲信网络字节)。
+ */
+interface NodeCommand { id: string; task_id: string; kind: 'cancel' | 'redispatch' }
+
+function isNodeCommand(value: unknown): value is NodeCommand {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === 'string' && isUuid(v.task_id) && (v.kind === 'cancel' || v.kind === 'redispatch');
 }
 
 export async function createDurableNode(opts: DurableNodeOptions): Promise<DurableNode> {
@@ -162,6 +183,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   const shutdownFlushMs = bounded(opts.shutdownFlushMs, 5_000, 0, 600_000, 'shutdownFlushMs');
   const reportIntervalMs = bounded(opts.reportIntervalMs, 60_000, 0, 2_147_483_647, 'reportIntervalMs');
   const gcIntervalMs = bounded(opts.gcIntervalMs, 6 * 3_600_000, 0, 2_147_483_647, 'gcIntervalMs');
+  const commandIntervalMs = bounded(opts.commandIntervalMs, 2_000, 0, 600_000, 'commandIntervalMs');
 
   // 3) 出站签名(与旧 session 同一信封装配);executor 事务内不签名——这里预先闭包。
   const seal = (out: Outbound): EnvelopeV1 => {
@@ -191,15 +213,18 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
   let stopping: Promise<void> | undefined;
   let draining = false;
   let flushing = false;
+  let pullingCommands = false;
   let nextVerifyRetryAt = 0;
   let tickTimer: NodeJS.Timeout | undefined;
   let reportTimer: NodeJS.Timeout | undefined;
   let gcTimer: NodeJS.Timeout | undefined;
+  let commandTimer: NodeJS.Timeout | undefined;
 
   const stopTimers = (): void => {
     if (tickTimer !== undefined) { clearInterval(tickTimer); tickTimer = undefined; }
     if (reportTimer !== undefined) { clearInterval(reportTimer); reportTimer = undefined; }
     if (gcTimer !== undefined) { clearInterval(gcTimer); gcTimer = undefined; }
+    if (commandTimer !== undefined) { clearInterval(commandTimer); commandTimer = undefined; }
   };
 
   const failClosed = (): void => {
@@ -314,6 +339,66 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
       .finally(() => { flushing = false; });
   };
 
+  /** 命令 ack(best-effort):POST /v1/nodes/me/commands/:id/ack。丢失 → 命令重拉重应用,幂等兜底(§1.7)。 */
+  const ackCommand = async (base: string, id: string): Promise<void> => {
+    try {
+      await fetch(`${base}/v1/nodes/me/commands/${encodeURIComponent(id)}/ack`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + opts.nodeToken },
+        signal: AbortSignal.timeout(5_000),
+        redirect: 'error',
+      });
+    } catch { /* best-effort:ack 丢失不影响正确性,命令留 pending 下轮重拉重应用(幂等) */ }
+  };
+
+  /**
+   * owner 命令 PULL(E3,OWNER-COMMAND §4.3):GET 中心 pending 命令 → 逐条事务化应用 → ack。at-least-once +
+   * 幂等:ack 前崩溃/丢失则命令重拉重应用,由机器守卫(cancelByUser/redispatchByOwner 对终态/cancelling/
+   * reclaiming no-op)保证无重复副作用。
+   *
+   * 关键(§7):命令可能指向本机从未 originate / 已 GC 的任务——lead.cancel/redispatch 对未 originate 任务会抛出,
+   * 经 checked 触发整节点 fail-closed。故先以 runtime.state(leadStateKey) 预检 ledByUs(镜像 drain):非本机牵头
+   * → ack 丢弃(陈旧命令重拉无益),绝不让它 fault 节点。ledByUs 为真却仍抛出 = 真实存储/损坏故障 → 已 fail-closed,
+   * 不 ack(留 pending 待恢复)。传输失败(GET/ack)可重试:GET 失败本轮放弃,下轮 commandTimer 续拉,绝不伪称“无命令”。
+   */
+  async function pullCommands(): Promise<void> {
+    if (stopped || faulted || pullingCommands) return;
+    pullingCommands = true;
+    try {
+      const base = opts.registryUrl.replace(/\/+$/, '');
+      let commands: unknown[];
+      try {
+        const res = await fetch(`${base}/v1/nodes/me/commands`, {
+          method: 'GET',
+          headers: { Authorization: 'Bearer ' + opts.nodeToken },
+          signal: AbortSignal.timeout(5_000),
+          redirect: 'error',
+        });
+        if (!res.ok) return; // 中心瞬断/503:本轮放弃,下轮重拉(绝不当成“无命令”而漏掉 pending)
+        const json = await res.json() as { commands?: unknown };
+        commands = Array.isArray(json.commands) ? json.commands : [];
+      } catch {
+        return; // 网络/解析失败:可重试,下轮 commandTimer 续拉
+      }
+      for (const raw of commands) {
+        if (stopped || faulted) return;
+        if (!isNodeCommand(raw)) continue; // 畸形命令:跳过(中心已 shape 校验;无有效 id 无法 ack)
+        // ledByUs 预检(§7):非本机牵头 → 陈旧命令,ack 丢弃;否则 lead.cancel/redispatch 会抛 → 整节点 fail-closed。
+        if (runtime.state(leadStateKey(raw.task_id)) === undefined) { await ackCommand(base, raw.id); continue; }
+        try {
+          if (raw.kind === 'cancel') lead.cancel(raw.task_id);
+          else lead.redispatch(raw.task_id);
+        } catch {
+          // lead 事务故障(存储/损坏):已 fail-closed 并回调;不 ack,命令留 pending 待恢复后续拉。
+          return;
+        }
+        await ackCommand(base, raw.id); // 应用成功(或幂等 no-op)→ ack;丢失则重拉重应用(幂等兜底)
+      }
+    } finally {
+      pullingCommands = false;
+    }
+  }
+
   const pumpTick = (): void => {
     if (stopped || faulted) return;
     try { executor.tick(); } catch { /* 故障已闭锁 */ }
@@ -367,6 +452,7 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
     client,
     store,
     drain,
+    pullCommands,
     takeover: (bundle: DurableLeadTakeoverBundle): DurableLeadImportResult => {
       // importTasks 内部对损坏 bundle / 本地状态 fail-closed(抛出并回调 onFault),绝不静默接管。
       const result = lead.importTasks(bundle);
@@ -406,6 +492,11 @@ export async function createDurableNode(opts: DurableNodeOptions): Promise<Durab
           try { runtime.prune(); } catch { failClosed(); }
         }, gcIntervalMs);
         gcTimer.unref();
+      }
+      // owner 命令泵(E3):周期 PULL 中心命令并事务化应用。重启后 pending 命令由中心续存,首次触发即续拉(§1.1)。
+      if (commandIntervalMs > 0) {
+        commandTimer = setInterval(() => { void pullCommands().catch(() => { /* 故障已由 store/lead 闭锁 */ }); }, commandIntervalMs);
+        commandTimer.unref();
       }
     },
     stop: (): Promise<void> => {

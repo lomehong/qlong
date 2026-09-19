@@ -395,3 +395,65 @@ describe('DurableLead 业务续租生产半(B2a: task.progress → 密封 task.l
     expect(lead.snapshot(taskId)?.renewalSeq).toBe(2);
   });
 });
+
+describe('DurableLead owner 强制改派适配器(E3/OWNER-COMMAND §4.4: redispatch 镜像 cancel,单任务 CAS 事务)', () => {
+  it('redispatch 经单任务 CAS 事务:running→reclaiming 原子提交 state + task.cancel + reclaiming 上报修订,并持久排除当前 target', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    expect(f.lead.redispatch(taskId, now)).toBe(true); // 状态净变化
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'reclaiming', target: EXEC, excluded: { [EXEC]: 'once' } });
+    expect(f.outputs('task.cancel').at(-1)).toMatchObject({ to: { node_id: EXEC }, task_id: taskId, attempt: 1, body: { reason: 'reclaim' } });
+    expect(f.reports().map((r) => [r.status, r.task_seq])).toEqual([['offered', 1], ['running', 2], ['reclaiming', 3]]);
+  });
+
+  it('redispatch 后 drain 经 tick → 选择器收到排除快照 → 改派到不同节点(EXEC2),绝不回原节点', () => {
+    const selectTarget = vi.fn(() => ({ target: EXEC2, offerBody: offerBody() }));
+    const f = setup({ selectTarget });
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    f.lead.redispatch(taskId, now); // running→reclaiming, excluded[EXEC]='once'
+    now += DEFAULT_PARAMS.drainMs;
+    f.lead.tick(now); // drain→预算→requestDispatch→选择器→redispatch attempt2
+    expect(selectTarget).toHaveBeenCalledWith(expect.objectContaining({ task_id: taskId, nextAttempt: 2, excluded: { [EXEC]: 'once' } }));
+    expect(f.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 2, target: EXEC2 });
+  });
+
+  it('redispatch 幂等(§1.7 at-least-once):重复应用第二次 no-op,不产重复 task.cancel/上报修订/不推 task_seq', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    f.deliver(receipt('task.accept', taskId, 1, { lease_ms: LEASE }));
+    expect(f.lead.redispatch(taskId, now)).toBe(true);
+    const cancels = f.outputs('task.cancel').length;
+    const reports = f.reports().length;
+    const seq = f.lead.snapshot(taskId)?.task_seq;
+    expect(f.lead.redispatch(taskId, now)).toBe(false); // reclaiming→no-op,无净变化,不提交
+    expect(f.outputs('task.cancel')).toHaveLength(cancels);
+    expect(f.reports()).toHaveLength(reports);
+    expect(f.lead.snapshot(taskId)?.task_seq).toBe(seq);
+  });
+
+  it('redispatch 对未 originate 的任务抛出(不静默伪造改派)', () => {
+    const f = setup();
+    expect(() => f.lead.redispatch(newId(), now)).toThrow('not originated');
+  });
+
+  it('redispatch 对损坏持久状态 fail-closed(recovery required),绝不伪造改派', () => {
+    const f = setup();
+    const taskId = newId();
+    f.lead.originate(taskId, 'aid');
+    f.lead.dispatch(taskId, EXEC, offerBody());
+    const key = leadStateKey(taskId);
+    const saved = f.runtime.state(key)!.value as Record<string, RuntimeJson>;
+    saved.state = 'bogus';
+    f.runtime.transition(key, f.runtime.state(key)!.revision, () => ({ state: saved as RuntimeJson }));
+    const lead = new DurableLead({ store: f.runtime, nodeId: LOCAL, teamId: TEAM, seal });
+    expect(() => lead.redispatch(taskId, now)).toThrow('recovery required');
+  });
+});

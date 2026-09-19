@@ -9,6 +9,7 @@ import { GatewayCore } from '../../gateway/src/core.js';
 import { InboxStore } from '../../gateway/src/mailbox.js';
 import { SqliteCustodyStore } from '../../gateway/src/custody-store.js';
 import { SqliteClaimStore } from '../../gateway/src/claim-store.js';
+import { SqliteCommandStore } from '../../registry/src/command-store.js';
 import type { EnvelopeV1 } from '@qlong/core';
 import { validateEnvelope } from '@qlong/core';
 import { WsGateway } from '../../gateway/src/ws.js';
@@ -139,6 +140,9 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
   // D1c:与 custody 并列的持久 claim 注册表(共享同一 storage)。generation 高水位跨中心重启单调,
   // 令归属仲裁可跨进程/跨重启判定(单 authority 也持久;多 authority 集群路由解禁见 d1d)。
   const claimRegistry = storage ? new SqliteClaimStore(storage) : undefined;
+  // E3:与 custody/claim 并列的持久 owner 命令队列(共享同一 storage)。owner 路由 enqueue 任务级
+  // cancel/redispatch 命令意图,牵头节点经 PULL 取回、事务化应用后 ack;无中心 SQLite 时 undefined → 路由 503。
+  const commandStore = storage ? new SqliteCommandStore(storage) : undefined;
   const gw = new WsGateway({
     core,
     custody,
@@ -187,6 +191,8 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     onPumpNotify: opts.relaySecret ? (toNodeId, generation) => gw.pumpNotify(toNodeId, generation) : undefined,
     // 投递结果查询(A2):接线中心 custody outcome();无中心 SQLite(ephemeral)时保持 undefined → 路由 503 失败关闭。
     deliveryOutcome: custody ? (fromNode, msgId) => custody.outcome(fromNode, msgId) : undefined,
+    // owner 命令通道(E3):接线中心持久命令队列;无中心 SQLite(ephemeral)时 undefined → 命令路由 503 失败关闭。
+    commandStore,
   });
 
   const sync = (): void => {

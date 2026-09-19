@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { createServer, type Server } from 'node:http';
 import {
   CUSTODY_FEATURES, MAX_TRANSPORT_BYTES, envelopeDigest, newId, newKeyPair, signEnvelope,
   type EnvelopeV1,
@@ -19,6 +20,7 @@ const tempBase = realpathSync(tmpdir());
 const roots = new Set<string>();
 const nodes = new Set<DurableNode>();
 const servers: WebSocketServer[] = [];
+const httpServers: Server[] = [];
 
 afterEach(async () => {
   for (const node of [...nodes].reverse()) {
@@ -30,6 +32,9 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   servers.length = 0;
+  for (const http of httpServers.splice(0)) {
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
   for (const root of roots) {
     if (dirname(root) !== tempBase || !basename(root).startsWith('qlong-durable-node-')) {
       throw new Error('Unsafe durable node test cleanup target');
@@ -155,6 +160,68 @@ async function fixture(options: FixtureOptions = {}) {
 const autoStored: FixtureOptions['onFrame'] = (frame, ws) => {
   if (frame.frame === 'envelope') write(ws, stored(frame.envelope as EnvelopeV1));
 };
+
+/**
+ * 最小 owner 命令中心(E3c 测试装置):镜像 SqliteCommandStore 的节点侧 HTTP 契约(OWNER-COMMAND §4.3),供
+ * createDurableNode 的 pullCommands 经真实 HTTP 拉取/确认。维护 pending/acked 队列 + 记录 ack,并可注入
+ * GET/ack 失败以验证 at-least-once/幂等/传输韧性。只服务 lead=指定 node 的命令(跨节点防越权由中心侧 e3a 固化)。
+ */
+interface CenterCommand {
+  id: string; team_id: string; lead: string; task_id: string;
+  kind: 'cancel' | 'redispatch'; status: 'pending' | 'acked'; created_at: string; acked_at?: string;
+}
+
+async function startCommandCenter(nodeId: string, teamId: string, nodeToken = 'test-only') {
+  const commands: CenterCommand[] = [];
+  const acks: string[] = [];
+  let failGets = false;
+  let failAcks = false;
+  const server = createServer((req, res) => {
+    const path = (req.url ?? '').split('?')[0]!;
+    const send = (status: number, body: unknown): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.headers.authorization !== 'Bearer ' + nodeToken) { send(401, { error: 'unauthorized' }); return; }
+    if (req.method === 'GET' && path === '/v1/nodes/me/commands') {
+      if (failGets) { send(503, { error: 'center down' }); return; }
+      send(200, { commands: commands.filter((c) => c.lead === nodeId && c.status === 'pending') });
+      return;
+    }
+    const ack = /^\/v1\/nodes\/me\/commands\/([^/]+)\/ack$/.exec(path);
+    if (req.method === 'POST' && ack) {
+      if (failAcks) { send(500, { error: 'ack down' }); return; }
+      const cmd = commands.find((c) => c.id === decodeURIComponent(ack[1]!) && c.lead === nodeId && c.status === 'pending');
+      if (!cmd) { send(200, { ok: false }); return; }
+      cmd.status = 'acked';
+      cmd.acked_at = new Date().toISOString();
+      acks.push(cmd.id);
+      send(200, { ok: true });
+      return;
+    }
+    // start() 的 reportCaps(PUT /v1/nodes/me/caps)与默认上报汇(POST /v1/teams/:id/tasks):一律 200 消噪。
+    if (req.method === 'PUT' || req.method === 'POST') { send(200, {}); return; }
+    send(404, {});
+  });
+  httpServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  return {
+    url: `http://127.0.0.1:${port}`,
+    acks,
+    get pending(): CenterCommand[] { return commands.filter((c) => c.status === 'pending'); },
+    enqueue(task_id: string, kind: 'cancel' | 'redispatch'): CenterCommand {
+      const cmd: CenterCommand = {
+        id: newId(), team_id: teamId, lead: nodeId, task_id, kind,
+        status: 'pending', created_at: new Date().toISOString(),
+      };
+      commands.push(cmd);
+      return cmd;
+    },
+    setFailGets: (v: boolean): void => { failGets = v; },
+    setFailAcks: (v: boolean): void => { failAcks = v; },
+  };
+}
 
 describe('DurableNode v2 task loop', () => {
   it('accepts a live offer, runs the fenced driver and releases custody after stored', async () => {
@@ -468,6 +535,154 @@ describe('DurableNode v2 cross-machine lead takeover (C2d)', () => {
     expect(target.lead.snapshot(taskId)).toMatchObject({ state: 'offered', attempt: 3, task_seq: 3 });
     // The taken-over task never engaged this node's executor slot.
     expect(target.executor.snapshot().slot).toBeNull();
+  });
+});
+
+describe('DurableNode v2 owner command PULL (E3c)', () => {
+  const ledOffer = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    ({ kind: 'aid', summary: 'led task', offer_ttl_ms: 30_000, lease_ms: 60_000, ...over });
+
+  // Drive a led task to 'running' (originate → dispatch → peer accept), mirroring the B1d lead-role test.
+  async function leadToRunning(node: DurableNode, f: Awaited<ReturnType<typeof fixture>>, taskId: string): Promise<void> {
+    node.lead.originate(taskId, 'aid');
+    node.lead.dispatch(taskId, f.peerId, ledOffer());
+    await wait(() => expect(f.sent('task.offer')).toHaveLength(1));
+    f.send(delivery(f.signPeer({ type: 'task.accept', task_id: taskId, attempt: 1 }, { lease_ms: 60_000 })));
+    await wait(() => expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running' }));
+  }
+
+  it('pullCommands() applies an owner cancel through lead.cancel (transactional) and acks it once', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({ registryUrl: center.url, validateAcceptance: () => true, commandIntervalMs: 0 });
+    await node.start();
+    const taskId = newId();
+    await leadToRunning(node, f, taskId);
+
+    const cmd = center.enqueue(taskId, 'cancel');
+    await node.pullCommands();
+
+    // Transactional apply via lead.cancel: the state transition commits synchronously (single-task CAS).
+    expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'cancelling' });
+    expect(center.acks).toEqual([cmd.id]); // acked exactly once, after the apply committed
+    await wait(() => expect(f.sent('task.cancel')).toHaveLength(1)); // pump flushes the sealed cancel
+    expect(f.sent('task.cancel')[0]!.body.reason).toBe('user');
+  });
+
+  it('pullCommands() applies an owner redispatch through lead.redispatch, excluding the current target, and acks it', async () => {
+    const EXEC2 = newId();
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({
+      registryUrl: center.url, validateAcceptance: () => true, commandIntervalMs: 0,
+      selectTarget: () => ({ target: EXEC2, offerBody: ledOffer({ summary: 'redispatched' }) }),
+    });
+    await node.start();
+    const taskId = newId();
+    await leadToRunning(node, f, taskId);
+
+    const cmd = center.enqueue(taskId, 'redispatch');
+    await node.pullCommands();
+
+    const snap = node.lead.snapshot(taskId)!;
+    expect(snap.state).toBe('reclaiming'); // redispatchByOwner → beginReclaim (transactional)
+    expect(snap.excluded[f.peerId]).toBe('once'); // current target excluded so re-dispatch avoids it
+    expect(center.acks).toEqual([cmd.id]);
+    await wait(() => expect(f.sent('task.cancel')).toHaveLength(1));
+    expect(f.sent('task.cancel')[0]!.body.reason).toBe('reclaim');
+  });
+
+  it('pullCommands() acks-and-discards a command for a task it does not lead, without faulting the node', async () => {
+    const onFault = vi.fn();
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({ registryUrl: center.url, onFault, commandIntervalMs: 0 });
+    await node.start();
+
+    // A command for a task never originated here: lead.cancel would throw → checked → fail-close the WHOLE node.
+    const foreign = newId();
+    const cmd = center.enqueue(foreign, 'cancel');
+    await node.pullCommands();
+
+    expect(onFault).not.toHaveBeenCalled(); // ledByUs pre-check avoided routing a stale command into lead.cancel
+    expect(node.client.state).not.toBe('closed');
+    expect(node.lead.snapshot(foreign)).toBeNull(); // never touched
+    expect(center.acks).toEqual([cmd.id]); // stale command discarded (acked) so it is not re-pulled forever
+  });
+
+  it('pullCommands() leaves an unacked command pending and re-applies it idempotently (at-least-once)', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({ registryUrl: center.url, validateAcceptance: () => true, commandIntervalMs: 0 });
+    await node.start();
+    const taskId = newId();
+    await leadToRunning(node, f, taskId);
+
+    const cmd = center.enqueue(taskId, 'cancel');
+    center.setFailAcks(true); // ack lost → the command stays pending at the center (durable until acked)
+    await node.pullCommands();
+    const first = node.lead.snapshot(taskId)!;
+    expect(first.state).toBe('cancelling');
+    expect(center.acks).toEqual([]);
+    expect(center.pending.map((c) => c.id)).toEqual([cmd.id]); // still pending
+
+    await node.pullCommands(); // re-pull the same pending command → cancelByUser no-ops on 'cancelling'
+    const second = node.lead.snapshot(taskId)!;
+    expect(second.task_seq).toBe(first.task_seq); // no duplicate revision from the re-apply (idempotent)
+    expect(second.state).toBe('cancelling');
+
+    center.setFailAcks(false);
+    await node.pullCommands(); // the ack finally lands; the command leaves the pending set
+    expect(center.acks).toEqual([cmd.id]);
+    expect(center.pending).toEqual([]);
+  });
+
+  it('start() wires the command pump so a command enqueued while offline is applied after restart', async () => {
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({ registryUrl: center.url, validateAcceptance: () => true, commandIntervalMs: 0 });
+    await node.start();
+    const taskId = newId();
+    await leadToRunning(node, f, taskId);
+    await node.stop();
+
+    // Owner cancels while the node is offline: the command persists at the center (§1.1 durability).
+    const cmd = center.enqueue(taskId, 'cancel');
+    expect(center.pending.map((c) => c.id)).toEqual([cmd.id]);
+
+    // Restart on the same runtime with the command pump enabled: the periodic pull applies the pending command.
+    const reopened = await f.makeNode({
+      registryUrl: center.url, validateAcceptance: () => true, commandIntervalMs: 30,
+      storage: {
+        allowedBase: f.root, dataDir: f.dataDir, mode: 'open', filename: 'runtime.sqlite',
+        localFilesystemConfirmed: true, windowsAclConfirmed: true, busyTimeoutMs: 25,
+      },
+    });
+    await reopened.start();
+    await wait(() => expect(reopened.lead.snapshot(taskId)).toMatchObject({ state: 'cancelling' }));
+    await wait(() => expect(center.acks).toEqual([cmd.id]));
+  });
+
+  it('pullCommands() survives a center GET failure without faulting and applies on the next pull', async () => {
+    const onFault = vi.fn();
+    const f = await fixture({ onFrame: autoStored });
+    const center = await startCommandCenter(f.identity.node_id, f.identity.team_id);
+    const node = await f.makeNode({ registryUrl: center.url, onFault, validateAcceptance: () => true, commandIntervalMs: 0 });
+    await node.start();
+    const taskId = newId();
+    await leadToRunning(node, f, taskId);
+
+    const cmd = center.enqueue(taskId, 'cancel');
+    center.setFailGets(true); // center transiently unavailable
+    await node.pullCommands();
+    expect(onFault).not.toHaveBeenCalled(); // transport failure is retryable, never a node fault
+    expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'running' }); // not applied
+    expect(center.pending.map((c) => c.id)).toEqual([cmd.id]);
+
+    center.setFailGets(false);
+    await node.pullCommands(); // next pull retries and succeeds
+    expect(node.lead.snapshot(taskId)).toMatchObject({ state: 'cancelling' });
+    expect(center.acks).toEqual([cmd.id]);
   });
 });
 
