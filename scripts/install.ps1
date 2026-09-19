@@ -7,6 +7,7 @@ param(
   [string]$EnrollToken,
   [string]$InstallDir = "$env:LOCALAPPDATA\qlong",
   [string]$Version = $env:QLONG_VERSION,
+  [string]$DshVersion = $env:QLONG_DSH_VERSION,
   [string]$DistBase = $env:QLONG_DIST_URL,
   [switch]$Uninstall
 )
@@ -117,6 +118,20 @@ if ($env:QLONG_STORAGE_MODE -and $env:QLONG_LOCAL_FS_CONFIRMED -eq '1') {
 # 装完即在线验收(I-22 清单)
 Write-Host ">>> 验收入网状态..."
 & "$InstallDir\qlong.cmd" status
+
+# dsh 运行时安装(单机的龙 = 完整 dsh 运行时):固定版本全局安装,任务时不再临时拉包
+if ($DshVersion) {
+  Write-Host ">>> 安装 dsh 运行时 @ $DshVersion(npm 全局)..."
+  npm install -g "@deepseek-ai/dsh@$DshVersion"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "!!! dsh 运行时安装失败(检查 node/npm 与网络);任务将退回 npx 临时通道" -ForegroundColor Yellow
+  } else {
+    $dshMarker = "$env:USERPROFILE\.qlong\dsh.json"
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.qlong" | Out-Null
+    Write-Output ('{"cmd":"dsh","version":"' + $DshVersion + '"}') | Out-File -Encoding utf8 $dshMarker
+    Write-Host ">>> dsh 运行时就绪($DshVersion;qlong run 自动使用本地运行时)"
+  }
+}
 
 # 用户 PATH 注册:新开终端后可直接 `qlong ...`(幂等;已含则不动)
 $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')

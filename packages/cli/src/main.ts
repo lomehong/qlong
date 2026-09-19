@@ -13,7 +13,8 @@ import { joinAndSave, qlongHome, readConfig } from './join.js';
 import { QLONG_USER_AGENT } from '@qlong/core';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
-import { basename, dirname, isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
+import { readLocalDshCmd } from './dsh-cmd.js';
 
 try {
   assertNodeRuntime(process.versions.node);
@@ -161,6 +162,8 @@ if (cmd === 'run') {
   const { FencedWorkspace } = await import('../../node/src/collab/workspace.js');
   const { PersistentRunHandleStore } = await import('../../node/src/runtime/run-handles.js');
   const { loadIdentity } = await import('../../node/src/identity.js');
+  // 单机的龙 = 完整 dsh 运行时:安装器写入 dsh.json 后优先本地运行时(离线可用、版本固定)
+  { const localDsh = readLocalDshCmd(home); if (localDsh) process.env.DSH_HARNESS_CMD = localDsh; }
   // ---- 第 2 步:牵头生产链路旗标(--originate / --auto-select / --takeover)----
   const sflag = (name: string, def?: string): string | undefined => {
     const i = process.argv.indexOf(name);
@@ -349,6 +352,53 @@ if (cmd === 'lead') {
       console.log('提示:重派需节点以 --auto-select(或 --originate)运行以获得目录驱动选择器');
     }
   } finally { store.close(); }
+}
+
+if (cmd === 'solo') {
+  // 单机形态(愿景:一条龙独立干活):零令牌、零入网、零外部中心 —— 一条命令独立干活。
+  // 用法: qlong solo --summary "任务书" [--kind aid|project] [--timeout-ms 600000]
+  //       qlong solo --originate task.json
+  const sflag = (name: string, def?: string): string | undefined => {
+    const i = process.argv.indexOf(name);
+    return i > 0 ? process.argv[i + 1] : def;
+  };
+  const taskFile = sflag('--originate');
+  const kindArg = (sflag('--kind') ?? 'aid');
+  if (kindArg !== 'aid' && kindArg !== 'project') {
+    console.error('--kind 必须为 aid 或 project');
+    process.exit(2);
+  }
+  let kind = kindArg as 'aid' | 'project';
+  let summary = sflag('--summary') ?? '';
+  if (taskFile !== undefined) {
+    const t = JSON.parse((await import('node:fs')).readFileSync(taskFile, 'utf8')) as Record<string, unknown>;
+    if (t.kind !== undefined) {
+      if (t.kind !== 'aid' && t.kind !== 'project') { console.error('--originate 文件 kind 必须为 aid 或 project'); process.exit(2); }
+      kind = t.kind as 'aid' | 'project';
+    }
+    if (typeof t.summary === 'string' && t.summary.length > 0) summary = t.summary;
+  }
+  if (summary.trim().length === 0) {
+    console.error('用法: qlong solo --summary "<任务书>" [--kind aid|project] [--timeout-ms 600000]');
+    console.error('      qlong solo --originate task.json');
+    console.error('单机形态:无需入网/令牌/中心,一条龙独立执行(真实 dsh)。');
+    process.exit(2);
+  }
+  const { runSolo } = await import('./solo.js');
+  console.log('单机模式启动:', kind, '|', summary.slice(0, 40) + (summary.length > 40 ? '…' : ''));
+  const timeoutMs = Number(sflag('--timeout-ms', '600000'));
+  const r = await runSolo({
+    kind,
+    summary,
+    dataDir: join(qlongHome(), 'solo', 'data'),
+    timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : 600_000,
+  });
+  console.log('任务状态:', r.state, '| attempt:', r.attempt, '| task:', r.taskId.slice(0, 8));
+  if (r.resultBody && typeof (r.resultBody as { summary?: unknown }).summary === 'string') {
+    console.log('执行结果:', (r.resultBody as { summary: string }).summary);
+  }
+  process.exitCode = r.state === 'done' ? 0 : 1;
+  // 自然排空退出(不 process.exit,同 enroll 注)
 }
 
 if (cmd === 'server') {
@@ -588,8 +638,8 @@ if (cmd === 'doctor') {
 }
 
 // 已匹配命令的块走"自然排空退出"(见 enroll 注);仅未知命令落到这里。
-const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate'];
+const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate', 'solo'];
 if (!KNOWN_COMMANDS.includes(cmd)) {
-  console.log('usage: qlong <demo|takeover|enroll|join|run|service|server|doctor|status|tasks|task|lead|migrate>');
+  console.log('usage: qlong <demo|takeover|enroll|join|run|solo|service|server|doctor|status|tasks|task|lead|migrate>');
   process.exit(2);
 }

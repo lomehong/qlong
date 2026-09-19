@@ -128,6 +128,19 @@ else
   echo "    或手动: qlong service install --storage-mode open --confirm-local-filesystem"
 fi
 
+# dsh 运行时安装(QLONG_DSH_VERSION 设置时):固定版本全局安装
+if [ -n "$QLONG_DSH_VERSION" ]; then
+  echo ">>> 安装 dsh 运行时 @ $QLONG_DSH_VERSION(npm 全局)..."
+  if npm install -g "@deepseek-ai/dsh@$QLONG_DSH_VERSION"; then
+    mkdir -p "$HOME/.qlong"
+    printf '{"cmd":"dsh","version":"%s"}
+' "$QLONG_DSH_VERSION" > "$HOME/.qlong/dsh.json"
+    echo ">>> dsh 运行时就绪($QLONG_DSH_VERSION;qlong run 自动使用本地运行时)"
+  else
+    echo "!!! dsh 运行时安装失败(检查 node/npm 与网络);任务将退回 npx 临时通道"
+  fi
+fi
+
 # PATH 提示:~/.local/bin 在部分发行版缺省不在 PATH
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

@@ -29,6 +29,8 @@ export interface ServerHandles {
   auth: import('../../registry/src/auth.js').AuthService;
   /** 集群路由器(设置 clusterSecret 后存在;02 §12.1) */
   readonly cluster?: GatewayCluster;
+  /** 注册中心实例(qlong solo 自动入网用) */
+  readonly registry: Registry;
   /** 最近一次 GC 结果(运营观测) */
   readonly lastGc: { removedOrphanTeams: number; revokedOfflineNodes: number };
 }
@@ -249,7 +251,7 @@ async function startServices(opts: ServerOptions, storage?: SqliteStore): Promis
     // A corrupt tombstone faults prune(), which guarded() turns into a fail-closed shutdown.
     if (gcIntervalMs > 0) gcTimer = setInterval(guarded(() => { gcResult = registry.gc(); custody?.prune(Date.now()); }), gcIntervalMs);
     return {
-      registryPort, gatewayPort, gatewayPath: opts.gatewayPath, auth, cluster, close,
+      registryPort, gatewayPort, gatewayPath: opts.gatewayPath, auth, cluster, registry, close,
       storageMode: storage ? 'sqlite' : 'ephemeral',
       get lastGc() { return gcResult; },
     };
