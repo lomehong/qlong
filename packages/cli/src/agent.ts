@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildHarnessCommand } from '../../node/src/driver/harness-driver.js';
 import { resolveLocalDshRuntime } from './dsh-cmd.js';
+import { AcpClient } from './acp.js';
 
 export interface AgentTurnResult {
   code: number;
@@ -38,6 +39,12 @@ export interface AgentSessionOptions {
   write?: (text: string) => void;
   /** 单轮执行注入(测试):收到完整参数,返回 NDJSON 事件行;缺省真实 spawn */
   dshTurn?: (args: string[], cwd: string | undefined) => Promise<{ code: number; lines: string[] }>;
+  /**
+   * 传输通道:acp = dsh 常驻 ACP 服务器(真流式,~2s/轮,默认);
+   * headless = 每轮冷启动 dsh headless(批量事件,~15s/轮)。
+   * 显式指定优先;缺省自动探测(本地 dsh 运行时可用 → acp,否则 headless)。
+   */
+  transport?: 'acp' | 'headless';
 }
 
 /** 解析一条 NDJSON 事件并渲染;返回需要会话层记录的字段。 */
@@ -187,16 +194,36 @@ export async function runAgentSession(opts: AgentSessionOptions): Promise<number
   const base = baseInvocation(opts.dshCmd, opts.profile ?? 'headless');
   let sessionId = readSessionId(opts.workdir);
 
-  write(`🐉 龙 Agent 就绪(工作区 ${opts.workdir})\n`);
-  write(`   直接输入目标;dsh 运行时流式执行,上下文跨行连续;exit / Ctrl+D 结束。\n\n`);
+  // 传输通道:默认 acp(dsh 常驻 ACP server,真流式 ~2s/轮);本地运行时不可用 → headless
+    // 注入 dshTurn(测试)默认 headless;生产缺省自动探测(本地 dsh 运行时可用 → acp)
+  const transport = opts.transport ?? (opts.dshTurn !== undefined ? 'headless' : resolveLocalDshRuntime() !== undefined ? 'acp' : 'headless');
+  let acp: AcpClient | undefined;
+  let acpSessionId: string | undefined;
 
-  for (;;) {
-    write('龙> ');
-    const line = (await readLine())?.trim() ?? '';
-    if (line === null || line === '') continue;
-    if (line === 'exit' || line === 'quit' || line === '退出') { write('再见。\n'); return 0; }
-
-    const args = buildTurnArgs(base, sessionId, line);
+  const runTurn = async (task: string): Promise<void> => {
+    if (transport === 'acp') {
+      if (acp === undefined) {
+        const rt = resolveLocalDshRuntime();
+        if (rt === undefined) throw new Error('本地 dsh 运行时不可用');
+        acp = new AcpClient({ dshBin: rt.binJs, profile: 'acp', cwd: opts.workdir, onStderr: (t) => process.stderr.write(t) },
+          (update, sid) => {
+            acpSessionId = sid;
+            const u = update as { sessionUpdate?: string; content?: { text?: string } };
+            if (u.sessionUpdate === 'agent_message_chunk' && typeof u.content?.text === 'string') {
+              write(u.content.text);
+            }
+          });
+      }
+      if (acpSessionId === undefined) {
+        write('🔌 连接 dsh ACP 运行时…\n');
+        acpSessionId = await acp.connect();
+      }
+      write('⏳ 执行中…\n');
+      await acp.prompt(acpSessionId, task);
+      write('\n');
+      return;
+    }
+    const args = buildTurnArgs(base, sessionId, task);
     write('⏳ 执行中…\n');
     const turn = await dshTurn(args, opts.workdir);
     if (turn.sessionId && turn.sessionId !== sessionId) {
@@ -205,5 +232,30 @@ export async function runAgentSession(opts: AgentSessionOptions): Promise<number
     }
     if (turn.code !== 0) write(`⚠️ dsh 退出码 ${turn.code}\n`);
     else write('✔ 完成\n');
+  };
+
+  const shutdownAgent = (): void => {
+    if (acp !== undefined) { acp.stop(); acp = undefined; }
+  };
+
+  write(`🐉 龙 Agent 就绪(工作区 ${opts.workdir})\n`);
+  write(`   直接输入目标;${transport === 'acp' ? 'dsh ACP 运行时流式执行,上下文跨行连续' : 'dsh 运行时执行,上下文跨行连续'};exit / Ctrl+D 结束。\n\n`);
+
+  for (;;) {
+    write('龙> ');
+    const raw = await readLine();
+    if (raw === null) { shutdownAgent(); write('会话结束。\n'); return 0; } // EOF:正确收口,绝不空转
+    const line = raw.trim();
+    if (line === '') continue;
+    if (line === 'exit' || line === 'quit' || line === '退出') { shutdownAgent(); write('再见。\n'); return 0; }
+
+    try {
+      await runTurn(line);
+      if (transport === 'headless' && sessionId !== undefined) writeSessionId(opts.workdir, sessionId);
+    } catch (e) {
+      shutdownAgent();
+      write(`⚠️ ${e instanceof Error ? e.message : e}\n`);
+      if (transport === 'acp') return 1; // ACP server 挂了:本会话终止(下轮启动重连)
+    }
   }
 }
