@@ -14,7 +14,7 @@ import { QLONG_USER_AGENT } from '@qlong/core';
 import { serviceDefinition, serviceInstall, serviceUninstall, type ServicePlatform } from './service.js';
 import { assertNodeRuntime, MIN_NODE_MAJOR } from './runtime.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { readLocalDshCmd } from './dsh-cmd.js';
 
 try {
@@ -423,6 +423,45 @@ if (cmd === 'agent') {
   // 自然排空退出
 }
 
+if (cmd === 'tui') {
+  // 单机交互形态①:dsh-TUI 官方收录插件(Claude Code 风,流式思考/回溯/TPS)。
+  // 首次运行自动自举:npm i -g @deepseek-harness-tui/dsh-tui → 其 bin 自委托
+  // dsh plugin --profile dsh-tui add <包>(dsh-TUI 双态启动器原生能力)。
+  const { execSync } = await import('node:child_process');
+  const dshTuiBin = ((): string | undefined => {
+    try {
+      const root = execSync('npm root -g', { encoding: 'utf8', timeout: 10_000 }).trim();
+      const pkgDir = join(root, '@deepseek-harness-tui', 'dsh-tui');
+      const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { bin?: Record<string, string> };
+      const bin = pkg.bin?.dst ?? pkg.bin?.['dsh-tui'];
+      const p = bin !== undefined ? join(pkgDir, bin) : '';
+      return p !== '' && existsSync(p) ? p : undefined;
+    } catch { return undefined; }
+  })();
+  const bin = dshTuiBin ?? join(qlongHome(), 'dsh-tui.js');
+  if (dshTuiBin === undefined) {
+    console.log('>>> 首次运行:安装 dsh-TUI 插件(npm 全局)…');
+    try {
+      execSync('npm install -g @deepseek-harness-tui/dsh-tui', { stdio: 'inherit', timeout: 300_000 });
+      mkdirSync(dirname(bin), { recursive: true });
+      const root = execSync('npm root -g', { encoding: 'utf8', timeout: 10_000 }).trim();
+      copyFileSync(join(root, '@deepseek-harness-tui', 'dsh-tui', 'bin', 'dsh-tui.js'), bin);
+    } catch (e) {
+      console.error('dsh-TUI 安装失败:', e instanceof Error ? e.message : e);
+      console.error('请手动安装:npm install -g @deepseek-harness-tui/dsh-tui');
+      process.exit(1);
+    }
+  }
+  // 委托执行(交互式 TUI,继承 stdio)
+  const { spawn } = await import('node:child_process');
+  const exitCode = await new Promise<number>((resolve) => {
+    const child = spawn(process.execPath, [bin], { stdio: 'inherit' });
+    child.on('close', (c) => resolve(c ?? 0));
+    child.on('error', (e) => { console.error('dsh-TUI 启动失败:', e.message); resolve(1); });
+  });
+  process.exitCode = exitCode;
+}
+
 if (cmd === 'server') {
   const { startQlongServer } = await import('./server.js');
   const { serverStorageOptions } = await import('./server-storage-options.js');
@@ -660,8 +699,8 @@ if (cmd === 'doctor') {
 }
 
 // 已匹配命令的块走"自然排空退出"(见 enroll 注);仅未知命令落到这里。
-const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'solo', 'agent', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate'];
+const KNOWN_COMMANDS = ['demo', 'takeover', 'enroll', 'join', 'run', 'solo', 'agent', 'tui', 'service', 'server', 'doctor', 'status', 'tasks', 'task', 'lead', 'migrate'];
 if (!KNOWN_COMMANDS.includes(cmd)) {
-  console.log('usage: qlong <demo|takeover|enroll|join|run|solo|agent|service|server|doctor|status|tasks|task|lead|migrate>');
+  console.log('usage: qlong <demo|takeover|enroll|join|run|solo|agent|tui|service|server|doctor|status|tasks|task|lead|migrate>');
   process.exit(2);
 }

@@ -7,6 +7,7 @@ import { SESSION_COOKIE, AuthError, type SessionRecord } from './auth.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError } from './errors.js';
 import { isUuid } from '@qlong/core';
+import { join } from 'node:path';
 import type { NodeRecord, Registry } from './directory.js';
 
 export interface RegistryServerOptions {
@@ -240,6 +241,30 @@ export function createRegistryServer(opts: RegistryServerOptions): Server {
         if (bucket.count > enrollLimit) {
           throw new ApiError('rate_limited', '注册请求过于频繁', 429, true);
         }
+      }
+
+      // ---- 个性化安装脚本(单行安装体验):/install/<agentType>/<token> ----
+      // 实时生成嵌入邀请码的 install.ps1;用户复制一行 `irm …/install/<agentType>/<token> | iex` 即可
+      if (method === 'GET' && seg[0] === 'install' && seg.length === 3 && seg[1] !== 'sh' && seg[1] !== 'ps1' && opts.distDir) {
+        const agentType = seg[1]!;
+        const enrollToken = seg[2]!;
+        if (!['dsh', 'omp'].includes(agentType)) {
+          sendJson(res, 404, { error: { code: 'not_found', message: 'unknown agent type' } });
+          return;
+        }
+        try {
+          const { readFile } = await import('node:fs/promises');
+          const templatePath = join(opts.distDir, 'latest', 'install.ps1');
+          const template = await readFile(templatePath, 'utf8');
+          // 剥掉 param() 块 —— 个性化值在顶部硬编码,优先级高于任何默认
+          const stripped = template.replace(/\(\s*param\([\s\S]*?\)\s*\)/, '');
+          const personalized = `# qlong 个性化安装(邀请码已嵌入,一次性/30 分钟有效)\n$EnrollToken = '${enrollToken}'\n$AgentType = '${agentType}'\n\n` + stripped;
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(personalized);
+        } catch {
+          sendJson(res, 500, { error: { code: 'internal_error', message: 'install template not found' } });
+        }
+        return;
       }
 
       // ---- 书坊静态分发(纪要 §3 第三服务;路径穿越防护:P12)----
