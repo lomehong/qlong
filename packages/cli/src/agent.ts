@@ -50,6 +50,10 @@ export function renderDshEvent(line: string, write: (t: string) => void): { sess
     return {}; // 非事件行(诊断输出)→ 忽略
   }
   if (ev.type === 'session' && typeof ev.sessionId === 'string') return { sessionId: ev.sessionId };
+  if (ev.type === 'thinking' && typeof ev.text === 'string' && ev.text.length > 0) {
+    write(`\n—— 思考 ——\n${ev.text}\n———\n`);
+    return {};
+  }
   if (ev.type === 'text' && typeof ev.text === 'string') { write(ev.text); return {}; }
   if (ev.type === 'final' && typeof ev.text === 'string') { write('\n'); return { finalText: ev.text }; }
   if (ev.type === 'status' && ev.phase === 'step_end' && ev.usage) {
@@ -70,20 +74,41 @@ function defaultDshTurn(cmd: string, args: string[], cwd: string | undefined, wr
       write(`\n⚠️ 单轮超时(${Math.round(timeoutMs / 1000)}s),终止本次执行\n`);
       child.kill();
     }, timeoutMs);
+    // dsh headless 在模型生成期不发任何事件(实测:启动事件 ~1s,其余在完成时批量到达)
+    // —— 等待期计时器让"活着"可见;首个事件到达即停表换行,不与内容互相穿插
+    let ticker: NodeJS.Timeout | undefined;
+    let elapsed = 0;
+    let contentStarted = false;
+    ticker = setInterval(() => {
+      elapsed += 3;
+      write(`\r⏳ 执行中 ${elapsed}s`);
+    }, 3000);
+    const writeOnce = (t: string): void => {
+      if (!contentStarted) {
+        if (ticker) clearInterval(ticker);
+        ticker = undefined;
+        contentStarted = true;
+        write('\n');
+      }
+      write(t);
+    };
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (l) => {
-      const r = renderDshEvent(l, write);
+      const r = renderDshEvent(l, writeOnce);
       if (r.sessionId) sessionId = r.sessionId;
       if (r.finalText !== undefined) finalText = r.finalText;
     });
     child.stderr.on('data', (c: Buffer) => process.stderr.write(c));
     child.on('error', (e) => {
       clearTimeout(timer);
+      if (ticker) clearInterval(ticker);
       write(`dsh 启动失败:${e.message}\n`);
       resolve({ code: 127 });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (ticker) clearInterval(ticker);
+      if (!contentStarted) write('\n');
       resolve({ code: code ?? 0, sessionId, finalText });
     });
   });
