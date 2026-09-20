@@ -73,7 +73,22 @@ async function writeRelease(dir) {
     chmodSync(fp, 0o755);
   }
   // windows:cmd 垫片(经 PATH 调用本机 node)
-  writeFileSync(join(dir, 'qlong-win-x64.cmd'), '@echo off\r\nnode "%~dp0qlong-cli.mjs" %*\r\n');
+  // 双态启动器(dsh-TUI 同构思路):垫片优先委托版本化目录里的完整副本;
+  // 安装器更新 = 下载新版本子目录 + 原子改写 current.txt,垫片永不随版本漂移
+  const winShim = [
+    '@echo off',
+    'set "SELF_DIR=%~dp0"',
+    'if exist "%SELF_DIR%current.txt" (',
+    '  set /p CUR_VER=<"%SELF_DIR%current.txt"',
+    '  if exist "%SELF_DIR%%CUR_VER%\\qlong-cli.mjs" (',
+    '    node "%SELF_DIR%%CUR_VER%\\qlong-cli.mjs" %*',
+    '    exit /b %ERRORLEVEL%',
+    '  )',
+    ')',
+    'node "%~dp0qlong-cli.mjs" %*',
+    '',
+  ].join('\r\n');
+  writeFileSync(join(dir, 'qlong-win-x64.cmd'), winShim);
 
   // 入口页(纪要 §4:https://qlong.qianji.io/install 的落地页;token 在控制台生成)
   writeFileSync(rel('install.html'), installHtml());

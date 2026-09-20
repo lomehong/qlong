@@ -40,27 +40,31 @@ if ($nodeMajor -lt 24) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# 下载发布物(评审 I-22):程序 bundle + 启动垫片,二者缺一不可
+# 下载发布物(评审 I-22;双态启动器):版本化子目录存完整副本 + current.txt 指针,
+# 垫片(qlong.cmd)常驻安装根、按指针委托 —— 升级只改指针,垫片永不随版本漂移
 $releaseBase = "$DistBase/releases/$Version"
 Write-Host ">>> 下载 qlong($Version)..."
-Invoke-WebRequest -Uri "$releaseBase/qlong-cli.mjs" -OutFile "$InstallDir\qlong-cli.mjs"
+New-Item -ItemType Directory -Force -Path "$InstallDir\$Version" | Out-Null
+Invoke-WebRequest -Uri "$releaseBase/qlong-cli.mjs" -OutFile "$InstallDir\$Version\qlong-cli.mjs"
 Invoke-WebRequest -Uri "$releaseBase/qlong-win-x64.cmd" -OutFile "$InstallDir\qlong.cmd"
 
 # 发布物校验(评审 I-16):对程序 bundle 做 SHA256 比对,不匹配即中止
 Write-Host ">>> 校验发布物..."
 $sumsUrl = "$releaseBase/SHA256SUMS.txt"
-$sumsPath = "$InstallDir\SHA256SUMS.txt"
+$sumsPath = "$InstallDir\$Version\SHA256SUMS.txt"
 try {
   Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath
   $expectedLine = (Get-Content $sumsPath) | Where-Object { $_ -match 'qlong-cli\.mjs' }
   $expected = ($expectedLine -split '\s+')[0]
-  $actual = (Get-FileHash -Algorithm SHA256 "$InstallDir\qlong-cli.mjs").Hash.ToLower()
+  $actual = (Get-FileHash -Algorithm SHA256 "$InstallDir\$Version\qlong-cli.mjs").Hash.ToLower()
   if ($expected -and $actual -ne $expected) {
     Write-Host ">>> 安装中止:发布物校验和不匹配(预期 $expected,实际 $actual)" -ForegroundColor Red
     Remove-Item "$InstallDir\qlong-cli.mjs", "$InstallDir\qlong.cmd", $sumsPath -ErrorAction SilentlyContinue
     exit 1
   }
   Write-Host ">>> 校验通过"
+  Set-Content -Path "$InstallDir\current.txt.new" -Value $Version -NoNewline
+  Move-Item -Path "$InstallDir\current.txt.new" -Destination "$InstallDir\current.txt" -Force
 } catch {
   Write-Host ">>> 警告:无法获取 SHA256SUMS.txt,跳过校验($($_.Exception.Message))"
 }
