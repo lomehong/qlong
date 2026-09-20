@@ -8,11 +8,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function readLocalDshCmd(home: string): string | undefined {
+  return readAgentRuntime(home)?.cmd;
+}
+
+/** 读 Agent 运行时描述(cmd + agent 类型;安装器按 AgentType 写入)。 */
+export function readAgentRuntime(home: string): { cmd: string; agent: string; version?: string } | undefined {
   try {
     // 兼容 PowerShell 5.1 Out-File utf8 写出的 BOM(首字节 EF BB BF 会噎死 JSON.parse)
     const raw = readFileSync(join(home, 'dsh.json'), 'utf8').replace(/^\uFEFF/, '');
-    const j = JSON.parse(raw) as { cmd?: string; version?: string };
-    return typeof j.cmd === 'string' && j.cmd.length > 0 ? j.cmd : undefined;
+    const j = JSON.parse(raw) as { cmd?: string; agent?: string; version?: string };
+    if (typeof j.cmd !== 'string' || j.cmd.length === 0) return undefined;
+    return { cmd: j.cmd, agent: j.agent ?? 'dsh', version: j.version };
   } catch {
     return undefined;
   }

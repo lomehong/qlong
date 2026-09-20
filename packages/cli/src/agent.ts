@@ -14,7 +14,7 @@ import { createInterface } from 'node:readline';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildHarnessCommand } from '../../node/src/driver/harness-driver.js';
-import { resolveLocalDshRuntime } from './dsh-cmd.js';
+import { readAgentRuntime, resolveLocalDshRuntime } from './dsh-cmd.js';
 import { AcpClient } from './acp.js';
 
 export interface AgentTurnResult {
@@ -45,6 +45,7 @@ export interface AgentSessionOptions {
    * 显式指定优先;缺省自动探测(本地 dsh 运行时可用 → acp,否则 headless)。
    */
   transport?: 'acp' | 'headless';
+  agentType?: 'dsh' | 'omp';
 }
 
 /** 解析一条 NDJSON 事件并渲染;返回需要会话层记录的字段。 */
@@ -122,12 +123,14 @@ function defaultDshTurn(cmd: string, args: string[], cwd: string | undefined, wr
 }
 
 /** 组装单轮参数:--json 事件流 + 会话续接 + 任务原文(prompt 恒在最后一位)。 */
-export function buildTurnArgs(base: { cmd: string; args: string[] }, sessionId: string | undefined, task: string): string[] {
+export function buildTurnArgs(base: { cmd: string; args: string[] }, sessionId: string | undefined, task: string, agentType = 'dsh'): string[] {
+  if (agentType === 'omp') return [...base.args, task];
   return [...base.args, '--json', ...(sessionId ? ['--session-id', sessionId] : []), task];
 }
 
 /** 基础调用(不含任务文本):本地安装的 dsh 运行时优先,缺省 npx 通道。 */
-function baseInvocation(dshCmd: string | undefined, profile: string): { cmd: string; args: string[] } {
+function baseInvocation(dshCmd: string | undefined, profile: string, agentType: string): { cmd: string; args: string[] } {
+  if (agentType === 'omp') return { cmd: dshCmd ?? 'omp', args: [] };
   if (dshCmd === 'dsh') {
     try {
       const root = execSync('npm root -g', { encoding: 'utf8', timeout: 10_000 }).trim();
@@ -191,12 +194,13 @@ export async function runAgentSession(opts: AgentSessionOptions): Promise<number
     }
   });
 
-  const base = baseInvocation(opts.dshCmd, opts.profile ?? 'headless');
+  const agentType = opts.agentType ?? 'dsh';
+  const base = baseInvocation(opts.dshCmd, opts.profile ?? 'headless', agentType);
   let sessionId = readSessionId(opts.workdir);
 
-  // 传输通道:默认 acp(dsh 常驻 ACP server,真流式 ~2s/轮);本地运行时不可用 → headless
+  // 传输通道:omp 只走 headless(无 --json/ACP);dsh 默认 acp(真流式)
     // 注入 dshTurn(测试)默认 headless;生产缺省自动探测(本地 dsh 运行时可用 → acp)
-  const transport = opts.transport ?? (opts.dshTurn !== undefined ? 'headless' : resolveLocalDshRuntime() !== undefined ? 'acp' : 'headless');
+  const transport = opts.transport ?? (agentType === 'omp' ? 'headless' : opts.dshTurn !== undefined ? 'headless' : resolveLocalDshRuntime() !== undefined ? 'acp' : 'headless');
   let acp: AcpClient | undefined;
   let acpSessionId: string | undefined;
 
@@ -223,7 +227,7 @@ export async function runAgentSession(opts: AgentSessionOptions): Promise<number
       write('\n');
       return;
     }
-    const args = buildTurnArgs(base, sessionId, task);
+    const args = buildTurnArgs(base, sessionId, task, agentType);
     write('⏳ 执行中…\n');
     const turn = await dshTurn(args, opts.workdir);
     if (turn.sessionId && turn.sessionId !== sessionId) {
